@@ -41,10 +41,8 @@ function postedEvent(params?: {
 function startMonitor(
   queue: MattermostIngressQueue,
   dispatch: MattermostIngressDispatch,
-  accountId = "default",
 ) {
   return createMattermostIngressMonitor({
-    accountId,
     queue,
     dispatch,
     runtime: { error: vi.fn(), log: vi.fn() },
@@ -159,8 +157,8 @@ describe("Mattermost durable ingress", () => {
         return { kind: "deferred" } as const;
       });
       const dispatchBBeforeRestart = vi.fn<MattermostIngressDispatch>(async () => undefined);
-      const monitorA = startMonitor(queueA, dispatchA, "account-a");
-      const monitorBBeforeRestart = startMonitor(queueB, dispatchBBeforeRestart, "account-b");
+      const monitorA = startMonitor(queueA, dispatchA);
+      const monitorBBeforeRestart = startMonitor(queueB, dispatchBBeforeRestart);
       const admissionStored = createDeferred();
       const releaseAdmission = createDeferred();
       const enqueueB = queueB.enqueue.bind(queueB);
@@ -208,7 +206,7 @@ describe("Mattermost durable ingress", () => {
             await lifecycle.onAdopted();
           },
         );
-        const monitorBAfterRestart = startMonitor(queueB, dispatchBAfterRestart, "account-b");
+        const monitorBAfterRestart = startMonitor(queueB, dispatchBAfterRestart);
         try {
           await monitorBAfterRestart.waitForIdle();
           expect(dispatchBAfterRestart).toHaveBeenCalledTimes(1);

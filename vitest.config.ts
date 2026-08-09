@@ -17,7 +17,6 @@ const monorepoOnlySdkTestFiles = [
   "src/mattermost/reply-delivery.test.ts",
   "src/mattermost/send.test.ts",
   "src/mattermost/target-resolution.loopback.test.ts",
-  "src/mattermost/thread-participation.test.ts",
   "src/outbound-delivery.test.ts",
   "src/setup.test.ts",
 ];

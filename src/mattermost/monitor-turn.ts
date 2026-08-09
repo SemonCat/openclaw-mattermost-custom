@@ -349,9 +349,7 @@ export async function dispatchMattermostInboundTurn(
       const markThreadParticipation = () => {
         if (!threadParticipationRecorded && kind !== "direct" && effectiveReplyToId) {
           threadParticipationRecorded = true;
-          recordMattermostThreadParticipation(account.accountId, channelId, effectiveReplyToId, {
-            agentId: route.agentId,
-          });
+          recordMattermostThreadParticipation(account.accountId, channelId, effectiveReplyToId);
         }
       };
       const result = await deliverMattermostReplyWithDraftPreview({

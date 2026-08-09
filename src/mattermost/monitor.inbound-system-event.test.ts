@@ -2267,7 +2267,6 @@ describe("mattermost inbound user posts", () => {
       "default",
       "chan-1",
       "thread-root-confirmed-preview",
-      { agentId: "main" },
     );
   });
 
@@ -2346,7 +2345,6 @@ describe("mattermost inbound user posts", () => {
       "default",
       "chan-1",
       "thread-root-confirmed-preview-cleanup-failure",
-      { agentId: "main" },
     );
   });
 
@@ -2436,7 +2434,6 @@ describe("mattermost inbound user posts", () => {
       "default",
       "chan-1",
       "thread-root-partial",
-      { agentId: "main" },
     );
     expect(mockState.progressDrafts.at(-1)?.getSnapshot().lines).toEqual([]);
   });

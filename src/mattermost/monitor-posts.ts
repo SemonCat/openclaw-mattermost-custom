@@ -49,7 +49,7 @@ import {
   type HistoryEntry,
 } from "./runtime-api.js";
 import { sendMessageMattermost } from "./send.js";
-import { hasMattermostThreadParticipationWithPersistence } from "./thread-participation.js";
+import { hasMattermostThreadParticipation } from "./thread-participation.js";
 
 export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
   const { account, botUserId, botUsername, cfg, core, groupPolicy, pairing, resources } = monitor;
@@ -270,7 +270,7 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
     // a re-mention even under requireMention. Keyed by the thread root id.
     const threadAlreadyEngaged =
       kind !== "direct" && effectiveReplyToId
-        ? await hasMattermostThreadParticipationWithPersistence({
+        ? await hasMattermostThreadParticipation({
             accountId: account.accountId,
             channelId,
             threadRootId: effectiveReplyToId,

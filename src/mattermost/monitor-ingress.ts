@@ -8,7 +8,6 @@ import {
 import { isRecord } from "openclaw/plugin-sdk/channel-secret-basic-runtime";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
-import { getMattermostRuntime } from "../runtime.js";
 import type { MattermostPost } from "./client.js";
 import {
   parseMattermostEventPayload,
@@ -157,8 +156,7 @@ type MattermostIngressMonitor = {
 };
 
 export function createMattermostIngressMonitor(options: {
-  accountId: string;
-  queue?: ChannelIngressQueue<MattermostIngressPayload>;
+  queue: ChannelIngressQueue<MattermostIngressPayload>;
   dispatch: MattermostIngressDispatch;
   runtime: Pick<RuntimeEnv, "error" | "log">;
   pollIntervalMs?: number;
@@ -170,12 +168,7 @@ export function createMattermostIngressMonitor(options: {
     Omit<MattermostIngressPayload, "version">,
     MattermostIngressPayload
   >({
-    queue:
-      options.queue ??
-      (() =>
-        getMattermostRuntime().state.openChannelIngressQueue<MattermostIngressPayload>({
-          accountId: options.accountId,
-        })),
+    queue: options.queue,
     inspect: (rawEvent) => inspectMattermostIngressEvent(rawEvent),
     payload: {
       version: MATTERMOST_INGRESS_PAYLOAD_VERSION,
