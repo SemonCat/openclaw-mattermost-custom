@@ -1,0 +1,231 @@
+// Mattermost tests cover monitor slash plugin behavior.
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+
+const buildMattermostNativeCommandSpecs = vi.hoisted(() => vi.fn());
+const parseTcpPort = vi.hoisted(() => vi.fn());
+const fetchMattermostUserTeams = vi.hoisted(() => vi.fn());
+const normalizeMattermostBaseUrl = vi.hoisted(() => vi.fn((value: string | undefined) => value));
+const isSlashCommandsEnabled = vi.hoisted(() => vi.fn());
+const registerSlashCommands = vi.hoisted(() => vi.fn());
+const resolveCallbackUrl = vi.hoisted(() => vi.fn());
+const resolveSlashCommandConfig = vi.hoisted(() => vi.fn());
+const activateSlashCommands = vi.hoisted(() => vi.fn());
+
+vi.mock("./runtime-api.js", () => ({
+  parseTcpPort,
+}));
+
+vi.mock("./native-commands.js", () => ({
+  buildMattermostNativeCommandSpecs,
+}));
+
+vi.mock("./client.js", async () => {
+  const actual = await vi.importActual<typeof import("./client.js")>("./client.js");
+  return {
+    ...actual,
+    fetchMattermostUserTeams,
+    normalizeMattermostBaseUrl,
+  };
+});
+
+vi.mock("./slash-commands.js", () => ({
+  isSlashCommandsEnabled,
+  registerSlashCommands,
+  resolveCallbackUrl,
+  resolveSlashCommandConfig,
+}));
+
+vi.mock("./slash-state.js", () => ({
+  activateSlashCommands,
+}));
+
+function requireFirstMockCall<TArgs extends unknown[]>(
+  mock: { mock: { calls: TArgs[] } },
+  label: string,
+): TArgs {
+  const [call] = mock.mock.calls;
+  if (!call) {
+    throw new Error(`expected ${label}`);
+  }
+  return call;
+}
+
+describe("mattermost monitor slash", () => {
+  let registerMattermostMonitorSlashCommands: typeof import("./monitor-slash.js").registerMattermostMonitorSlashCommands;
+
+  beforeAll(async () => {
+    ({ registerMattermostMonitorSlashCommands } = await import("./monitor-slash.js"));
+  });
+
+  beforeEach(() => {
+    buildMattermostNativeCommandSpecs.mockReset();
+    buildMattermostNativeCommandSpecs.mockReturnValue([
+      { trigger: "ping", description: "ping" },
+      { trigger: "ping", description: "duplicate" },
+    ]);
+    parseTcpPort.mockReset();
+    fetchMattermostUserTeams.mockReset();
+    normalizeMattermostBaseUrl.mockClear();
+    isSlashCommandsEnabled.mockReset();
+    registerSlashCommands.mockReset();
+    resolveCallbackUrl.mockReset();
+    resolveSlashCommandConfig.mockReset();
+    activateSlashCommands.mockReset();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("returns early when slash commands are disabled", async () => {
+    resolveSlashCommandConfig.mockReturnValue({ enabled: false });
+    isSlashCommandsEnabled.mockReturnValue(false);
+
+    await registerMattermostMonitorSlashCommands({
+      client: {} as never,
+      cfg: {} as never,
+      runtime: {} as never,
+      account: { config: {} } as never,
+      baseUrl: "https://chat.example.com",
+      botUserId: "bot-user",
+    });
+
+    expect(fetchMattermostUserTeams).not.toHaveBeenCalled();
+    expect(activateSlashCommands).not.toHaveBeenCalled();
+  });
+
+  it("registers deduped dynamically-enumerated commands across teams", async () => {
+    vi.stubEnv("OPENCLAW_GATEWAY_PORT", "18888");
+    resolveSlashCommandConfig.mockReturnValue({ enabled: true, nativeSkills: true });
+    isSlashCommandsEnabled.mockReturnValue(true);
+    parseTcpPort.mockReturnValue(18888);
+    fetchMattermostUserTeams.mockResolvedValue([{ id: "team-1" }, { id: "team-2" }]);
+    resolveCallbackUrl.mockReturnValue("https://openclaw.test/slash");
+    buildMattermostNativeCommandSpecs.mockReturnValue([
+      { trigger: "ping", description: "ping" },
+      { trigger: "ping", description: "duplicate" },
+      {
+        trigger: "oc_skill",
+        fallbackTrigger: "oc_skill",
+        description: "Skill run",
+        autoComplete: true,
+        autoCompleteHint: "[args]",
+        originalName: "skill",
+      },
+    ]);
+    registerSlashCommands
+      .mockResolvedValueOnce([{ token: "token-1", trigger: "ping" }])
+      .mockResolvedValueOnce([{ token: "token-2", trigger: "oc_skill" }]);
+    const client = {} as never;
+    const runtime = {
+      log: vi.fn(),
+      error: vi.fn(),
+    };
+
+    await registerMattermostMonitorSlashCommands({
+      client,
+      cfg: { gateway: { port: 18789 } } as never,
+      runtime: runtime as never,
+      account: { config: { commands: {} }, accountId: "default" } as never,
+      baseUrl: "https://chat.example.com",
+      botUserId: "bot-user",
+    });
+
+    expect(registerSlashCommands).toHaveBeenCalledTimes(2);
+    const [firstRegistration] = requireFirstMockCall(
+      registerSlashCommands,
+      "first Mattermost slash command registration",
+    );
+    expect(firstRegistration).toEqual({
+      client,
+      teamId: "team-1",
+      creatorUserId: "bot-user",
+      callbackUrl: "https://openclaw.test/slash",
+      abortSignal: undefined,
+      mutationIntervalMs: 250,
+      commands: [
+        { trigger: "ping", description: "ping" },
+        {
+          trigger: "oc_skill",
+          fallbackTrigger: "oc_skill",
+          description: "Skill run",
+          autoComplete: true,
+          autoCompleteHint: "[args]",
+          originalName: "skill",
+        },
+      ],
+      log: firstRegistration.log,
+    });
+    expect(typeof firstRegistration.log).toBe("function");
+    expect(buildMattermostNativeCommandSpecs).toHaveBeenCalledWith(
+      expect.objectContaining({ nativeSkills: true }),
+    );
+    const [activation] = requireFirstMockCall(
+      activateSlashCommands,
+      "Mattermost slash command activation",
+    );
+    expect(activation?.commandTokens).toStrictEqual(["token-1", "token-2"]);
+    expect(activation?.triggerMap).toStrictEqual(new Map([["oc_skill", "skill"]]));
+    expect(runtime.log).toHaveBeenCalledWith(
+      "mattermost: slash commands registered (2 commands across 2 teams, callback=https://openclaw.test/slash)",
+    );
+  });
+
+  it("falls back to the configured gateway port when the env port is out of range", async () => {
+    vi.stubEnv("OPENCLAW_GATEWAY_PORT", "65536");
+    resolveSlashCommandConfig.mockReturnValue({ enabled: true, nativeSkills: false });
+    isSlashCommandsEnabled.mockReturnValue(true);
+    parseTcpPort.mockReturnValue(null);
+    fetchMattermostUserTeams.mockResolvedValue([{ id: "team-1" }]);
+    resolveCallbackUrl.mockReturnValue("https://openclaw.test/slash");
+    registerSlashCommands.mockResolvedValue([{ token: "token-1", trigger: "ping" }]);
+
+    await registerMattermostMonitorSlashCommands({
+      client: {} as never,
+      cfg: { gateway: { port: 18789 } } as never,
+      runtime: { log: vi.fn(), error: vi.fn() } as never,
+      account: { config: { commands: {} }, accountId: "default" } as never,
+      baseUrl: "https://chat.example.com",
+      botUserId: "bot-user",
+    });
+
+    expect(parseTcpPort).toHaveBeenCalledWith("65536");
+    expect(resolveCallbackUrl).toHaveBeenCalledWith(
+      expect.objectContaining({ gatewayPort: 18789 }),
+    );
+  });
+
+  it("warns on loopback callback urls and reports partial team failures", async () => {
+    resolveSlashCommandConfig.mockReturnValue({ enabled: true, nativeSkills: false });
+    isSlashCommandsEnabled.mockReturnValue(true);
+    parseTcpPort.mockReturnValue(null);
+    fetchMattermostUserTeams.mockResolvedValue([{ id: "team-1" }, { id: "team-2" }]);
+    resolveCallbackUrl.mockReturnValue("http://127.0.0.1:18789/slash");
+    registerSlashCommands
+      .mockResolvedValueOnce([{ token: "token-1", trigger: "ping" }])
+      .mockRejectedValueOnce(new Error("boom"));
+    const runtime = {
+      log: vi.fn(),
+      error: vi.fn(),
+    };
+
+    await registerMattermostMonitorSlashCommands({
+      client: {} as never,
+      cfg: { gateway: { customBindHost: "loopback" } } as never,
+      runtime: runtime as never,
+      account: { config: { commands: {} }, accountId: "default" } as never,
+      baseUrl: "https://chat.example.com",
+      botUserId: "bot-user",
+    });
+
+    expect(runtime.error).toHaveBeenCalledWith(
+      "mattermost: slash commands callbackUrl resolved to http://127.0.0.1:18789/slash (loopback) while baseUrl is https://chat.example.com. This MAY be unreachable depending on your deployment. If native slash commands don't work, set channels.mattermost.commands.callbackUrl to a URL reachable from the Mattermost server (e.g. your public reverse proxy URL).",
+    );
+    expect(runtime.error).toHaveBeenCalledWith(
+      "mattermost: failed to register slash commands for team team-2: Error: boom",
+    );
+    expect(runtime.error).toHaveBeenCalledWith(
+      "mattermost: slash command registration completed with 1 team error(s)",
+    );
+  });
+});

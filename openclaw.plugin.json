@@ -1,0 +1,28 @@
+{
+  "id": "mattermost-custom",
+  "name": "Mattermost (SemonCat custom)",
+  "description": "SemonCat downstream Mattermost channel plugin with native commands and lifecycle reactions.",
+  "icon": "https://cdn.simpleicons.org/mattermost",
+  "activation": {
+    "onStartup": false
+  },
+  "skills": ["./skills"],
+  "channels": ["mattermost"],
+  "contracts": {
+    "tools": ["mattermost_thread"]
+  },
+  "channelConfigs": {
+    "mattermost": {
+      "schema": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "preferOver": ["mattermost"]
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
