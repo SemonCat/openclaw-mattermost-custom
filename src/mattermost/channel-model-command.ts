@@ -64,13 +64,18 @@ export function resolveMattermostCommandChannelId(
   if (ctx.to?.startsWith("user:") || ctx.sessionKey?.includes(":mattermost:direct:")) {
     return undefined;
   }
-  const channelId = typeof ctx.channelId === "string" ? ctx.channelId.trim() : "";
-  if (channelId) {
-    return channelId;
+  // PluginCommandContext.channelId is the provider id ("mattermost"), not the
+  // native Mattermost room id. The normalized target is authoritative here.
+  if (ctx.to?.startsWith("channel:")) {
+    const targetChannelId = ctx.to.slice("channel:".length).trim();
+    if (targetChannelId) {
+      return targetChannelId;
+    }
   }
-  return ctx.to?.startsWith("channel:")
-    ? ctx.to.slice("channel:".length).trim() || undefined
-    : undefined;
+  const sessionChannelId = ctx.sessionKey?.match(
+    /:mattermost:(?:channel|group):([^:]+)/u,
+  )?.[1];
+  return sessionChannelId?.trim() || undefined;
 }
 
 export function setMattermostChannelModel(

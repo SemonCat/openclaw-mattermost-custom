@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildChannelModelHeader,
   createMattermostChannelModelCommand,
+  resolveMattermostCommandChannelId,
   setMattermostChannelModel,
   type ChannelModelCommandDependencies,
 } from "./channel-model-command.js";
@@ -14,7 +15,7 @@ import type { OpenClawConfig } from "./runtime-api.js";
 function createContext(overrides: Partial<PluginCommandContext> = {}): PluginCommandContext {
   return {
     channel: "mattermost",
-    channelId: "channel-1",
+    channelId: "mattermost",
     isAuthorizedSender: true,
     agentId: "main",
     args: "",
@@ -27,6 +28,28 @@ function createContext(overrides: Partial<PluginCommandContext> = {}): PluginCom
     ...overrides,
   } as PluginCommandContext;
 }
+
+describe("resolveMattermostCommandChannelId", () => {
+  it("uses the native Mattermost target instead of the provider channel id", () => {
+    expect(
+      resolveMattermostCommandChannelId({
+        channelId: "mattermost",
+        sessionKey: "agent:main:mattermost:channel:channel-1",
+        to: "channel:channel-1",
+      }),
+    ).toBe("channel-1");
+  });
+
+  it("falls back to the native id in the session key when To is unavailable", () => {
+    expect(
+      resolveMattermostCommandChannelId({
+        channelId: "mattermost",
+        sessionKey: "agent:main:mattermost:group:private-1:thread:root-1",
+        to: undefined,
+      }),
+    ).toBe("private-1");
+  });
+});
 
 function createHarness(initialConfig: OpenClawConfig = {}) {
   const cfg = structuredClone(initialConfig);
