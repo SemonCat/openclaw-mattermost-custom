@@ -14,6 +14,22 @@ official plugin and disables the lower-priority owner in the effective runtime
 configuration. The two plugins may both be installed and available, but they
 must not be enabled as simultaneous Mattermost channel owners.
 
+### Channel default model
+
+Run these commands inside a Mattermost channel:
+
+```text
+/channel_model
+/channel_model openai/gpt-5.6-terra
+/channel_model default
+```
+
+The setting is stored in
+`channels.modelByChannel.mattermost.<mattermost-channel-id>`. The command
+preserves existing channel-header content and manages only its own first line.
+An active session-level `/model` override still takes precedence until it is
+cleared with `/model default`.
+
 This package is private and is not published to npm or ClawHub. Build a
 self-contained plugin artifact, then install that artifact into OpenClaw's
 managed plugin directory:
@@ -55,6 +71,8 @@ Gateway after changing plugin enablement.
 Compared with the official plugin, this build preserves:
 
 - Dynamic native slash commands from core, skills, and installed plugins.
+- `/channel_model` for reading, setting, or resetting a channel-scoped default
+  model while keeping a managed model label in the Mattermost channel header.
 - Root-first slash-command names with deterministic `oc_` conflict fallbacks.
 - Safe Mattermost command reconciliation without mutating foreign commands.
 - Thread-aware slash-command callbacks and replies.

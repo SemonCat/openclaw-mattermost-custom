@@ -56,6 +56,7 @@ export type MattermostChannel = {
   id: string;
   name?: string | null;
   display_name?: string | null;
+  header?: string | null;
   type?: string | null;
   team_id?: string | null;
 };
@@ -331,6 +332,20 @@ export async function fetchMattermostChannel(
   channelId: string,
 ): Promise<MattermostChannel> {
   return await client.request<MattermostChannel>(`/channels/${encodeURIComponent(channelId)}`);
+}
+
+export async function patchMattermostChannelHeader(
+  client: MattermostClient,
+  channelId: string,
+  header: string,
+): Promise<MattermostChannel> {
+  return await client.request<MattermostChannel>(
+    `/channels/${encodeURIComponent(channelId)}/patch`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ header }),
+    },
+  );
 }
 
 export async function fetchMattermostPost(

@@ -20,6 +20,7 @@ import {
   fetchMattermostChannel,
   fetchMattermostChannelPosts,
   normalizeMattermostBaseUrl,
+  patchMattermostChannelHeader,
   readMattermostError,
   updateMattermostPost,
 } from "./client.js";
@@ -165,6 +166,22 @@ describe("normalizeMattermostBaseUrl", () => {
 
   it("preserves valid base URL", () => {
     expect(normalizeMattermostBaseUrl("http://mm.example.com")).toBe("http://mm.example.com");
+  });
+});
+
+describe("patchMattermostChannelHeader", () => {
+  it("patches only the requested channel header", async () => {
+    const { client, calls } = createTestClient({
+      body: { id: "channel1", header: "new header" },
+    });
+
+    const channel = await patchMattermostChannelHeader(client, "channel/1", "new header");
+
+    const call = requireRequestCall(calls);
+    expect(call.url).toBe("http://localhost:8065/api/v4/channels/channel%2F1/patch");
+    expect(call.init?.method).toBe("PUT");
+    expect(parseRequestJson(call.init)).toEqual({ header: "new header" });
+    expect(channel.header).toBe("new header");
   });
 });
 
