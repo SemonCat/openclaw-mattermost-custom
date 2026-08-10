@@ -30,6 +30,12 @@ preserves existing channel-header content and manages only its own first line.
 An active session-level `/model` override still takes precedence until it is
 cleared with `/model default`.
 
+The plugin also reconciles this managed line for every public or private
+channel visible to a configured bot account. It starts five seconds after the
+plugin starts, then runs again one hour after each completed pass. Header writes
+are serialized and spaced 500 ms apart (at most two writes per second), and
+unchanged headers are not written.
+
 This package is private and is not published to npm or ClawHub. Build a
 self-contained plugin artifact, then install that artifact into OpenClaw's
 managed plugin directory:
@@ -73,6 +79,8 @@ Compared with the official plugin, this build preserves:
 - Dynamic native slash commands from core, skills, and installed plugins.
 - `/channel_model` for reading, setting, or resetting a channel-scoped default
   model while keeping a managed model label in the Mattermost channel header.
+- Startup and hourly reconciliation of managed model labels across visible
+  channel headers, with serialized rate-limited writes.
 - Root-first slash-command names with deterministic `oc_` conflict fallbacks.
 - Safe Mattermost command reconciliation without mutating foreign commands.
 - Thread-aware slash-command callbacks and replies.

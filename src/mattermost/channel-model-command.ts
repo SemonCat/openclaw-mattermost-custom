@@ -19,7 +19,7 @@ import { buildModelsProviderData, type OpenClawConfig } from "./runtime-api.js";
 
 const COMMAND_NAME = "channel_model";
 const MATTERMOST_CHANNEL_ID = "mattermost";
-const MATTERMOST_HEADER_MAX_CHARS = 1024;
+export const MATTERMOST_HEADER_MAX_CHARS = 1024;
 const MANAGED_HEADER_LINE_PATTERN =
   /^🤖 \*\*Default model:\*\* `[^`\r\n]+`[\t ]*(?:\r?\n|$)/u;
 const SESSION_OVERRIDE_NOTE =
@@ -47,7 +47,7 @@ type ParsedModelReference = {
   ref: string;
 };
 
-function countUnicodeCharacters(value: string): number {
+export function countUnicodeCharacters(value: string): number {
   return Array.from(value).length;
 }
 
@@ -112,7 +112,10 @@ function parseModelReference(raw: string): ParsedModelReference | undefined {
   return { provider, model, ref: `${provider}/${model}` };
 }
 
-function currentChannelOverride(cfg: OpenClawConfig, channelId: string): string | undefined {
+export function currentMattermostChannelModelOverride(
+  cfg: OpenClawConfig,
+  channelId: string,
+): string | undefined {
   return cfg.channels?.modelByChannel?.[MATTERMOST_CHANNEL_ID]?.[channelId]?.trim() || undefined;
 }
 
@@ -170,7 +173,7 @@ export function createMattermostChannelModelCommand(
       const cfg = api.runtime.config.current() as OpenClawConfig;
       const data = await dependencies.buildModelsProviderData(cfg, ctx.agentId);
       const agentDefault = `${data.resolvedDefault.provider}/${data.resolvedDefault.model}`;
-      const currentOverride = currentChannelOverride(cfg, channelId);
+      const currentOverride = currentMattermostChannelModelOverride(cfg, channelId);
       const args = ctx.args?.trim() ?? "";
 
       if (!args || args.toLowerCase() === "status") {

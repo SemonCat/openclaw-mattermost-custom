@@ -5,6 +5,7 @@ import { mattermostPlugin } from "./channel-plugin-runtime.js";
 import { setMattermostRuntime } from "./runtime-api.js";
 import { registerSlashCommandRoute } from "./slash-route-api.js";
 import { registerMattermostChannelModelCommand } from "./src/mattermost/channel-model-command.js";
+import { registerMattermostChannelModelHeaderRefresher } from "./src/mattermost/channel-model-refresher.js";
 import { registerMattermostThreadTool } from "./src/mattermost/thread-tool.js";
 
 export default defineChannelPluginEntry({
@@ -16,6 +17,7 @@ export default defineChannelPluginEntry({
   setRuntime: setMattermostRuntime,
   registerFull(api) {
     registerMattermostChannelModelCommand(api);
+    registerMattermostChannelModelHeaderRefresher(api);
     registerMattermostThreadTool(api);
     // Actual slash-command registration happens after the monitor connects and
     // knows the team id; the route itself can be wired here.
