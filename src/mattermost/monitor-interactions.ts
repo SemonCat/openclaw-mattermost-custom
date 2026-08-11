@@ -4,6 +4,7 @@ import { createMattermostInteractionHandler } from "./interactions.js";
 import { authorizeMattermostCommandInvocation } from "./monitor-auth.js";
 import {
   buildMattermostButtonInteractionMessageSid,
+  pinMattermostMonitorConfig,
   resolveMattermostInteractionReplyRootId,
 } from "./monitor-context.js";
 import { buildMattermostEventPlan } from "./monitor-event-plan.js";
@@ -21,7 +22,8 @@ export function registerMattermostInteractions(params: {
   handleModelPickerInteraction: MattermostModelPickerInteractionHandler;
 }): () => void {
   const { monitor } = params;
-  const { account, botUserId, cfg, client, core, pairing, resources, runtime } = monitor;
+  const { account, botUserId, cfg: startupCfg, client, core, pairing, resources, runtime } =
+    monitor;
   const { resolveChannelInfo } = resources;
   return registerPluginHttpRoute({
     path: params.interactionPath,
@@ -32,10 +34,12 @@ export function registerMattermostInteractions(params: {
       botUserId,
       accountId: account.accountId,
       allowedSourceIps: params.allowedSourceIps,
-      trustedProxies: cfg.gateway?.trustedProxies,
-      allowRealIpFallback: cfg.gateway?.allowRealIpFallback === true,
+      trustedProxies: startupCfg.gateway?.trustedProxies,
+      allowRealIpFallback: startupCfg.gateway?.allowRealIpFallback === true,
       handleInteraction: params.handleModelPickerInteraction,
       authorizeButtonClick: async ({ payload, post }) => {
+        const eventMonitor = pinMattermostMonitorConfig(monitor);
+        const { cfg } = eventMonitor;
         const channelInfo = await resolveChannelInfo(payload.channel_id);
         const allowTextCommands = core.channel.commands.shouldHandleTextCommands({
           cfg,
@@ -67,7 +71,8 @@ export function registerMattermostInteractions(params: {
         };
       },
       resolveSessionKey: async ({ channelId, userId, post }) => {
-        const eventPlan = await buildMattermostEventPlan(monitor, {
+        const eventMonitor = pinMattermostMonitorConfig(monitor);
+        const eventPlan = await buildMattermostEventPlan(eventMonitor, {
           channelId,
           senderId: userId,
           postId: post.id,
@@ -80,12 +85,14 @@ export function registerMattermostInteractions(params: {
         return eventPlan.thread.sessionKey;
       },
       dispatchButtonClick: async (button) => {
+        const eventMonitor = pinMattermostMonitorConfig(monitor);
+        const { cfg } = eventMonitor;
         const sourcePostId = button.post.id || button.postId;
         const interactionMessageSid = buildMattermostButtonInteractionMessageSid({
           postId: button.postId,
           actionId: button.actionId,
         });
-        const eventPlan = await buildMattermostEventPlan(monitor, {
+        const eventPlan = await buildMattermostEventPlan(eventMonitor, {
           channelId: button.channelId,
           senderId: button.userId,
           postId: sourcePostId,

@@ -166,8 +166,11 @@ describe("mattermostPlugin", () => {
     });
   });
 
-  it("opts into account-scoped config restarts", () => {
-    expect(mattermostPlugin.reload).toMatchObject({ accountScopedRestart: true });
+  it("keeps channel model overrides dynamic while account config restarts stay scoped", () => {
+    expect(mattermostPlugin.reload).toMatchObject({
+      accountScopedRestart: true,
+      noopPrefixes: ["channels.modelByChannel.mattermost"],
+    });
   });
 
   it("keeps sibling resolution stable across named-account additions and edits", () => {

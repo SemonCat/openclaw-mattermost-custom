@@ -23,7 +23,10 @@ import {
   normalizeMattermostAllowEntry,
   resolveMattermostMonitorInboundAccess,
 } from "./monitor-auth.js";
-import { resolveMattermostPendingHistoryKey } from "./monitor-context.js";
+import {
+  pinMattermostMonitorConfig,
+  resolveMattermostPendingHistoryKey,
+} from "./monitor-context.js";
 import { buildMattermostEventPlan } from "./monitor-event-plan.js";
 import {
   formatInboundFromLabel,
@@ -52,13 +55,13 @@ import { sendMessageMattermost } from "./send.js";
 import { hasMattermostThreadParticipation } from "./thread-participation.js";
 
 export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
-  const { account, botUserId, botUsername, cfg, core, groupPolicy, pairing, resources } = monitor;
+  const { account, botUserId, botUsername, core, groupPolicy, pairing, resources } = monitor;
   const { resolveMattermostMedia, resolveUserInfo } = resources;
   const channelHistories = new Map<string, HistoryEntry[]>();
   const reactionLifecycleStore = createMattermostReactionLifecycleStore();
   const historyLimit = Math.max(
     0,
-    cfg.messages?.groupChat?.historyLimit ?? DEFAULT_GROUP_HISTORY_LIMIT,
+    monitor.cfg.messages?.groupChat?.historyLimit ?? DEFAULT_GROUP_HISTORY_LIMIT,
   );
 
   return async (
@@ -93,7 +96,10 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
       return;
     }
 
-    const eventPlan = await buildMattermostEventPlan(monitor, {
+    const eventMonitor = pinMattermostMonitorConfig(monitor);
+    const { cfg } = eventMonitor;
+
+    const eventPlan = await buildMattermostEventPlan(eventMonitor, {
       channelId,
       senderId,
       postId: post.id,
@@ -447,7 +453,7 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
       `mattermost inbound: from=${ctxPayload.From} len=${bodyText.length} preview="${previewLine}"`,
     );
 
-    await dispatchMattermostInboundTurn(monitor, {
+    await dispatchMattermostInboundTurn(eventMonitor, {
       post,
       rawText,
       ctxPayload,

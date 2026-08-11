@@ -6,13 +6,21 @@ import {
 } from "openclaw/plugin-sdk/string-coerce-runtime";
 import type { ResolvedMattermostAccount } from "./accounts.js";
 import { resolveThreadSessionKeys } from "./monitor-helpers.js";
+import type { MattermostMonitorContext } from "./monitor-types.js";
 import type { MattermostEventPayload } from "./monitor-websocket.js";
 import {
   evaluateMattermostNoVisibleReply,
   formatMattermostNoVisibleReplyLog,
 } from "./no-visible-reply-diagnostic.js";
 import type { MattermostReplyDeliveryOutcome } from "./reply-delivery.js";
-import type { ChatType, ReplyPayload } from "./runtime-api.js";
+import type { ChatType, OpenClawConfig, ReplyPayload } from "./runtime-api.js";
+
+export function pinMattermostMonitorConfig(
+  monitor: MattermostMonitorContext,
+): MattermostMonitorContext {
+  const cfg = monitor.core.config.current() as OpenClawConfig;
+  return cfg === monitor.cfg ? monitor : { ...monitor, cfg };
+}
 
 export function shouldUpdateMattermostDraftToolProgress(
   account: Pick<ResolvedMattermostAccount, "config" | "streamingMode">,

@@ -9,12 +9,14 @@ import {
   formatMattermostFinalDeliveryOutcomeLog,
   resolveMattermostInteractionReplyRootId,
   resolveMattermostPendingHistoryKey,
+  pinMattermostMonitorConfig,
   resolveMattermostReactionChannelId,
   resolveMattermostReplyRootId,
   resolveMattermostThreadSessionContext,
   shouldSuppressMattermostDefaultToolProgressMessages,
   shouldUpdateMattermostDraftToolProgress,
 } from "./monitor-context.js";
+import type { MattermostMonitorContext } from "./monitor-types.js";
 import { buildMattermostInboundMediaPayload } from "./monitor-resources.js";
 
 function resolveMattermostEffectiveReplyToId(params: {
@@ -28,6 +30,23 @@ function resolveMattermostEffectiveReplyToId(params: {
     ...params,
   }).effectiveReplyToId;
 }
+
+describe("pinMattermostMonitorConfig", () => {
+  it("pins one event to the current runtime config without mutating the monitor", () => {
+    const startupCfg = { channels: { modelByChannel: { mattermost: { room: "openai/old" } } } };
+    const runtimeCfg = { channels: { modelByChannel: { mattermost: { room: "openai/new" } } } };
+    const monitor = {
+      cfg: startupCfg,
+      core: { config: { current: () => runtimeCfg } },
+    } as unknown as MattermostMonitorContext;
+
+    const pinned = pinMattermostMonitorConfig(monitor);
+
+    expect(pinned).not.toBe(monitor);
+    expect(pinned.cfg).toBe(runtimeCfg);
+    expect(monitor.cfg).toBe(startupCfg);
+  });
+});
 
 describe("buildMattermostInboundMediaPayload", () => {
   it("keeps a failed attachment kind aligned with a successful path", async () => {

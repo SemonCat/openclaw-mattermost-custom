@@ -1,7 +1,10 @@
 // Mattermost plugin module maps reaction transport events into system events.
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { resolveMattermostMonitorInboundAccess } from "./monitor-auth.js";
-import { resolveMattermostReactionChannelId } from "./monitor-context.js";
+import {
+  pinMattermostMonitorConfig,
+  resolveMattermostReactionChannelId,
+} from "./monitor-context.js";
 import { buildMattermostEventPlan } from "./monitor-event-plan.js";
 import type { MattermostMonitorContext } from "./monitor-types.js";
 import type { MattermostEventPayload } from "./monitor-websocket.js";
@@ -9,7 +12,7 @@ import type { MattermostEventPayload } from "./monitor-websocket.js";
 type MattermostReaction = { user_id?: string; post_id?: string; emoji_name?: string };
 
 export function createMattermostReactionHandler(monitor: MattermostMonitorContext) {
-  const { account, botUserId, cfg, core, groupPolicy, pairing, resources } = monitor;
+  const { account, botUserId, core, groupPolicy, pairing, resources } = monitor;
   const { resolveUserInfo } = resources;
   return async (payload: MattermostEventPayload) => {
     const reactionData = payload.data?.reaction;
@@ -43,7 +46,9 @@ export function createMattermostReactionHandler(monitor: MattermostMonitorContex
       );
       return;
     }
-    const eventPlan = await buildMattermostEventPlan(monitor, {
+    const eventMonitor = pinMattermostMonitorConfig(monitor);
+    const { cfg } = eventMonitor;
+    const eventPlan = await buildMattermostEventPlan(eventMonitor, {
       channelId,
       senderId: userId,
       dropLabel: "reaction",

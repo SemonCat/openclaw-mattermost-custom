@@ -156,6 +156,10 @@ describe("Mattermost model-picker interaction dispatch", () => {
 
     expect(response).toEqual({});
     expect(mocks.authorize).toHaveBeenCalledWith(expect.objectContaining({ cfg: runtimeCfg }));
+    expect(mocks.buildEventPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ cfg: runtimeCfg }),
+      expect.objectContaining({ channelId: "channel-1" }),
+    );
     expect(mocks.buildModelsProviderData).toHaveBeenCalledWith(runtimeCfg, "main");
     expect(mocks.runDetachedWebhookWork).toHaveBeenCalledOnce();
     expect(mocks.dispatch).not.toHaveBeenCalled();

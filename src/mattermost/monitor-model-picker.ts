@@ -12,6 +12,7 @@ import {
 import { authorizeMattermostCommandInvocation } from "./monitor-auth.js";
 import {
   buildMattermostModelPickerSelectMessageSid,
+  pinMattermostMonitorConfig,
   resolveMattermostInteractionReplyRootId,
 } from "./monitor-context.js";
 import { buildMattermostEventPlan, type MattermostEventPlan } from "./monitor-event-plan.js";
@@ -131,7 +132,8 @@ export function createMattermostModelPickerInteractionHandler(
     if (pickerState.ownerUserId !== params.payload.user_id) {
       return { ephemeral_text: "Only the person who opened this picker can use it." };
     }
-    const cfg = core.config.current() as OpenClawConfig;
+    const eventMonitor = pinMattermostMonitorConfig(monitor);
+    const { cfg } = eventMonitor;
     const updatePickerPost = (message: string, buttons?: Array<unknown>) =>
       updateModelPickerPost({
         channelId: params.payload.channel_id,
@@ -190,7 +192,7 @@ export function createMattermostModelPickerInteractionHandler(
     }
 
     const teamId = auth.channelInfo.team_id ?? params.payload.team_id ?? undefined;
-    const eventPlan = await buildMattermostEventPlan(monitor, {
+    const eventPlan = await buildMattermostEventPlan(eventMonitor, {
       channelId: params.payload.channel_id,
       senderId: params.payload.user_id,
       postId: params.post.id || params.payload.post_id,
