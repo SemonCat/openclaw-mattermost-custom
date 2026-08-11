@@ -48,6 +48,13 @@ import { createMattermostProgressReceipt } from "./progress-receipt.js";
 import { deliverMattermostReplyPayload, joinMattermostVisibleContent } from "./reply-delivery.js";
 import type { HistoryEntry, ReplyPayload } from "./runtime-api.js";
 import { createChannelMessageReplyPipeline } from "./runtime-api.js";
+import { sendMessageMattermost } from "./send.js";
+import { withMattermostSessionAdmissionRetry } from "./session-admission-retry.js";
+import { recordMattermostThreadParticipation } from "./thread-participation.js";
+import {
+  createMattermostTranscriptUsageAccumulator,
+  type MattermostSessionTranscriptUpdate,
+} from "./transcript-usage.js";
 
 type MattermostAgentEventRuntime = {
   events?: {
@@ -58,11 +65,11 @@ type MattermostAgentEventRuntime = {
         data: Record<string, unknown>;
       }) => void,
     ) => () => void;
+    onSessionTranscriptUpdate?: (
+      listener: (update: MattermostSessionTranscriptUpdate) => void,
+    ) => () => void;
   };
 };
-import { sendMessageMattermost } from "./send.js";
-import { withMattermostSessionAdmissionRetry } from "./session-admission-retry.js";
-import { recordMattermostThreadParticipation } from "./thread-participation.js";
 
 type MattermostInboundTurnParams = {
   post: MattermostPost;
@@ -213,6 +220,12 @@ export async function dispatchMattermostInboundTurn(
   // APIs this plugin already avoids relying on for durability): correlates
   // cumulative output-token usage snapshots to this turn's run id.
   const eventRuntime = core as unknown as MattermostAgentEventRuntime;
+  const transcriptUsage = createMattermostTranscriptUsageAccumulator({
+    sessionKey: route.sessionKey,
+    onCumulativeOutputTokens: (outputTokens) => {
+      progressReceipt.noteTranscriptUsage(outputTokens);
+    },
+  });
   const unsubscribeUsageEvents =
     eventRuntime.events?.onAgentEvent?.((evt) => {
       if (evt.stream !== "usage") {
@@ -223,6 +236,8 @@ export async function dispatchMattermostInboundTurn(
         progressReceipt.noteUsage(evt.runId, outputTokens);
       }
     }) ?? (() => {});
+  const unsubscribeTranscriptUpdates =
+    eventRuntime.events?.onSessionTranscriptUpdate?.(transcriptUsage.onUpdate) ?? (() => {});
   const enterBlockPreviewActivity = (activity: "reasoning" | "text" | "tool") => {
     if (account.streamingMode !== "block") {
       return undefined;
@@ -712,6 +727,7 @@ export async function dispatchMattermostInboundTurn(
                   // A pending receipt describes the turn that just finished; an
                   // admitted followup starts a fresh turn's tool/elapsed tally.
                   progressReceipt.reset();
+                  transcriptUsage.reset();
                 },
               },
             }),
@@ -723,6 +739,7 @@ export async function dispatchMattermostInboundTurn(
     throw err;
   } finally {
     unsubscribeUsageEvents();
+    unsubscribeTranscriptUpdates();
     try {
       await draftStream.stop();
     } catch (err) {

@@ -79,6 +79,19 @@ describe("createMattermostProgressReceipt", () => {
     );
   });
 
+  it("prefers cumulative agent usage over the transcript fallback", () => {
+    let clock = 0;
+    const receipt = createMattermostProgressReceipt({ now: () => clock });
+    receipt.noteRunStart("run-1");
+    receipt.noteTranscriptUsage(50);
+    receipt.noteUsage("run-1", 100);
+    clock = 5_000;
+
+    expect(receipt.prepareFinalPayload({ text: "ok" }).text).toBe(
+      "ok\n⏱️ 5s · ⚡≈20.0 tok/s",
+    );
+  });
+
   it("ignores usage from another run and invalid token counts", () => {
     let clock = 0;
     const receipt = createMattermostProgressReceipt({ now: () => clock });

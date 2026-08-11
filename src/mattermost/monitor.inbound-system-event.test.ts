@@ -132,6 +132,12 @@ const mockState = vi.hoisted(() => ({
   fetchMattermostMe: vi.fn(),
   fetchMattermostPost: vi.fn(),
   getGlobalHookRunner: vi.fn(),
+  sessionTranscriptListeners: [] as Array<(update: {
+    target: { agentId: string; sessionId: string; sessionKey: string };
+    message?: unknown;
+    messageId?: string;
+    messageSeq?: number;
+  }) => void>,
   progressDrafts: [] as Array<{ getSnapshot: () => { lines: readonly unknown[] } }>,
   registerMattermostMonitorSlashCommands: vi.fn(),
   registerPluginHttpRoute: vi.fn(),
@@ -426,6 +432,15 @@ function createRuntimeCore(
     },
     events: {
       onAgentEvent: () => () => {},
+      onSessionTranscriptUpdate: (listener: (typeof mockState.sessionTranscriptListeners)[number]) => {
+        mockState.sessionTranscriptListeners.push(listener);
+        return () => {
+          const index = mockState.sessionTranscriptListeners.indexOf(listener);
+          if (index >= 0) {
+            mockState.sessionTranscriptListeners.splice(index, 1);
+          }
+        };
+      },
     },
     logging: {
       shouldLogVerbose: () => Boolean(overrides.verboseDebug),
@@ -584,6 +599,7 @@ describe("mattermost inbound user posts", () => {
     vi.clearAllMocks();
     mockState.abortController = undefined;
     mockState.progressDrafts.length = 0;
+    mockState.sessionTranscriptListeners.length = 0;
     mockState.getGlobalHookRunner.mockReturnValue(null);
     mockState.runtimeCore = createRuntimeCore(testConfig);
     mockState.createMattermostClient.mockReturnValue({});
@@ -818,6 +834,82 @@ describe("mattermost inbound user posts", () => {
       "routed-final-post",
       { message: expect.stringMatching(/^Routed final\n⏱️ \d+s$/) },
     );
+  });
+
+  it("uses assistant transcript usage for approximate TPS when agent usage events are absent", async () => {
+    const dateNow = vi.spyOn(Date, "now").mockReturnValue(0);
+    const socket = new FakeWebSocket();
+    const abortController = new AbortController();
+    mockState.abortController = abortController;
+    mockState.dispatchInboundMessage.mockImplementation(async (params) => {
+      const replyOptions = params.replyOptions as {
+        onAgentRunStart?: (runId: string) => void;
+      };
+      replyOptions.onAgentRunStart?.("codex-run-1");
+      const listener = mockState.sessionTranscriptListeners.at(-1);
+      listener?.({
+        target: {
+          agentId: "main",
+          sessionId: "session-1",
+          sessionKey: "mattermost:default:channel:chan-1",
+        },
+        messageId: "assistant-message-1",
+        messageSeq: 1,
+        message: {
+          role: "assistant",
+          usage: { input: 50, output: 100, totalTokens: 150 },
+        },
+      });
+      dateNow.mockReturnValue(5_000);
+      const delivery = mockState.deliveryPlanObserver.mock.calls.at(-1)?.[0] as
+        | {
+            onDelivered?: (
+              payload: ReplyPayload,
+              info: { kind: "final" },
+              result: {
+                messageIds: string[];
+                visibleReplySent: boolean;
+                content: string;
+              },
+            ) => Promise<void>;
+          }
+        | undefined;
+      await delivery?.onDelivered?.(
+        { text: "Codex final" },
+        { kind: "final" },
+        {
+          messageIds: ["codex-final-post"],
+          visibleReplySent: true,
+          content: "Codex final",
+        },
+      );
+      abortController.abort();
+    });
+
+    const monitor = monitorMattermostProvider({
+      config: testConfig,
+      runtime: testRuntime(),
+      abortSignal: abortController.signal,
+      webSocketFactory: () => socket,
+    });
+
+    await vi.waitFor(() => {
+      expect(socket.openListenerCount).toBeGreaterThan(0);
+    });
+    socket.emitOpen();
+    await emitMattermostChannelPost(socket, {
+      id: "post-codex-transcript-usage",
+      message: "show approximate tps",
+    });
+    socket.emitClose(1000);
+    await monitor;
+
+    expect(mockState.updateMattermostPost).toHaveBeenCalledWith(
+      {},
+      "codex-final-post",
+      { message: "Codex final\n⏱️ 5s · ⚡≈20.0 tok/s" },
+    );
+    dateNow.mockRestore();
   });
 
   it("formats current and pending-history timestamps in the configured user timezone", async () => {

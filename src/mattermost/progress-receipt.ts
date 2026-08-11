@@ -21,6 +21,8 @@ export type MattermostProgressReceiptState = {
    * not a finite, non-negative number.
    */
   noteUsage: (runId: string, outputTokens: number) => void;
+  /** Records cumulative transcript output usage when the harness emits no usage event. */
+  noteTranscriptUsage: (outputTokens: number) => void;
   /** Drops any pending (unsent) receipt and restarts the elapsed-time clock. */
   reset: () => void;
   /**
@@ -80,6 +82,7 @@ export function createMattermostProgressReceipt(params?: {
   let turnStartedAt = now();
   let currentRunId: string | undefined;
   let latestOutputTokens: number | undefined;
+  let transcriptOutputTokens: number | undefined;
   const openToolIntervals = new Map<string, number>();
   const closedToolIntervals: ToolInterval[] = [];
 
@@ -87,6 +90,7 @@ export function createMattermostProgressReceipt(params?: {
     turnStartedAt = now();
     currentRunId = undefined;
     latestOutputTokens = undefined;
+    transcriptOutputTokens = undefined;
     openToolIntervals.clear();
     closedToolIntervals.length = 0;
   };
@@ -96,7 +100,8 @@ export function createMattermostProgressReceipt(params?: {
   // completed/in-flight intervals, clipped to the turn). Not strict provider
   // generation tok/s.
   const computeApproxTps = (): number | undefined => {
-    if (latestOutputTokens === undefined || !(latestOutputTokens > 0)) {
+    const outputTokens = latestOutputTokens ?? transcriptOutputTokens;
+    if (outputTokens === undefined || !(outputTokens > 0)) {
       return undefined;
     }
     const nowMs = now();
@@ -117,7 +122,7 @@ export function createMattermostProgressReceipt(params?: {
     if (!(denomMs > 0)) {
       return undefined;
     }
-    const tps = latestOutputTokens / (denomMs / 1000);
+    const tps = outputTokens / (denomMs / 1000);
     return Number.isFinite(tps) && tps > 0 ? tps : undefined;
   };
 
@@ -153,6 +158,7 @@ export function createMattermostProgressReceipt(params?: {
       // A new run id means a new agent run: any usage tally collected under
       // the previous run id no longer describes this one.
       latestOutputTokens = undefined;
+      transcriptOutputTokens = undefined;
     },
     noteUsage(runId, outputTokens) {
       if (!runId || runId !== currentRunId) {
@@ -162,6 +168,12 @@ export function createMattermostProgressReceipt(params?: {
         return;
       }
       latestOutputTokens = outputTokens;
+    },
+    noteTranscriptUsage(outputTokens) {
+      if (!Number.isFinite(outputTokens) || outputTokens < 0) {
+        return;
+      }
+      transcriptOutputTokens = outputTokens;
     },
     reset() {
       pendingLine = undefined;
