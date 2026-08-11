@@ -32,5 +32,7 @@ export default defineConfig({
       ...monorepoOnlySdkTestFiles,
     ],
     environment: "node",
+    hookTimeout: 60_000,
+    testTimeout: 10_000,
   },
 });

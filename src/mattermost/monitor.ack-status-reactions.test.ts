@@ -286,6 +286,9 @@ function createRuntimeCore(cfg: OpenClawConfig) {
   );
   return {
     config: { current: () => cfg },
+    events: {
+      onAgentEvent: () => () => {},
+    },
     logging: {
       shouldLogVerbose: () => false,
       getChildLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),

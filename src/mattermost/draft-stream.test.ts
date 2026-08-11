@@ -539,6 +539,31 @@ describe("createMattermostDraftStream forceNewMessage", () => {
     });
   });
 
+  it("carries a trailing metrics receipt through the remaining delta exactly once", async () => {
+    const { stream } = createDraftStreamFixture();
+
+    stream.updateAssistantText("First block");
+    await stream.flush();
+    await stream.forceNewMessage();
+    stream.updateAssistantText("Second block complete");
+    await stream.flush();
+
+    const receiptLine = "🛠️ 1 tool call · ⏱️ 3s";
+    const finalWithReceipt = `First block\n\nSecond block complete\n${receiptLine}`;
+    expect(stream.resolveFinalText(finalWithReceipt)).toEqual({
+      kind: "remaining",
+      text: `Second block complete\n${receiptLine}`,
+      publishedParts: [{ messageId: "post-1", content: "First block" }],
+    });
+    // A second diff pass over the already-reduced remaining text (the path a
+    // deliverNormally fallback takes) must not strip or duplicate the receipt.
+    expect(stream.resolveFinalText(`Second block complete\n${receiptLine}`)).toEqual({
+      kind: "full",
+      text: `Second block complete\n${receiptLine}`,
+      publishedParts: [{ messageId: "post-1", content: "First block" }],
+    });
+  });
+
   it("strips confirmed assistant blocks but not transient progress generations", async () => {
     const { stream } = createDraftStreamFixture();
 

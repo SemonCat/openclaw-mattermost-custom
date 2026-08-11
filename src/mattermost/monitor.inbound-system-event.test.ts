@@ -378,6 +378,9 @@ function createRuntimeCore(
     config: {
       current: () => cfg,
     },
+    events: {
+      onAgentEvent: () => () => {},
+    },
     logging: {
       shouldLogVerbose: () => Boolean(overrides.verboseDebug),
       getChildLogger: () => ({

@@ -40,9 +40,22 @@ import {
   type MattermostTurnReactionGateFacts,
 } from "./monitor-turn-reactions.js";
 import type { MattermostMonitorContext } from "./monitor-types.js";
+import { createMattermostProgressReceipt } from "./progress-receipt.js";
 import { deliverMattermostReplyPayload, joinMattermostVisibleContent } from "./reply-delivery.js";
 import type { HistoryEntry, ReplyPayload } from "./runtime-api.js";
 import { createChannelMessageReplyPipeline } from "./runtime-api.js";
+
+type MattermostAgentEventRuntime = {
+  events?: {
+    onAgentEvent?: (
+      listener: (event: {
+        runId?: string;
+        stream: string;
+        data: Record<string, unknown>;
+      }) => void,
+    ) => () => void;
+  };
+};
 import { sendMessageMattermost } from "./send.js";
 import { withMattermostSessionAdmissionRetry } from "./session-admission-retry.js";
 import { recordMattermostThreadParticipation } from "./thread-participation.js";
@@ -191,6 +204,21 @@ export async function dispatchMattermostInboundTurn(
       }
     },
   });
+  const progressReceipt = createMattermostProgressReceipt();
+  // Public, ungated agent-event bus (not the trusted-plugin-only `core.state.*`
+  // APIs this plugin already avoids relying on for durability): correlates
+  // cumulative output-token usage snapshots to this turn's run id.
+  const eventRuntime = core as unknown as MattermostAgentEventRuntime;
+  const unsubscribeUsageEvents =
+    eventRuntime.events?.onAgentEvent?.((evt) => {
+      if (evt.stream !== "usage") {
+        return;
+      }
+      const outputTokens = evt.data.outputTokens;
+      if (typeof evt.runId === "string" && typeof outputTokens === "number") {
+        progressReceipt.noteUsage(evt.runId, outputTokens);
+      }
+    }) ?? (() => {});
   const enterBlockPreviewActivity = (activity: "reasoning" | "text" | "tool") => {
     if (account.streamingMode !== "block") {
       return undefined;
@@ -352,8 +380,10 @@ export async function dispatchMattermostInboundTurn(
           recordMattermostThreadParticipation(account.accountId, channelId, effectiveReplyToId);
         }
       };
+      const payloadForDelivery =
+        info.kind === "final" ? progressReceipt.prepareFinalPayload(payloadEntry) : payloadEntry;
       const result = await deliverMattermostReplyWithDraftPreview({
-        payload: payloadEntry,
+        payload: payloadForDelivery,
         info,
         kind,
         client,
@@ -429,6 +459,7 @@ export async function dispatchMattermostInboundTurn(
             // The provider final is already visible even though later bookkeeping failed.
             // Settle progress before rethrowing so late callbacks cannot revive stale draft state.
             progressDraft.markFinalReplyDelivered();
+            progressReceipt.settleFinalDelivery(true);
           }
         }
         throw error;
@@ -439,6 +470,7 @@ export async function dispatchMattermostInboundTurn(
       }
       if (info.kind === "final") {
         progressDraft.markFinalReplyDelivered();
+        progressReceipt.settleFinalDelivery(result.visibleReplySent === true);
       }
       return result;
     },
@@ -533,6 +565,9 @@ export async function dispatchMattermostInboundTurn(
                 ...(suppressDefaultToolProgressMessages
                   ? { suppressDefaultToolProgressMessages: true }
                   : {}),
+                onAgentRunStart: (runId) => {
+                  progressReceipt.noteRunStart(runId);
+                },
                 onModelSelected,
                 onPartialReply: (payloadResult) =>
                   account.streamingMode === "progress"
@@ -576,6 +611,9 @@ export async function dispatchMattermostInboundTurn(
                 onToolStart: async (payloadValue) => {
                   hasStartedWork = true;
                   reactions.setTool(payloadValue.name);
+                  if (payloadValue.phase === "start") {
+                    progressReceipt.noteToolCall(payloadValue.name, payloadValue.toolCallId);
+                  }
                   if (!draftToolProgressEnabled) {
                     return;
                   }
@@ -601,6 +639,9 @@ export async function dispatchMattermostInboundTurn(
                   await Promise.all([boundarySettled, progressSettled]);
                 },
                 onItemEvent: async (payloadLocal) => {
+                  if (payloadLocal.kind === "tool" && payloadLocal.phase === "end") {
+                    progressReceipt.noteToolCallEnd(payloadLocal.toolCallId);
+                  }
                   if (!draftToolProgressEnabled) {
                     return;
                   }
@@ -630,6 +671,11 @@ export async function dispatchMattermostInboundTurn(
                   reactions.cancelPending();
                   reactions.setThinking();
                 },
+                onQueuedFollowupAdmitted: () => {
+                  // A pending receipt describes the turn that just finished; an
+                  // admitted followup starts a fresh turn's tool/elapsed tally.
+                  progressReceipt.reset();
+                },
               },
             }),
           },
@@ -639,6 +685,7 @@ export async function dispatchMattermostInboundTurn(
     dispatchError = true;
     throw err;
   } finally {
+    unsubscribeUsageEvents();
     try {
       await draftStream.stop();
     } catch (err) {

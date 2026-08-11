@@ -45,7 +45,7 @@ mkdir -p /tmp/openclaw/mattermost-custom
 npm run build
 npm pack --omit=dev --pack-destination /tmp/openclaw/mattermost-custom
 openclaw plugins install \
-  /tmp/openclaw/mattermost-custom/openclaw-mattermost-custom-2026.7.2.tgz --force
+  /tmp/openclaw/mattermost-custom/openclaw-mattermost-custom-2026.8.1-beta.1.tgz --force
 ```
 
 Do not use `plugins install --link` or add this source checkout to
@@ -89,7 +89,9 @@ Compared with the official plugin, this build preserves:
 
 Because this is a private external plugin rather than an OpenClaw-trusted official
 installation, inbound WebSocket posts are dispatched directly and are not replayed
-from OpenClaw's privileged durable ingress queue after a Gateway restart.
+from OpenClaw's privileged durable ingress queue after a Gateway restart. Thread
+participation is also process-local, so its seven-day mention-bypass window resets
+when the Gateway restarts instead of persisting like the trusted official plugin.
 
 ## Package build
 
@@ -129,24 +131,17 @@ shared Mattermost contract tests and the downstream behavior tests.
 ### Test status against the published npm SDK
 
 This repo builds and tests against the published `openclaw` npm package
-(`>=2026.7.2-beta.7`), not the OpenClaw monorepo checkout. Two categories of
-tests behave differently from the monorepo for that reason:
+(`2026.8.1-beta.1`), not the OpenClaw monorepo checkout. One category of tests
+behaves differently from the monorepo for that reason:
 
-- Thirteen suites import test-only Plugin SDK subpaths (`channel-test-helpers`,
+- Twelve suites import test-only Plugin SDK subpaths (`channel-test-helpers`,
   `plugin-test-runtime`, `test-env`, `test-state`,
   `plugin-state-test-runtime`, `plugin-test-api`, `channel-contract-testing`)
   that the published npm package intentionally does not ship (they exist only
   in the monorepo, resolved via tsconfig paths). They are excluded in
   `vitest.config.ts` and do not run in a standalone checkout.
-- Two tests assert monorepo-HEAD SDK behavior that the published npm SDK does
-  not have yet: `src/channel.test.ts` expects select command options to render
-  as `` `label: \`command\`` `` (upstream `src/interactive/payload.ts`), and
-  `src/mattermost/monitor-draft-delivery.test.ts` expects a draft-preview
-  supplement retry driven by the SDK finalizable draft lifecycle. Both are
-  known red against `2026.7.2-beta.7`; re-check them when a newer `openclaw`
-  npm release catches up to the monorepo HEAD behavior.
 
-All other suites run green via `vitest run`.
+All included suites run green via `vitest run`.
 
 ## Docs
 
