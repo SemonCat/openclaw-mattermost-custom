@@ -840,6 +840,16 @@ describe("mattermost inbound user posts", () => {
     const dateNow = vi.spyOn(Date, "now").mockReturnValue(0);
     const socket = new FakeWebSocket();
     const abortController = new AbortController();
+    const config: OpenClawConfig = {
+      ...testConfig,
+      channels: {
+        mattermost: {
+          ...testConfig.channels?.mattermost,
+          replyToMode: "all",
+        },
+      },
+    };
+    mockState.runtimeCore = createRuntimeCore(config);
     mockState.abortController = abortController;
     mockState.dispatchInboundMessage.mockImplementation(async (params) => {
       const replyOptions = params.replyOptions as {
@@ -851,7 +861,7 @@ describe("mattermost inbound user posts", () => {
         target: {
           agentId: "main",
           sessionId: "session-1",
-          sessionKey: "mattermost:default:channel:chan-1",
+          sessionKey: String(params.ctx.SessionKey),
         },
         messageId: "assistant-message-1",
         messageSeq: 1,
@@ -887,7 +897,7 @@ describe("mattermost inbound user posts", () => {
     });
 
     const monitor = monitorMattermostProvider({
-      config: testConfig,
+      config,
       runtime: testRuntime(),
       abortSignal: abortController.signal,
       webSocketFactory: () => socket,

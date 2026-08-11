@@ -638,4 +638,83 @@ describe("mattermost lifecycle status reactions", () => {
     ]);
     expect(finalByPost.get("post-steered")).toEqual(["+eyes", "+white_check_mark", "-eyes"]);
   });
+
+  it("keeps concurrent root threads in the same channel on independent reaction lifecycles", async () => {
+    const socket = new FakeWebSocket();
+    const abortController = new AbortController();
+    const config: OpenClawConfig = {
+      ...baseConfig,
+      channels: {
+        mattermost: {
+          ...baseConfig.channels?.mattermost,
+          replyToMode: "all",
+        },
+      },
+      messages: {
+        ackReactionScope: "all",
+        statusReactions: { enabled: true },
+        queue: { mode: "steer" },
+      },
+    };
+    mockState.runtimeCore = createRuntimeCore(config);
+
+    let releaseFirst: (() => void) | undefined;
+    let releaseSecond: (() => void) | undefined;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    let firstStarted = false;
+    let secondStarted = false;
+    mockState.dispatchInboundMessage
+      .mockImplementationOnce(async () => {
+        firstStarted = true;
+        await firstGate;
+        return { queuedFinal: false, counts: { final: 1 } };
+      })
+      .mockImplementationOnce(async () => {
+        secondStarted = true;
+        await secondGate;
+        return { queuedFinal: false, counts: { final: 1 } };
+      });
+
+    const monitor = monitorMattermostProvider({
+      config,
+      runtime: testRuntime(),
+      abortSignal: abortController.signal,
+      webSocketFactory: () => socket,
+    });
+    await vi.waitFor(() => expect(socket.openListenerCount).toBeGreaterThan(0));
+    socket.emitOpen();
+
+    const firstEmit = emitMattermostChannelPost(socket, {
+      id: "thread-root-a",
+      message: "first thread",
+    });
+    await vi.waitFor(() => expect(firstStarted).toBe(true));
+    const secondEmit = emitMattermostChannelPost(socket, {
+      id: "thread-root-b",
+      message: "second thread",
+    });
+    await vi.waitFor(() => expect(secondStarted).toBe(true));
+
+    releaseFirst?.();
+    await firstEmit;
+
+    const afterFirstFinished = requestedReactionsByPost(mockState.request);
+    expect(afterFirstFinished.get("thread-root-a")).toContain("+white_check_mark");
+    expect(afterFirstFinished.get("thread-root-b")).not.toContain("+white_check_mark");
+
+    releaseSecond?.();
+    await secondEmit;
+    abortController.abort();
+    socket.emitClose(1000);
+    await monitor;
+
+    const finalByPost = requestedReactionsByPost(mockState.request);
+    expect(finalByPost.get("thread-root-a")).toContain("+white_check_mark");
+    expect(finalByPost.get("thread-root-b")).toContain("+white_check_mark");
+  });
 });

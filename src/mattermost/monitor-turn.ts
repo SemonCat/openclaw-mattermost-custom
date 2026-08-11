@@ -136,7 +136,7 @@ export async function dispatchMattermostInboundTurn(
     agentId: route.agentId,
     accountId: account.accountId,
     postId: post.id ?? "",
-    sessionKey: route.sessionKey,
+    sessionKey: thread.sessionKey,
     lifecycleStore: reactionLifecycleStore,
     gate: {
       isDirect: kind === "direct",
@@ -221,7 +221,7 @@ export async function dispatchMattermostInboundTurn(
   // cumulative output-token usage snapshots to this turn's run id.
   const eventRuntime = core as unknown as MattermostAgentEventRuntime;
   const transcriptUsage = createMattermostTranscriptUsageAccumulator({
-    sessionKey: route.sessionKey,
+    sessionKey: thread.sessionKey,
     onCumulativeOutputTokens: (outputTokens) => {
       progressReceipt.noteTranscriptUsage(outputTokens);
     },
