@@ -4,13 +4,48 @@ import { createServer } from "node:http";
 import { createChannelPartialDeliveryError } from "openclaw/plugin-sdk/channel-inbound";
 import { createInboundDebouncer } from "openclaw/plugin-sdk/channel-inbound-debounce";
 import { createMessageReceiptFromOutboundResults } from "openclaw/plugin-sdk/channel-outbound";
-import { createTestInboundDebounceFlush } from "openclaw/plugin-sdk/channel-test-helpers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
 import type { MattermostPost } from "./client.js";
 import type { MattermostEventPayload } from "./monitor-websocket.js";
 import { monitorMattermostProvider } from "./monitor.js";
 import type { OpenClawConfig, ReplyPayload, RuntimeEnv } from "./runtime-api.js";
+
+type TestInboundLifecycle = {
+  abortSignal?: AbortSignal;
+  onAdopted?: () => void | Promise<void>;
+  onDeferred?: () => void;
+  onAdoptionFinalizing?: () => void;
+  onFailed?: (error: unknown) => void | Promise<void>;
+  onAbandoned?: () => void | Promise<void>;
+};
+
+type TestInboundDispatch = (params: {
+  abortSignal: AbortSignal;
+  onAdopted: () => Promise<void>;
+  onDeferred: () => void;
+  onAdoptionFinalizing: () => void;
+  onFailed?: (error: unknown) => Promise<void>;
+  onAbandoned: () => Promise<void>;
+}) => Promise<void>;
+
+// Keep this standalone integration suite runnable against the published SDK.
+// The monorepo helper is intentionally not part of the npm package.
+const createTestInboundDebounceFlush = (params: {
+  lifecycle?: TestInboundLifecycle;
+  dispatch: TestInboundDispatch;
+}) => {
+  const source = params.lifecycle;
+  const completion = params.dispatch({
+    abortSignal: source?.abortSignal ?? new AbortController().signal,
+    onAdopted: async () => await source?.onAdopted?.(),
+    onDeferred: () => source?.onDeferred?.(),
+    onAdoptionFinalizing: () => source?.onAdoptionFinalizing?.(),
+    onFailed: source?.onFailed ? async (error) => await source.onFailed?.(error) : undefined,
+    onAbandoned: async () => await source?.onAbandoned?.(),
+  });
+  return { admission: completion, completion };
+};
 
 class FakeWebSocket {
   public readonly sent: string[] = [];
@@ -95,6 +130,7 @@ const mockState = vi.hoisted(() => ({
   dispatchInboundMessage: vi.fn(),
   enqueueSystemEvent: vi.fn(),
   fetchMattermostMe: vi.fn(),
+  fetchMattermostPost: vi.fn(),
   getGlobalHookRunner: vi.fn(),
   progressDrafts: [] as Array<{ getSnapshot: () => { lines: readonly unknown[] } }>,
   registerMattermostMonitorSlashCommands: vi.fn(),
@@ -149,6 +185,7 @@ vi.mock("./client.js", async () => {
     ...actual,
     createMattermostClient: mockState.createMattermostClient,
     fetchMattermostMe: mockState.fetchMattermostMe,
+    fetchMattermostPost: mockState.fetchMattermostPost,
     normalizeMattermostBaseUrl: (value: string | undefined) => value?.trim() ?? "",
     updateMattermostPost: mockState.updateMattermostPost,
   };
@@ -312,6 +349,15 @@ function createRuntimeCore(
           payload: ReplyPayload,
           info: { kind: "tool" | "block" | "final" },
         ) => Promise<unknown>;
+        onDelivered?: (
+          payload: ReplyPayload,
+          info: { kind: "tool" | "block" | "final" },
+          result?: {
+            messageIds?: string[];
+            visibleReplySent?: boolean;
+            content?: string;
+          },
+        ) => Promise<void> | void;
         onError?: unknown;
       };
       replyOptions?: Record<string, unknown>;
@@ -322,7 +368,7 @@ function createRuntimeCore(
         onRecordError?: (err: unknown) => void;
       };
     }) => {
-      mockState.deliveryPlanObserver(turn.delivery.observeMessageSent);
+      mockState.deliveryPlanObserver(turn.delivery);
       await recordInboundSession({
         storePath: "/tmp/openclaw-test-sessions.json",
         sessionKey: turn.ctxPayload.SessionKey ?? turn.route.sessionKey,
@@ -554,6 +600,7 @@ describe("mattermost inbound user posts", () => {
       username: "openclaw",
       update_at: 1,
     });
+    mockState.fetchMattermostPost.mockResolvedValue({ message: "" });
     mockState.registerMattermostMonitorSlashCommands.mockResolvedValue(undefined);
     mockState.registerPluginHttpRoute.mockReturnValue(vi.fn());
     mockState.resolveChannelInfo.mockResolvedValue({
@@ -706,13 +753,71 @@ describe("mattermost inbound user posts", () => {
 
     expect(mockState.enqueueSystemEvent).not.toHaveBeenCalled();
     expect(mockState.dispatchInboundMessage).toHaveBeenCalledTimes(1);
-    expect(mockState.deliveryPlanObserver).toHaveBeenCalledExactlyOnceWith(true);
+    expect(mockState.deliveryPlanObserver).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ observeMessageSent: true }),
+    );
     const ctx = mockState.dispatchInboundMessage.mock.calls.at(0)?.[0].ctx;
     expect(ctx?.BodyForAgent).toBe("hello from mattermost");
     expect(ctx?.ConversationLabel).toBe("Town Square id:chan-1");
     expect(ctx?.MessageSid).toBe("post-inbound-system-event-regular");
     expect(ctx?.OriginatingChannel).toBe("mattermost");
     expect(ctx?.Provider).toBe("mattermost");
+  });
+
+  it("appends the progress receipt after a routed final delivery is acknowledged", async () => {
+    const socket = new FakeWebSocket();
+    const abortController = new AbortController();
+    mockState.abortController = abortController;
+    mockState.dispatchInboundMessage.mockImplementation(async () => {
+      const delivery = mockState.deliveryPlanObserver.mock.calls.at(-1)?.[0] as
+        | {
+            onDelivered?: (
+              payload: ReplyPayload,
+              info: { kind: "final" },
+              result: {
+                messageIds: string[];
+                visibleReplySent: boolean;
+                content: string;
+              },
+            ) => Promise<void>;
+          }
+        | undefined;
+      await delivery?.onDelivered?.(
+        { text: "Routed final" },
+        { kind: "final" },
+        {
+          messageIds: ["routed-final-post"],
+          visibleReplySent: true,
+          content: "Routed final",
+        },
+      );
+      abortController.abort();
+    });
+
+    const monitor = monitorMattermostProvider({
+      config: testConfig,
+      runtime: testRuntime(),
+      abortSignal: abortController.signal,
+      webSocketFactory: () => socket,
+    });
+
+    await vi.waitFor(() => {
+      expect(socket.openListenerCount).toBeGreaterThan(0);
+    });
+    socket.emitOpen();
+    await emitMattermostChannelPost(socket, {
+      id: "post-routed-final-receipt",
+      message: "show the receipt",
+    });
+    socket.emitClose(1000);
+    await monitor;
+
+    expect(mockState.updateMattermostPost).toHaveBeenCalledOnce();
+    expect(mockState.updateMattermostPost).toHaveBeenCalledWith(
+      {},
+      "routed-final-post",
+      { message: expect.stringMatching(/^Routed final\n⏱️ \d+s$/) },
+    );
   });
 
   it("formats current and pending-history timestamps in the configured user timezone", async () => {

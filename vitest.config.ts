@@ -13,7 +13,6 @@ const monorepoOnlySdkTestFiles = [
   "src/mattermost/client.fetch-timeout.test.ts",
   "src/mattermost/monitor-ingress.test.ts",
   "src/mattermost/monitor.ack-status-reactions.test.ts",
-  "src/mattermost/monitor.inbound-system-event.test.ts",
   "src/mattermost/reply-delivery.test.ts",
   "src/mattermost/send.test.ts",
   "src/mattermost/target-resolution.loopback.test.ts",

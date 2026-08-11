@@ -15,7 +15,11 @@ import {
 import { getGlobalHookRunner } from "openclaw/plugin-sdk/plugin-runtime";
 import type { finalizeInboundContext } from "openclaw/plugin-sdk/reply-runtime";
 import { resolveInboundLastRouteSessionKey } from "openclaw/plugin-sdk/routing";
-import type { MattermostPost } from "./client.js";
+import {
+  fetchMattermostPost,
+  updateMattermostPost,
+  type MattermostPost,
+} from "./client.js";
 import {
   createMattermostDraftPreviewBoundaryController,
   createMattermostDraftStream,
@@ -380,10 +384,8 @@ export async function dispatchMattermostInboundTurn(
           recordMattermostThreadParticipation(account.accountId, channelId, effectiveReplyToId);
         }
       };
-      const payloadForDelivery =
-        info.kind === "final" ? progressReceipt.prepareFinalPayload(payloadEntry) : payloadEntry;
       const result = await deliverMattermostReplyWithDraftPreview({
-        payload: payloadForDelivery,
+        payload: payloadEntry,
         info,
         kind,
         client,
@@ -459,7 +461,6 @@ export async function dispatchMattermostInboundTurn(
             // The provider final is already visible even though later bookkeeping failed.
             // Settle progress before rethrowing so late callbacks cannot revive stale draft state.
             progressDraft.markFinalReplyDelivered();
-            progressReceipt.settleFinalDelivery(true);
           }
         }
         throw error;
@@ -470,9 +471,45 @@ export async function dispatchMattermostInboundTurn(
       }
       if (info.kind === "final") {
         progressDraft.markFinalReplyDelivered();
-        progressReceipt.settleFinalDelivery(result.visibleReplySent === true);
       }
       return result;
+    },
+    onDelivered: async (payloadEntry, info, result) => {
+      if (
+        info.kind !== "final" ||
+        payloadEntry.isError ||
+        result?.visibleReplySent === false
+      ) {
+        return;
+      }
+      const messageIds = result?.receipt
+        ? listMessageReceiptPlatformIds(result.receipt)
+        : (result?.messageIds ?? []).filter((messageId) => messageId.trim());
+      const messageId = messageIds.at(-1);
+      if (!messageId) {
+        return;
+      }
+      try {
+        const currentText =
+          messageIds.length === 1 && typeof result?.content === "string"
+            ? result.content
+            : ((await fetchMattermostPost(client, messageId)).message ?? "");
+        const prepared = progressReceipt.prepareFinalPayload({
+          ...payloadEntry,
+          text: currentText,
+        });
+        if (prepared.text === currentText) {
+          return;
+        }
+        await updateMattermostPost(client, messageId, { message: prepared.text });
+        progressReceipt.settleFinalDelivery(true);
+      } catch (error: unknown) {
+        // The reply is already visible. A metrics-only edit must never turn a
+        // successful delivery into a failed turn or trigger a duplicate send.
+        monitor.logVerboseMessage(
+          `mattermost progress receipt edit failed post=${messageId}: ${String(error)}`,
+        );
+      }
     },
     onError: (err, info) => {
       runtime.error?.(`mattermost ${info.kind} reply failed: ${String(err)}`);
