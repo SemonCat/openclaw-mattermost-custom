@@ -51,7 +51,10 @@ import {
   type RuntimeEnv,
 } from "./runtime-api.js";
 import { sendMessageMattermost } from "./send.js";
-import { withMattermostSessionAdmissionRetry } from "./session-admission-retry.js";
+import {
+  isMattermostSessionAdmissionRaceError,
+  withMattermostSessionAdmissionRetry,
+} from "./session-admission-retry.js";
 import {
   MATTERMOST_SLASH_POST_METHOD,
   getMattermostCommand,
@@ -745,9 +748,12 @@ export function createSlashCommandHttpHandler(params: SlashHttpHandlerParams) {
       log?.(`mattermost: slash command handler error: ${sanitizeCommandLookupError(err)}`);
       try {
         const to = `channel:${channelId}`;
+        // Preserve the invocation's root_id so this last-resort fallback still lands in the
+        // thread the user invoked from, matching handleSlashCommandAsync's own error delivery.
         await sendMessageMattermost(to, "Sorry, something went wrong processing that command.", {
           cfg: currentCfg,
           accountId: account.accountId,
+          replyToId: payload.root_id,
         });
       } catch {
         // best-effort error reply
@@ -874,126 +880,198 @@ async function handleSlashCommandAsync(params: {
     return;
   }
 
-  // Build inbound context — the command text is the body
-  const ctxPayload = finalizeInboundContext({
-    Body: commandText,
-    BodyForAgent: commandText,
-    RawBody: commandText,
-    CommandBody: commandText,
-    From:
-      kind === "direct"
-        ? `mattermost:${senderId}`
-        : kind === "group"
-          ? `mattermost:group:${channelId}`
-          : `mattermost:channel:${channelId}`,
-    To: to,
-    SessionKey: thread.sessionKey,
-    ParentSessionKey: thread.parentSessionKey,
-    AccountId: route.accountId,
-    ChatType: chatType,
-    ConversationLabel: fromLabel,
-    GroupSubject: kind !== "direct" ? channelDisplay || roomLabel : undefined,
-    SenderName: senderName,
-    SenderId: senderId,
-    Provider: "mattermost" as const,
-    Surface: "mattermost" as const,
-    MessageSid: triggerId ?? `slash-${Date.now()}`,
-    Timestamp: Date.now(),
-    WasMentioned: true,
-    CommandAuthorized: commandAuthorized,
-    CommandSource: "native" as const,
-    OriginatingChannel: "mattermost" as const,
-    OriginatingTo: to,
-    ReplyToId: thread.effectiveReplyToId,
-    MessageThreadId: thread.effectiveReplyToId,
-  });
+  // The core session-admission race this retries only surfaces as a rejection right at
+  // dispatch's admission check (before any delivery), typically caused by a concurrent config
+  // hot reload changing the session record mid-flight. Re-resolving cfg/route/thread/ctxPayload
+  // fresh on every attempt — instead of replaying the first attempt's snapshot — means a retry
+  // targets current routing rather than a session shape config has already superseded.
+  // MessageSid/Timestamp are captured once below so both attempts stay the same invocation.
+  const invocationSid = triggerId ?? `slash-${Date.now()}`;
+  const invocationTimestamp = Date.now();
 
-  const textLimit = core.channel.text.resolveTextChunkLimit(cfg, "mattermost", account.accountId, {
-    fallbackLimit: account.textChunkLimit ?? 4000,
-  });
-  const tableMode = core.channel.text.resolveMarkdownTableMode({
-    cfg,
-    channel: "mattermost",
-    accountId: account.accountId,
-  });
-
-  const humanDelay = resolveHumanDelayConfig(cfg, route.agentId);
-  const deliveryBarrier = createMattermostReplyDeliveryBarrier({
-    isDirect: kind === "direct",
-    dmRetryOptions: account.config.dmChannelRetry,
-  });
+  const resolveDispatchAttempt = () => {
+    const attemptCfg = getMattermostRuntime().config.current() as OpenClawConfig;
+    const attemptRoute = core.channel.routing.resolveAgentRoute({
+      cfg: attemptCfg,
+      channel: "mattermost",
+      accountId: account.accountId,
+      teamId,
+      peer: {
+        kind,
+        id: kind === "direct" ? senderId : channelId,
+      },
+    });
+    const attemptThread = resolveMattermostThreadSessionContext({
+      baseSessionKey: attemptRoute.sessionKey,
+      kind,
+      postId: undefined,
+      replyToMode: resolveMattermostReplyToMode(account, kind),
+      threadRootId: rootId,
+    });
+    // Build inbound context — the command text is the body
+    const attemptCtxPayload = finalizeInboundContext({
+      Body: commandText,
+      BodyForAgent: commandText,
+      RawBody: commandText,
+      CommandBody: commandText,
+      From:
+        kind === "direct"
+          ? `mattermost:${senderId}`
+          : kind === "group"
+            ? `mattermost:group:${channelId}`
+            : `mattermost:channel:${channelId}`,
+      To: to,
+      SessionKey: attemptThread.sessionKey,
+      ParentSessionKey: attemptThread.parentSessionKey,
+      AccountId: attemptRoute.accountId,
+      ChatType: chatType,
+      ConversationLabel: fromLabel,
+      GroupSubject: kind !== "direct" ? channelDisplay || roomLabel : undefined,
+      SenderName: senderName,
+      SenderId: senderId,
+      Provider: "mattermost" as const,
+      Surface: "mattermost" as const,
+      MessageSid: invocationSid,
+      Timestamp: invocationTimestamp,
+      WasMentioned: true,
+      CommandAuthorized: commandAuthorized,
+      CommandSource: "native" as const,
+      OriginatingChannel: "mattermost" as const,
+      OriginatingTo: to,
+      ReplyToId: attemptThread.effectiveReplyToId,
+      MessageThreadId: attemptThread.effectiveReplyToId,
+    });
+    return {
+      cfg: attemptCfg,
+      route: attemptRoute,
+      thread: attemptThread,
+      ctxPayload: attemptCtxPayload,
+    };
+  };
 
   // Set as soon as typing starts or a reply is delivered, proving this attempt passed
   // admission and started user-visible work. A session-admission retry below must never
   // re-run past that point.
   let hasStartedWork = false;
-  await withMattermostSessionAdmissionRetry({
-    hasStartedWork: () => hasStartedWork,
-    run: () =>
-      core.channel.inbound.dispatch({
-        cfg,
-        channel: "mattermost",
-        accountId: account.accountId,
-        route: {
-          agentId: route.agentId,
-          dmScope: route.dmScope,
-          sessionKey: route.sessionKey,
-        },
-        ctxPayload,
-        delivery: {
-          observeMessageSent: true,
-          deliver: async (payload) => {
-            hasStartedWork = true;
-            const result = await deliverMattermostReplyPayload({
-              core,
-              cfg,
-              payload,
-              to,
-              accountId: account.accountId,
-              agentId: route.agentId,
-              replyToId: thread.effectiveReplyToId,
-              textLimit,
-              tableMode,
-              sendMessage: sendMessageMattermost,
-              onDmChannelResolution: deliveryBarrier.trackDmChannelResolution,
-            });
-            if (result.visibleReplySent) {
-              runtime.log?.(`delivered slash reply to ${to}`);
-            }
-            return result;
+  let lastAttempt: ReturnType<typeof resolveDispatchAttempt> | undefined;
+
+  try {
+    await withMattermostSessionAdmissionRetry({
+      hasStartedWork: () => hasStartedWork,
+      run: () => {
+        const attempt = resolveDispatchAttempt();
+        lastAttempt = attempt;
+        const textLimit = core.channel.text.resolveTextChunkLimit(
+          attempt.cfg,
+          "mattermost",
+          account.accountId,
+          { fallbackLimit: account.textChunkLimit ?? 4000 },
+        );
+        const tableMode = core.channel.text.resolveMarkdownTableMode({
+          cfg: attempt.cfg,
+          channel: "mattermost",
+          accountId: account.accountId,
+        });
+        const humanDelay = resolveHumanDelayConfig(attempt.cfg, attempt.route.agentId);
+        const deliveryBarrier = createMattermostReplyDeliveryBarrier({
+          isDirect: kind === "direct",
+          dmRetryOptions: account.config.dmChannelRetry,
+        });
+        return core.channel.inbound.dispatch({
+          cfg: attempt.cfg,
+          channel: "mattermost",
+          accountId: account.accountId,
+          route: {
+            agentId: attempt.route.agentId,
+            dmScope: attempt.route.dmScope,
+            sessionKey: attempt.route.sessionKey,
           },
-          onError: (err, info) => {
-            runtime.error?.(
-              `mattermost slash ${info.kind} reply failed: ${sanitizeCommandLookupError(err)}`,
-            );
-          },
-        },
-        replyPipeline: {
-          typing: {
-            start: () => {
+          ctxPayload: attempt.ctxPayload,
+          delivery: {
+            observeMessageSent: true,
+            deliver: async (payload) => {
               hasStartedWork = true;
-              return sendMattermostTyping(client, { channelId, parentId: thread.effectiveReplyToId });
-            },
-            onStartError: (err) => {
-              logTypingFailure({
-                log: (message) => log?.(message),
-                channel: "mattermost",
-                target: channelId,
-                error: err,
+              const result = await deliverMattermostReplyPayload({
+                core,
+                cfg: attempt.cfg,
+                payload,
+                to,
+                accountId: account.accountId,
+                agentId: attempt.route.agentId,
+                replyToId: attempt.thread.effectiveReplyToId,
+                textLimit,
+                tableMode,
+                sendMessage: sendMessageMattermost,
+                onDmChannelResolution: deliveryBarrier.trackDmChannelResolution,
               });
+              if (result.visibleReplySent) {
+                runtime.log?.(`delivered slash reply to ${to}`);
+              }
+              return result;
+            },
+            onError: (err, info) => {
+              runtime.error?.(
+                `mattermost slash ${info.kind} reply failed: ${sanitizeCommandLookupError(err)}`,
+              );
             },
           },
-        },
-        dispatcherOptions: {
-          resolveFollowupAdmissionBarrierTimeoutPolicy: deliveryBarrier.resolveTimeoutPolicy,
-          onDeliverySettled: deliveryBarrier.markDeliverySettled,
-          humanDelay,
-        },
-        replyOptions: {
-          disableBlockStreaming:
-            typeof account.blockStreaming === "boolean" ? !account.blockStreaming : undefined,
-        },
-      }),
-  });
+          replyPipeline: {
+            typing: {
+              start: () => {
+                hasStartedWork = true;
+                return sendMattermostTyping(client, {
+                  channelId,
+                  parentId: attempt.thread.effectiveReplyToId,
+                });
+              },
+              onStartError: (err) => {
+                logTypingFailure({
+                  log: (message) => log?.(message),
+                  channel: "mattermost",
+                  target: channelId,
+                  error: err,
+                });
+              },
+            },
+          },
+          dispatcherOptions: {
+            resolveFollowupAdmissionBarrierTimeoutPolicy: deliveryBarrier.resolveTimeoutPolicy,
+            onDeliverySettled: deliveryBarrier.markDeliverySettled,
+            humanDelay,
+          },
+          replyOptions: {
+            disableBlockStreaming:
+              typeof account.blockStreaming === "boolean" ? !account.blockStreaming : undefined,
+          },
+        });
+      },
+    });
+  } catch (error) {
+    // Only take over error delivery for the specific race pattern, and only while nothing
+    // has been delivered yet (hasStartedWork false) — any other error, or this same race
+    // after work started, falls through to the HTTP handler's generic fallback below.
+    // Because hasStartedWork is false in this branch, replying here can never duplicate a
+    // successful dispatch.
+    if (!hasStartedWork && isMattermostSessionAdmissionRaceError(error)) {
+      log?.(
+        `mattermost: slash command session-admission race did not clear after retry; sending actionable reply: ${sanitizeCommandLookupError(error)}`,
+      );
+      try {
+        await sendMessageMattermost(
+          to,
+          "Still finishing a previous action in this conversation. Please wait a few seconds and run the command again.",
+          {
+            cfg: lastAttempt?.cfg ?? cfg,
+            accountId: account.accountId,
+            replyToId: lastAttempt?.thread.effectiveReplyToId,
+          },
+        );
+        return;
+      } catch {
+        // Fall through to the HTTP handler's generic best-effort fallback.
+      }
+    }
+    throw error;
+  }
 }
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */
