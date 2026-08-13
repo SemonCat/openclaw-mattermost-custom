@@ -5,6 +5,7 @@ import type {
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildChannelModelHeader,
+  clearSessionModelOverrideEntry,
   createMattermostChannelModelCommand,
   resolveMattermostCommandChannelId,
   setMattermostChannelModel,
@@ -93,8 +94,17 @@ function createHarness(initialConfig: OpenClawConfig = {}) {
       header,
     })),
   };
+  const clearParentSessionModelOverride = vi.fn(async () => ({ status: "cleared" as const }));
+  dependencies.clearParentSessionModelOverride = clearParentSessionModelOverride;
   const command = createMattermostChannelModelCommand(api, dependencies);
-  return { api, cfg, command, dependencies, mutateConfigFile };
+  return {
+    api,
+    cfg,
+    command,
+    dependencies,
+    mutateConfigFile,
+    clearParentSessionModelOverride,
+  };
 }
 
 describe("buildChannelModelHeader", () => {
@@ -126,6 +136,36 @@ describe("setMattermostChannelModel", () => {
   });
 });
 
+describe("clearSessionModelOverrideEntry", () => {
+  it("clears persisted model, provider, runtime, and auth profile pins", () => {
+    const result = clearSessionModelOverrideEntry(
+      {
+        sessionId: "session-1",
+        updatedAt: 1,
+        providerOverride: "pc-llama",
+        modelOverride: "qwen3.6-27b-uncensored-iq4_xs",
+        modelOverrideSource: "user",
+        modelOverrideRouteResolution: "resolved",
+        modelProvider: "pc-llama",
+        model: "qwen3.6-27b-uncensored-iq4_xs",
+        contextTokens: 262_144,
+        authProfileOverride: "local-model",
+        authProfileOverrideSource: "user",
+      },
+      "opencode-go/deepseek-v4-flash",
+    );
+
+    expect(result.updated).toBe(true);
+    expect(result.entry).not.toHaveProperty("providerOverride");
+    expect(result.entry).not.toHaveProperty("modelOverride");
+    expect(result.entry).not.toHaveProperty("modelProvider");
+    expect(result.entry).not.toHaveProperty("model");
+    expect(result.entry).not.toHaveProperty("contextTokens");
+    expect(result.entry).not.toHaveProperty("authProfileOverride");
+    expect(result.entry.liveModelSwitchPending).toBe(true);
+  });
+});
+
 describe("/channel_model", () => {
   beforeEach(() => vi.clearAllMocks());
 
@@ -150,6 +190,22 @@ describe("/channel_model", () => {
     expect(result.text).toContain("Channel default model set");
   });
 
+  it("clears the parent channel session model override after saving the default", async () => {
+    const harness = createHarness();
+
+    const result = await harness.command.handler(
+      createContext({ args: "openai/gpt-5.6-sol" }),
+    );
+
+    expect(harness.clearParentSessionModelOverride).toHaveBeenCalledWith({
+      cfg: harness.cfg,
+      agentId: "main",
+      channelId: "channel-1",
+      effectiveModel: "openai/gpt-5.6-sol",
+    });
+    expect(result.text).toContain("Cleared the active channel session model override");
+  });
+
   it("resets to the agent default and removes the channel override", async () => {
     const harness = createHarness({
       channels: { modelByChannel: { mattermost: { "channel-1": "openai/gpt-5.6-sol" } } },
@@ -164,6 +220,24 @@ describe("/channel_model", () => {
       "🤖 **Default model:** `openai/gpt-5.6-terra`\nTeam notes",
     );
     expect(result.text).toContain("reset to agent default");
+    expect(harness.clearParentSessionModelOverride).toHaveBeenCalledWith({
+      cfg: harness.cfg,
+      agentId: "main",
+      channelId: "channel-1",
+      effectiveModel: "openai/gpt-5.6-terra",
+    });
+  });
+
+  it("warns when the parent session override cannot be cleared", async () => {
+    const harness = createHarness();
+    harness.clearParentSessionModelOverride.mockRejectedValueOnce(new Error("session locked"));
+
+    const result = await harness.command.handler(
+      createContext({ args: "openai/gpt-5.6-sol" }),
+    );
+
+    expect(result.text).toContain("channel default was saved");
+    expect(result.text).toContain("session locked");
   });
 
   it("shows status without writing config or touching Mattermost", async () => {

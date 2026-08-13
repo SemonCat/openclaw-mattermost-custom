@@ -27,8 +27,10 @@ Run these commands inside a Mattermost channel:
 The setting is stored in
 `channels.modelByChannel.mattermost.<mattermost-channel-id>`. The command
 preserves existing channel-header content and manages only its own first line.
-An active session-level `/model` override still takes precedence until it is
-cleared with `/model default`.
+After saving the setting, it clears the interactive parent channel session's
+model/provider/runtime pin so newly created threads immediately use the new
+channel default. Existing threads remain independent and keep their own
+session-level `/model` overrides.
 
 The plugin also reconciles this managed line for every public or private
 channel visible to a configured bot account. It starts five seconds after the

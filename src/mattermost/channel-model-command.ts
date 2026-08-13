@@ -8,6 +8,12 @@ import type {
   OpenClawPluginCommandDefinition,
   PluginCommandContext,
 } from "openclaw/plugin-sdk/core";
+import { applyModelOverrideToSessionEntry } from "openclaw/plugin-sdk/model-session-runtime";
+import {
+  patchSessionEntry,
+  resolveStorePath,
+  type SessionEntry,
+} from "openclaw/plugin-sdk/session-store-runtime";
 import { isPrivateNetworkOptInEnabled } from "openclaw/plugin-sdk/ssrf-runtime";
 import { resolveMattermostAccount } from "./accounts.js";
 import {
@@ -23,7 +29,11 @@ export const MATTERMOST_HEADER_MAX_CHARS = 1024;
 const MANAGED_HEADER_LINE_PATTERN =
   /^🤖 \*\*Default model:\*\* `[^`\r\n]+`[\t ]*(?:\r?\n|$)/u;
 const SESSION_OVERRIDE_NOTE =
-  "An active `/model` session override still takes precedence; use `/model default` to clear it.";
+  "Existing threads keep their own `/model` overrides; changing the channel default clears only the parent channel session override.";
+
+export type ClearParentSessionModelOverrideResult = {
+  status: "cleared" | "already-default" | "missing";
+};
 
 export type ChannelModelCommandDependencies = {
   buildModelsProviderData: typeof buildModelsProviderData;
@@ -31,6 +41,7 @@ export type ChannelModelCommandDependencies = {
   fetchMattermostChannel: typeof fetchMattermostChannel;
   patchMattermostChannelHeader: typeof patchMattermostChannelHeader;
   resolveMattermostAccount: typeof resolveMattermostAccount;
+  clearParentSessionModelOverride: typeof clearParentSessionModelOverride;
 };
 
 const defaultDependencies: ChannelModelCommandDependencies = {
@@ -39,6 +50,7 @@ const defaultDependencies: ChannelModelCommandDependencies = {
   fetchMattermostChannel,
   patchMattermostChannelHeader,
   resolveMattermostAccount,
+  clearParentSessionModelOverride,
 };
 
 type ParsedModelReference = {
@@ -46,6 +58,63 @@ type ParsedModelReference = {
   model: string;
   ref: string;
 };
+
+export function resolveMattermostParentChannelSessionKey(params: {
+  agentId: string;
+  channelId: string;
+}): string {
+  return `agent:${params.agentId}:mattermost:channel:${params.channelId}`;
+}
+
+export function clearSessionModelOverrideEntry(
+  entry: SessionEntry,
+  effectiveModel: string,
+): { entry: SessionEntry; updated: boolean } {
+  const parsed = parseModelReference(effectiveModel);
+  if (!parsed) {
+    throw new Error(`Invalid effective model reference: ${effectiveModel}`);
+  }
+  const nextEntry = { ...entry };
+  const { updated } = applyModelOverrideToSessionEntry({
+    entry: nextEntry,
+    selection: {
+      provider: parsed.provider,
+      model: parsed.model,
+      isDefault: true,
+    },
+    selectionSource: "user",
+    markLiveSwitchPending: true,
+  });
+  return { entry: nextEntry, updated };
+}
+
+export async function clearParentSessionModelOverride(params: {
+  cfg: OpenClawConfig;
+  agentId: string;
+  channelId: string;
+  effectiveModel: string;
+}): Promise<ClearParentSessionModelOverrideResult> {
+  const sessionKey = resolveMattermostParentChannelSessionKey(params);
+  const storePath = resolveStorePath(params.cfg.session?.store, { agentId: params.agentId });
+  let sawEntry = false;
+  let changed = false;
+  await patchSessionEntry({
+    agentId: params.agentId,
+    sessionKey,
+    storePath,
+    readConsistency: "latest",
+    preserveActivity: true,
+    replaceEntry: true,
+    requireWriteSuccess: true,
+    update: (entry) => {
+      sawEntry = true;
+      const cleared = clearSessionModelOverrideEntry(entry, params.effectiveModel);
+      changed = cleared.updated;
+      return cleared.updated ? cleared.entry : null;
+    },
+  });
+  return { status: !sawEntry ? "missing" : changed ? "cleared" : "already-default" };
+}
 
 export function countUnicodeCharacters(value: string): number {
   return Array.from(value).length;
@@ -255,6 +324,19 @@ export function createMattermostChannelModelCommand(
         });
       }
 
+      let sessionOverrideResult: ClearParentSessionModelOverrideResult | undefined;
+      let sessionOverrideWarning: string | undefined;
+      try {
+        sessionOverrideResult = await dependencies.clearParentSessionModelOverride({
+          cfg,
+          agentId: ctx.agentId,
+          channelId,
+          effectiveModel: selectedModel,
+        });
+      } catch (error) {
+        sessionOverrideWarning = `⚠️ The channel default was saved, but the active channel session override could not be cleared: ${errorMessage(error)}`;
+      }
+
       let headerWarning: string | undefined;
       if (channel.header !== nextHeader) {
         try {
@@ -267,8 +349,24 @@ export function createMattermostChannelModelCommand(
       const result = resetToDefault
         ? `✅ Channel model reset to agent default: \`${selectedModel}\`.`
         : `✅ Channel default model set to \`${selectedModel}\`.`;
+      const sessionOverrideMessage =
+        sessionOverrideResult?.status === "cleared"
+          ? "✅ Cleared the active channel session model override; new threads will use the channel default."
+          : sessionOverrideResult?.status === "already-default"
+            ? "ℹ️ The active channel session already had no model override."
+            : sessionOverrideResult?.status === "missing"
+              ? "ℹ️ No active parent channel session existed yet; new threads will use the channel default."
+              : undefined;
       return {
-        text: [result, headerWarning, SESSION_OVERRIDE_NOTE].filter(Boolean).join("\n"),
+        text: [
+          result,
+          sessionOverrideMessage,
+          sessionOverrideWarning,
+          headerWarning,
+          SESSION_OVERRIDE_NOTE,
+        ]
+          .filter(Boolean)
+          .join("\n"),
       };
     },
   };
