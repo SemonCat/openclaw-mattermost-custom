@@ -1,6 +1,6 @@
 {
   "name": "openclaw-mattermost-custom",
-  "version": "2026.8.1-beta.1",
+  "version": "2026.8.1-beta.2",
   "private": true,
   "description": "SemonCat downstream Mattermost channel plugin for OpenClaw.",
   "repository": {
@@ -24,13 +24,13 @@
   },
   "devDependencies": {
     "@types/node": "26.1.2",
-    "openclaw": "2026.8.1-beta.1",
+    "openclaw": "2026.8.1-beta.2",
     "tsdown": "0.22.1",
     "typescript": "6.0.3",
     "vitest": "4.1.10"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.7.2-beta.7"
+    "openclaw": ">=2026.8.1-beta.2"
   },
   "peerDependenciesMeta": {
     "openclaw": {
@@ -67,17 +67,17 @@
         { "key": "token", "kind": "string", "sensitive": true, "cli": { "flags": "--token <token>", "description": "Mattermost bot token" } },
         { "key": "botToken", "kind": "string", "sensitive": true, "cli": { "flags": "--bot-token <token>", "description": "Mattermost bot token" } },
         { "key": "httpUrl", "kind": "string", "cli": { "flags": "--http-url <url>", "description": "Mattermost server URL" } },
-        { "key": "useEnv", "kind": "boolean", "cli": { "flags": "--use-env", "description": "Use Mattermost environment credentials" } }
+        { "key": "useEnv", "kind": "boolean", "cli": { "flags": "--use-env", "description": "Use Mattermost environment credentials" }, "envVars": ["MATTERMOST_BOT_TOKEN", "MATTERMOST_URL"] }
       ] }
     },
     "install": {
-      "minHostVersion": ">=2026.7.2-beta.7"
+      "minHostVersion": ">=2026.8.1-beta.2"
     },
     "compat": {
-      "pluginApi": ">=2026.7.2-beta.7"
+      "pluginApi": ">=2026.8.1-beta.2"
     },
     "build": {
-      "openclawVersion": "2026.8.1-beta.1",
+      "openclawVersion": "2026.8.1-beta.2",
       "bundledDist": false
     }
   }

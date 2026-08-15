@@ -9,6 +9,7 @@ import {
   createMattermostChannelModelCommand,
   resolveMattermostCommandChannelId,
   setMattermostChannelModel,
+  waitForMattermostChannelModelRuntime,
   type ChannelModelCommandDependencies,
 } from "./channel-model-command.js";
 import type { OpenClawConfig } from "./runtime-api.js";
@@ -93,6 +94,7 @@ function createHarness(initialConfig: OpenClawConfig = {}) {
       id: channelId,
       header,
     })),
+    waitForRuntimeConfig: vi.fn(async () => cfg),
   };
   const clearParentSessionModelOverride = vi.fn(async () => ({ status: "cleared" as const }));
   dependencies.clearParentSessionModelOverride = clearParentSessionModelOverride;
@@ -190,6 +192,23 @@ describe("/channel_model", () => {
     expect(result.text).toContain("Channel default model set");
   });
 
+  it("resolves a configured model alias before saving the channel override", async () => {
+    const harness = createHarness({
+      agents: {
+        defaults: {
+          models: { "openai/gpt-5.6-sol": { alias: "openai-sol" } },
+        },
+      },
+    });
+
+    const result = await harness.command.handler(createContext({ args: "openai-sol" }));
+
+    expect(harness.cfg.channels?.modelByChannel?.mattermost?.["channel-1"]).toBe(
+      "openai/gpt-5.6-sol",
+    );
+    expect(result.text).toContain("Channel default model set");
+  });
+
   it("clears the parent channel session model override after saving the default", async () => {
     const harness = createHarness();
 
@@ -204,6 +223,54 @@ describe("/channel_model", () => {
       effectiveModel: "openai/gpt-5.6-sol",
     });
     expect(result.text).toContain("Cleared the active channel session model override");
+  });
+
+  it("does not report success or touch the session/header until runtime config is active", async () => {
+    const harness = createHarness();
+    let releaseRuntime!: () => void;
+    const runtimeReady = new Promise<void>((resolve) => {
+      releaseRuntime = resolve;
+    });
+    harness.dependencies.waitForRuntimeConfig = vi.fn(async () => {
+      await runtimeReady;
+      return harness.cfg;
+    });
+    harness.command = createMattermostChannelModelCommand(harness.api, harness.dependencies);
+
+    let completed = false;
+    const resultPromise = harness.command
+      .handler(createContext({ args: "openai/gpt-5.6-sol" }))
+      .then((result) => {
+        completed = true;
+        return result;
+      });
+    await vi.waitFor(() => expect(harness.mutateConfigFile).toHaveBeenCalled());
+
+    expect(completed).toBe(false);
+    expect(harness.clearParentSessionModelOverride).not.toHaveBeenCalled();
+    expect(harness.dependencies.patchMattermostChannelHeader).not.toHaveBeenCalled();
+
+    releaseRuntime();
+    const result = await resultPromise;
+    expect(result.text).toContain("✅ Channel default model set");
+  });
+
+  it("warns without a success marker when runtime activation times out", async () => {
+    const harness = createHarness();
+    harness.dependencies.waitForRuntimeConfig = vi.fn(async () => {
+      throw new Error("runtime activation timed out");
+    });
+    harness.command = createMattermostChannelModelCommand(harness.api, harness.dependencies);
+
+    const result = await harness.command.handler(
+      createContext({ args: "openai/gpt-5.6-sol" }),
+    );
+
+    expect(result.text).toContain("saved");
+    expect(result.text).toContain("not active");
+    expect(result.text).not.toContain("✅");
+    expect(harness.clearParentSessionModelOverride).not.toHaveBeenCalled();
+    expect(harness.dependencies.patchMattermostChannelHeader).not.toHaveBeenCalled();
   });
 
   it("resets to the agent default and removes the channel override", async () => {
@@ -236,7 +303,7 @@ describe("/channel_model", () => {
       createContext({ args: "openai/gpt-5.6-sol" }),
     );
 
-    expect(result.text).toContain("channel default was saved");
+    expect(result.text).toContain("channel default is active");
     expect(result.text).toContain("session locked");
   });
 
@@ -269,5 +336,28 @@ describe("/channel_model", () => {
 
     expect(result.text).toContain("not direct messages");
     expect(harness.dependencies.buildModelsProviderData).not.toHaveBeenCalled();
+  });
+});
+
+describe("waitForMattermostChannelModelRuntime", () => {
+  it("polls until the exact channel override is visible", async () => {
+    const configs: OpenClawConfig[] = [
+      { channels: { modelByChannel: { mattermost: { "channel-1": "openai/old" } } } },
+      { channels: { modelByChannel: { mattermost: { "channel-1": "openai/new" } } } },
+    ];
+
+    await expect(
+      waitForMattermostChannelModelRuntime({
+        currentConfig: () => configs.shift() ?? configs[0] ?? {},
+        channelId: "channel-1",
+        expectedOverride: "openai/new",
+        timeoutMs: 100,
+        pollIntervalMs: 0,
+      }),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        channels: { modelByChannel: { mattermost: { "channel-1": "openai/new" } } },
+      }),
+    );
   });
 });

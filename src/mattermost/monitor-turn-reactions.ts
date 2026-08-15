@@ -25,6 +25,11 @@ export type MattermostTurnReactionGateFacts = {
 
 type MattermostReactionLifecycleOwner = object;
 type MattermostReactionRegistration = "owner" | "joined" | "standalone";
+type MattermostReactionLifecycleGroup = {
+  sessionKey: string;
+  owner: MattermostReactionLifecycleOwner;
+  controllers: Set<StatusReactionController>;
+};
 
 export type MattermostReactionLifecycleStore = ReturnType<
   typeof createMattermostReactionLifecycleStore
@@ -35,14 +40,36 @@ export type MattermostReactionLifecycleStore = ReturnType<
  * Core has no generic cross-message correlation for status reactions (each channel's
  * ack/status wiring is built fresh per inbound dispatch call), so this store is the
  * Mattermost-local mechanism: the first post for a sessionKey becomes the "owner" and the
- * shared source of truth; a later post arriving while the owner is still active "joins" it
- * so both posts' reactions transition together and settle once, when the owner finishes.
+ * shared source of truth; a later post arriving while the owner is still active "joins" it.
+ * Queue-drain admission can transfer that post into a new owner group before either turn
+ * settles, so the previous owner cannot terminalize a queued follow-up.
  */
 export function createMattermostReactionLifecycleStore() {
-  const entries = new Map<
-    string,
-    { owner: MattermostReactionLifecycleOwner; controllers: Set<StatusReactionController> }
+  const entries = new Map<string, MattermostReactionLifecycleGroup>();
+  const groupsByOwner = new WeakMap<
+    MattermostReactionLifecycleOwner,
+    MattermostReactionLifecycleGroup
   >();
+  const groupsByController = new WeakMap<
+    StatusReactionController,
+    MattermostReactionLifecycleGroup
+  >();
+
+  const createGroup = (params: {
+    sessionKey: string;
+    owner: MattermostReactionLifecycleOwner;
+    controller: StatusReactionController;
+  }) => {
+    const group: MattermostReactionLifecycleGroup = {
+      sessionKey: params.sessionKey,
+      owner: params.owner,
+      controllers: new Set([params.controller]),
+    };
+    entries.set(params.sessionKey, group);
+    groupsByOwner.set(params.owner, group);
+    groupsByController.set(params.controller, group);
+    return group;
+  };
 
   const attach = (params: {
     sessionKey: string;
@@ -52,16 +79,14 @@ export function createMattermostReactionLifecycleStore() {
   }): MattermostReactionRegistration => {
     const active = entries.get(params.sessionKey);
     if (!active) {
-      entries.set(params.sessionKey, {
-        owner: params.owner,
-        controllers: new Set([params.controller]),
-      });
+      createGroup(params);
       return "owner";
     }
     if (!params.allowJoin) {
       return "standalone";
     }
     active.controllers.add(params.controller);
+    groupsByController.set(params.controller, active);
     return "joined";
   };
 
@@ -70,8 +95,8 @@ export function createMattermostReactionLifecycleStore() {
     owner: MattermostReactionLifecycleOwner,
     apply: (controller: StatusReactionController) => Promise<void> | void,
   ) => {
-    const active = entries.get(sessionKey);
-    if (!active || active.owner !== owner) {
+    const active = groupsByOwner.get(owner);
+    if (!active || active.sessionKey !== sessionKey) {
       return false;
     }
     for (const controller of active.controllers) {
@@ -81,7 +106,28 @@ export function createMattermostReactionLifecycleStore() {
   };
 
   const detach = (sessionKey: string, controller: StatusReactionController) => {
-    entries.get(sessionKey)?.controllers.delete(controller);
+    const group = groupsByController.get(controller);
+    if (!group || group.sessionKey !== sessionKey) {
+      return;
+    }
+    group.controllers.delete(controller);
+    groupsByController.delete(controller);
+  };
+
+  const transfer = (params: {
+    sessionKey: string;
+    owner: MattermostReactionLifecycleOwner;
+    controller: StatusReactionController;
+  }) => {
+    const previous = groupsByController.get(params.controller);
+    if (previous?.owner === params.owner) {
+      return;
+    }
+    if (previous) {
+      previous.controllers.delete(params.controller);
+      groupsByController.delete(params.controller);
+    }
+    createGroup(params);
   };
 
   const finish = async (
@@ -89,16 +135,32 @@ export function createMattermostReactionLifecycleStore() {
     owner: MattermostReactionLifecycleOwner,
     apply: (controller: StatusReactionController) => Promise<void>,
   ) => {
-    const active = entries.get(sessionKey);
-    if (!active || active.owner !== owner) {
+    const active = groupsByOwner.get(owner);
+    if (!active || active.sessionKey !== sessionKey) {
       return false;
     }
-    entries.delete(sessionKey);
-    await Promise.all(Array.from(active.controllers, (controller) => apply(controller)));
+    groupsByOwner.delete(owner);
+    if (entries.get(sessionKey) === active) {
+      entries.delete(sessionKey);
+    }
+    const controllers = Array.from(active.controllers);
+    await Promise.all(
+      controllers.map(async (controller) => {
+        // Admission correlation can transfer a controller at the exact owner-final
+        // boundary. Re-check explicit ownership after the synchronous finish call
+        // unwinds, before making a terminal controller transition irreversible.
+        await Promise.resolve();
+        if (groupsByController.get(controller) !== active) {
+          return;
+        }
+        groupsByController.delete(controller);
+        await apply(controller);
+      }),
+    );
     return true;
   };
 
-  return { attach, update, detach, finish };
+  return { attach, update, detach, transfer, finish };
 }
 
 /** Builds ack and lifecycle reactions for one accepted Mattermost post. */
@@ -162,6 +224,7 @@ export function createMattermostMessageReactionRuntime(params: {
   let initialAckReactionQueued = false;
   const lifecycleOwner: MattermostReactionLifecycleOwner = {};
   let registration: MattermostReactionRegistration | undefined;
+  let queuedFollowupPending = false;
   const queueInitialAckReactionAfterRecord = () => {
     if (initialAckReactionQueued) {
       return;
@@ -201,11 +264,11 @@ export function createMattermostMessageReactionRuntime(params: {
     }
   };
 
-  const finish = async (result: { dispatchError: boolean; anyReplyDelivered: boolean }) => {
+  const settle = async (result: { dispatchError: boolean; anyReplyDelivered: boolean }) => {
     if (!statusReactionsEnabled || !initialAckReactionQueued) {
       return;
     }
-    const settle = async (targetController: StatusReactionController) => {
+    const settleController = async (targetController: StatusReactionController) => {
       if (result.dispatchError) {
         // setError() already sweeps every intermediate reaction (queued/thinking/tool/...)
         // in one pass and keeps only the error emoji; that failure marker must stay visible
@@ -223,7 +286,7 @@ export function createMattermostMessageReactionRuntime(params: {
       await targetController.clear();
     };
     if (registration === "owner") {
-      await lifecycleStore.finish(sessionKey, lifecycleOwner, settle);
+      await lifecycleStore.finish(sessionKey, lifecycleOwner, settleController);
       return;
     }
     // A "joined" post that never actually observes its own error or delivery was genuinely
@@ -238,7 +301,48 @@ export function createMattermostMessageReactionRuntime(params: {
     if (registration === "joined") {
       lifecycleStore.detach(sessionKey, controller);
     }
-    await settle(controller);
+    await settleController(controller);
+  };
+
+  const finish = async (result: { dispatchError: boolean; anyReplyDelivered: boolean }) => {
+    if (queuedFollowupPending && !result.dispatchError && !result.anyReplyDelivered) {
+      return;
+    }
+    await settle(result);
+  };
+
+  const beginQueuedFollowup = () => {
+    if (!statusReactionsEnabled || !initialAckReactionQueued) {
+      return undefined;
+    }
+    queuedFollowupPending = true;
+    if (registration !== "owner") {
+      lifecycleStore.transfer({
+        sessionKey,
+        owner: lifecycleOwner,
+        controller,
+      });
+      registration = "owner";
+    }
+    // A post may briefly have shared the previous owner's current activity before
+    // core proves it is queued. Restore the queued marker until admission.
+    void controller.restoreInitial().catch(() => undefined);
+    return () => {};
+  };
+
+  const admitQueuedFollowup = () => {
+    if (!queuedFollowupPending) {
+      beginQueuedFollowup();
+    }
+    update((targetController) => targetController.setThinking());
+  };
+
+  const finishQueuedFollowup = async (result: {
+    dispatchError: boolean;
+    anyReplyDelivered: boolean;
+  }) => {
+    queuedFollowupPending = false;
+    await settle(result);
   };
 
   return {
@@ -250,6 +354,9 @@ export function createMattermostMessageReactionRuntime(params: {
       update((targetController) => targetController.setTool(toolName)),
     setCompacting: () => update((targetController) => targetController.setCompacting()),
     cancelPending: () => update((targetController) => targetController.cancelPending()),
+    beginQueuedFollowup,
+    admitQueuedFollowup,
+    finishQueuedFollowup,
     finish,
   };
 }

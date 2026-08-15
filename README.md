@@ -32,12 +32,6 @@ model/provider/runtime pin so newly created threads immediately use the new
 channel default. Existing threads remain independent and keep their own
 session-level `/model` overrides.
 
-The plugin also reconciles this managed line for every public or private
-channel visible to a configured bot account. It starts five seconds after the
-plugin starts, then runs again one hour after each completed pass. Header writes
-are serialized and spaced 500 ms apart (at most two writes per second), and
-unchanged headers are not written.
-
 This package is private and is not published to npm or ClawHub. Build a
 self-contained plugin artifact, then install that artifact into OpenClaw's
 managed plugin directory:
@@ -47,7 +41,7 @@ mkdir -p /tmp/openclaw/mattermost-custom
 npm run build
 npm pack --omit=dev --pack-destination /tmp/openclaw/mattermost-custom
 openclaw plugins install \
-  /tmp/openclaw/mattermost-custom/openclaw-mattermost-custom-2026.8.1-beta.1.tgz --force
+  /tmp/openclaw/mattermost-custom/openclaw-mattermost-custom-2026.8.1-beta.2.tgz --force
 ```
 
 Do not use `plugins install --link` or add this source checkout to
@@ -81,8 +75,6 @@ Compared with the official plugin, this build preserves:
 - Dynamic native slash commands from core, skills, and installed plugins.
 - `/channel_model` for reading, setting, or resetting a channel-scoped default
   model while keeping a managed model label in the Mattermost channel header.
-- Startup and hourly reconciliation of managed model labels across visible
-  channel headers, with serialized rate-limited writes.
 - Root-first slash-command names with deterministic `oc_` conflict fallbacks.
 - Safe Mattermost command reconciliation without mutating foreign commands.
 - Thread-aware slash-command callbacks and replies.
@@ -133,7 +125,7 @@ shared Mattermost contract tests and the downstream behavior tests.
 ### Test status against the published npm SDK
 
 This repo builds and tests against the published `openclaw` npm package
-(`2026.8.1-beta.1`), not the OpenClaw monorepo checkout. One category of tests
+(`2026.8.1-beta.2`), not the OpenClaw monorepo checkout. One category of tests
 behaves differently from the monorepo for that reason:
 
 - Twelve suites import test-only Plugin SDK subpaths (`channel-test-helpers`,

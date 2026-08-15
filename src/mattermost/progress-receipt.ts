@@ -1,8 +1,9 @@
 // Mattermost plugin module owns append-once, consume-after-ack final reply metrics receipts.
-import { createChannelProgressReceiptTracker } from "openclaw/plugin-sdk/channel-outbound";
+import { isChannelProgressDraftWorkToolName } from "openclaw/plugin-sdk/channel-outbound";
 import type { ReplyPayload } from "./runtime-api.js";
 
 type ToolInterval = { start: number; end: number };
+type TokenUsage = { inputTokens?: number; outputTokens?: number };
 
 export type MattermostProgressReceiptState = {
   /** Records a started tool call so it counts toward the pending receipt's tally. */
@@ -16,13 +17,13 @@ export type MattermostProgressReceiptState = {
   /** Records the agent run id backing the current turn, so usage events can be correlated to it. */
   noteRunStart: (runId: string) => void;
   /**
-   * Records the latest cumulative output token count reported for `runId`.
-   * Ignored when `runId` does not match the current run or `outputTokens` is
-   * not a finite, non-negative number.
+   * Records the latest cumulative token counts reported for `runId`.
+   * Ignored when `runId` does not match the current run; invalid fields are
+   * ignored independently.
    */
-  noteUsage: (runId: string, outputTokens: number) => void;
-  /** Records cumulative transcript output usage when the harness emits no usage event. */
-  noteTranscriptUsage: (outputTokens: number) => void;
+  noteUsage: (runId: string, usage: TokenUsage) => void;
+  /** Records cumulative transcript usage when the harness emits incomplete usage events. */
+  noteTranscriptUsage: (usage: TokenUsage) => void;
   /** Drops any pending (unsent) receipt and restarts the elapsed-time clock. */
   reset: () => void;
   /**
@@ -75,40 +76,34 @@ export function createMattermostProgressReceipt(params?: {
   now?: () => number;
 }): MattermostProgressReceiptState {
   const now = params?.now ?? Date.now;
-  const tracker = createChannelProgressReceiptTracker(params);
   let pendingLine: string | undefined;
   let delivered = false;
 
   let turnStartedAt = now();
+  let toolCalls = 0;
   let currentRunId: string | undefined;
+  let latestInputTokens: number | undefined;
   let latestOutputTokens: number | undefined;
+  let transcriptInputTokens: number | undefined;
   let transcriptOutputTokens: number | undefined;
   const openToolIntervals = new Map<string, number>();
   const closedToolIntervals: ToolInterval[] = [];
 
   const resetTpsState = () => {
     turnStartedAt = now();
+    toolCalls = 0;
     currentRunId = undefined;
+    latestInputTokens = undefined;
     latestOutputTokens = undefined;
+    transcriptInputTokens = undefined;
     transcriptOutputTokens = undefined;
     openToolIntervals.clear();
     closedToolIntervals.length = 0;
   };
 
-  // Approximate: numerator is the last cumulative usage snapshot observed for
-  // this run, denominator is turn wall time minus tool wall time (union of
-  // completed/in-flight intervals, clipped to the turn). Not strict provider
-  // generation tok/s.
-  const computeApproxTps = (): number | undefined => {
-    const outputTokens = latestOutputTokens ?? transcriptOutputTokens;
-    if (outputTokens === undefined || !(outputTokens > 0)) {
-      return undefined;
-    }
+  const computeTiming = () => {
     const nowMs = now();
-    const turnElapsedMs = nowMs - turnStartedAt;
-    if (!(turnElapsedMs > 0)) {
-      return undefined;
-    }
+    const turnElapsedMs = Math.max(0, nowMs - turnStartedAt);
     const intervals: ToolInterval[] = [...closedToolIntervals];
     for (const start of openToolIntervals.values()) {
       intervals.push({ start, end: nowMs });
@@ -117,24 +112,75 @@ export function createMattermostProgressReceipt(params?: {
       start: Math.max(interval.start, turnStartedAt),
       end: Math.min(interval.end, nowMs),
     }));
-    const toolBusyMs = unionDurationMs(clipped);
-    const denomMs = turnElapsedMs - toolBusyMs;
-    if (!(denomMs > 0)) {
-      return undefined;
+    const toolBusyMs = Math.min(turnElapsedMs, unionDurationMs(clipped));
+    return { turnElapsedMs, toolBusyMs, modelBusyMs: turnElapsedMs - toolBusyMs };
+  };
+
+  const formatTokenCount = (value: number | undefined): string => {
+    if (value === undefined) {
+      return "?";
     }
-    const tps = outputTokens / (denomMs / 1000);
-    return Number.isFinite(tps) && tps > 0 ? tps : undefined;
+    if (value >= 1_000_000) {
+      return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, "")}m`;
+    }
+    if (value >= 1_000) {
+      return `${(value / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
+    }
+    return String(Math.round(value));
+  };
+
+  const recordUsage = (
+    usage: TokenUsage,
+    setInput: (value: number) => void,
+    setOutput: (value: number) => void,
+  ) => {
+    if (
+      typeof usage.inputTokens === "number" &&
+      Number.isFinite(usage.inputTokens) &&
+      usage.inputTokens >= 0
+    ) {
+      setInput(usage.inputTokens);
+    }
+    if (
+      typeof usage.outputTokens === "number" &&
+      Number.isFinite(usage.outputTokens) &&
+      usage.outputTokens >= 0
+    ) {
+      setOutput(usage.outputTokens);
+    }
   };
 
   const buildLine = (): string => {
-    const base = tracker.buildSummaryLine();
-    const tps = computeApproxTps();
-    return tps === undefined ? base : `${base} · ⚡≈${tps.toFixed(1)} tok/s`;
+    const inputTokens = latestInputTokens ?? transcriptInputTokens;
+    const outputTokens = latestOutputTokens ?? transcriptOutputTokens;
+    const { turnElapsedMs, toolBusyMs, modelBusyMs } = computeTiming();
+    const toolLabel = `🛠️ ${toolCalls} tool call${toolCalls === 1 ? "" : "s"}`;
+    const usageLine = [
+      `⬆️ ${formatTokenCount(inputTokens)} in`,
+      `⬇️ ${formatTokenCount(outputTokens)} out`,
+      toolLabel,
+    ].join(" · ");
+    const timingParts = [
+      `⏱️ ${Math.max(1, Math.round(turnElapsedMs / 1_000))}s`,
+      `🧠 ${(modelBusyMs / 1_000).toFixed(1)}s`,
+      `🔧 ${(toolBusyMs / 1_000).toFixed(1)}s`,
+    ];
+    // Approximate: output tokens divided by turn wall time minus the union of
+    // tool intervals. This is not strict provider generation tok/s.
+    if (outputTokens !== undefined && outputTokens > 0 && modelBusyMs > 0) {
+      const tps = outputTokens / (modelBusyMs / 1_000);
+      if (Number.isFinite(tps) && tps > 0) {
+        timingParts.push(`⚡ ≈${tps.toFixed(1)} tok/s`);
+      }
+    }
+    return `${usageLine}\n${timingParts.join(" · ")}`;
   };
 
   return {
     noteToolCall(toolName, toolCallId) {
-      tracker.noteToolCall(toolName);
+      if (isChannelProgressDraftWorkToolName(toolName)) {
+        toolCalls += 1;
+      }
       if (toolCallId) {
         openToolIntervals.set(toolCallId, now());
       }
@@ -157,28 +203,31 @@ export function createMattermostProgressReceipt(params?: {
       currentRunId = runId;
       // A new run id means a new agent run: any usage tally collected under
       // the previous run id no longer describes this one.
+      latestInputTokens = undefined;
       latestOutputTokens = undefined;
+      transcriptInputTokens = undefined;
       transcriptOutputTokens = undefined;
     },
-    noteUsage(runId, outputTokens) {
+    noteUsage(runId, usage) {
       if (!runId || runId !== currentRunId) {
         return;
       }
-      if (!Number.isFinite(outputTokens) || outputTokens < 0) {
-        return;
-      }
-      latestOutputTokens = outputTokens;
+      recordUsage(
+        usage,
+        (value) => (latestInputTokens = value),
+        (value) => (latestOutputTokens = value),
+      );
     },
-    noteTranscriptUsage(outputTokens) {
-      if (!Number.isFinite(outputTokens) || outputTokens < 0) {
-        return;
-      }
-      transcriptOutputTokens = outputTokens;
+    noteTranscriptUsage(usage) {
+      recordUsage(
+        usage,
+        (value) => (transcriptInputTokens = value),
+        (value) => (transcriptOutputTokens = value),
+      );
     },
     reset() {
       pendingLine = undefined;
       delivered = false;
-      tracker.reset();
       resetTpsState();
     },
     prepareFinalPayload(payload) {

@@ -832,7 +832,11 @@ describe("mattermost inbound user posts", () => {
     expect(mockState.updateMattermostPost).toHaveBeenCalledWith(
       {},
       "routed-final-post",
-      { message: expect.stringMatching(/^Routed final\n⏱️ \d+s$/) },
+      {
+        message: expect.stringMatching(
+          /^Routed final\n⬆️ \? in · ⬇️ \? out · 🛠️ 0 tool calls\n⏱️ \d+s · 🧠 \d+\.\d+s · 🔧 0\.0s$/,
+        ),
+      },
     );
   });
 
@@ -917,7 +921,10 @@ describe("mattermost inbound user posts", () => {
     expect(mockState.updateMattermostPost).toHaveBeenCalledWith(
       {},
       "codex-final-post",
-      { message: "Codex final\n⏱️ 5s · ⚡≈20.0 tok/s" },
+      {
+        message:
+          "Codex final\n⬆️ 50 in · ⬇️ 100 out · 🛠️ 0 tool calls\n⏱️ 5s · 🧠 5.0s · 🔧 0.0s · ⚡ ≈20.0 tok/s",
+      },
     );
     dateNow.mockRestore();
   });
@@ -2104,7 +2111,11 @@ describe("mattermost inbound user posts", () => {
           chatmode: "onmessage",
           dmPolicy: "open",
           groupPolicy: "open",
-          streaming: { mode: "block", preview: { toolProgress: true } },
+          streaming: {
+            mode: "block",
+            preview: { toolProgress: true },
+            progress: { commandText: "raw" },
+          },
         },
       },
     };

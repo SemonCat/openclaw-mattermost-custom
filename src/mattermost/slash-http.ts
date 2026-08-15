@@ -34,6 +34,10 @@ import {
   resolveMattermostModelPickerEntry,
 } from "./model-picker.js";
 import {
+  pinMattermostExplicitDefaultModelSelection,
+  rewriteMattermostPinnedModelReply,
+} from "./model-session-pin.js";
+import {
   authorizeMattermostCommandInvocation,
   normalizeMattermostAllowList,
 } from "./monitor-auth.js";
@@ -115,6 +119,15 @@ const SECRET_LOG_KEYS = new Set([
   "refresh_token",
   "token",
 ]);
+
+export function resolveMattermostSlashAcknowledgement(commandText: string): string {
+  const match = commandText.trim().match(/^\/channel_model(?:\s+(.+))?$/iu);
+  const args = match?.[1]?.trim().toLowerCase();
+  if (args && args !== "status" && args !== "help") {
+    return "⏳ Channel model update received. Waiting for Gateway runtime activation…";
+  }
+  return "Processing...";
+}
 
 /**
  * Read the full request body as a string.
@@ -719,7 +732,7 @@ export function createSlashCommandHttpHandler(params: SlashHttpHandlerParams) {
     // Acknowledge immediately — we'll send the actual reply asynchronously
     sendJsonResponse(res, 200, {
       response_type: "ephemeral",
-      text: "Processing...",
+      text: resolveMattermostSlashAcknowledgement(commandText),
     });
 
     // Now handle the command asynchronously (post reply as a message)
@@ -847,7 +860,10 @@ async function handleSlashCommandAsync(params: {
 
     const currentModel = resolveMattermostModelPickerCurrentModel({
       cfg,
-      route,
+      route: {
+        agentId: route.agentId,
+        sessionKey: thread.sessionKey,
+      },
       data,
     });
     const view =
@@ -960,6 +976,7 @@ async function handleSlashCommandAsync(params: {
       hasStartedWork: () => hasStartedWork,
       run: () => {
         const attempt = resolveDispatchAttempt();
+        let modelPinResult: ReturnType<typeof pinMattermostExplicitDefaultModelSelection> | undefined;
         lastAttempt = attempt;
         const textLimit = core.channel.text.resolveTextChunkLimit(
           attempt.cfg,
@@ -991,10 +1008,35 @@ async function handleSlashCommandAsync(params: {
             observeMessageSent: true,
             deliver: async (payload) => {
               hasStartedWork = true;
+              let deliveredPayload = payload;
+              try {
+                modelPinResult ??= pinMattermostExplicitDefaultModelSelection({
+                  agentId: attempt.route.agentId,
+                  cfg: attempt.cfg,
+                  commandText,
+                  sessionKey: attempt.thread.sessionKey,
+                });
+                const pin = await modelPinResult;
+                if (pin.pinned) {
+                  deliveredPayload = {
+                    ...payload,
+                    text: rewriteMattermostPinnedModelReply(payload.text ?? "", pin.modelRef),
+                  };
+                }
+              } catch (error) {
+                runtime.error?.(
+                  `mattermost explicit model pin failed: ${sanitizeCommandLookupError(error)}`,
+                );
+                deliveredPayload = {
+                  ...payload,
+                  text: "Model change could not be saved for this Mattermost session. Please retry.",
+                  isError: true,
+                };
+              }
               const result = await deliverMattermostReplyPayload({
                 core,
                 cfg: attempt.cfg,
-                payload,
+                payload: deliveredPayload,
                 to,
                 accountId: account.accountId,
                 agentId: attempt.route.agentId,

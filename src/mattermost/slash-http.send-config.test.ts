@@ -21,6 +21,8 @@ const mockState = vi.hoisted(() => ({
   resolveCommandText: vi.fn((_trigger: string, text: string) => text),
   buildModelsProviderData: vi.fn(async () => ({ providers: [], modelNames: new Map() })),
   resolveMattermostModelPickerEntry: vi.fn(() => ({ kind: "summary" })),
+  resolveMattermostModelPickerCurrentModel: vi.fn(),
+  renderMattermostModelSummaryView: vi.fn(() => ({ text: "model summary", buttons: [] })),
   authorizeMattermostCommandInvocation: vi.fn(() => ({
     ok: true,
     commandAuthorized: true,
@@ -69,10 +71,14 @@ vi.mock("./runtime-api.js", () => {
     formatInboundFromLabel: vi.fn(() => ""),
     rawDataToString: vi.fn((value: unknown) => (typeof value === "string" ? value : "")),
     readRequestBodyWithLimit: mockState.readRequestBodyWithLimit,
-    resolveThreadSessionKeys: vi.fn((params: { baseSessionKey: string }) => ({
-      sessionKey: params.baseSessionKey,
-      parentSessionKey: undefined,
-    })),
+    resolveThreadSessionKeys: vi.fn(
+      (params: { baseSessionKey: string; threadId?: string; parentSessionKey?: string }) => ({
+        sessionKey: params.threadId
+          ? `${params.baseSessionKey}:thread:${params.threadId}`
+          : params.baseSessionKey,
+        parentSessionKey: params.parentSessionKey,
+      }),
+    ),
   };
 });
 
@@ -114,10 +120,10 @@ vi.mock("./client.js", async () => {
 });
 
 vi.mock("./model-picker.js", () => ({
-  renderMattermostModelSummaryView: vi.fn(),
+  renderMattermostModelSummaryView: mockState.renderMattermostModelSummaryView,
   renderMattermostModelsPickerView: vi.fn(),
   renderMattermostProviderPickerView: vi.fn(),
-  resolveMattermostModelPickerCurrentModel: vi.fn(),
+  resolveMattermostModelPickerCurrentModel: mockState.resolveMattermostModelPickerCurrentModel,
   resolveMattermostModelPickerEntry: mockState.resolveMattermostModelPickerEntry,
 }));
 
@@ -223,6 +229,8 @@ describe("slash-http cfg threading", () => {
     mockState.resolveCommandText.mockClear();
     mockState.buildModelsProviderData.mockClear();
     mockState.resolveMattermostModelPickerEntry.mockClear();
+    mockState.resolveMattermostModelPickerCurrentModel.mockClear();
+    mockState.renderMattermostModelSummaryView.mockClear();
     mockState.authorizeMattermostCommandInvocation.mockClear();
     mockState.createMattermostClient.mockClear();
     mockState.fetchMattermostChannel.mockClear();
@@ -280,6 +288,51 @@ describe("slash-http cfg threading", () => {
       expect.objectContaining({
         cfg: runtimeCfg,
         accountId: "default",
+      }),
+    );
+  });
+
+  it("reads the thread session when rendering a bare /model picker", async () => {
+    mockState.parseSlashCommandPayload.mockReturnValueOnce({
+      token: "valid-token",
+      command: "/oc_models",
+      text: "model",
+      channel_id: "chan-1",
+      user_id: "user-1",
+      user_name: "alice",
+      team_id: "team-1",
+      root_id: "root-1",
+    });
+    mockState.buildModelsProviderData.mockResolvedValueOnce({
+      byProvider: new Map([["openai", new Set(["gpt-5.6-sol"])]]),
+      providers: ["openai"],
+      resolvedDefault: { provider: "openai", model: "gpt-5.6-sol" },
+      modelNames: new Map(),
+    });
+    const handler = createSlashCommandHttpHandler({
+      account: accountFixture,
+      cfg: {} as OpenClawConfig,
+      runtime: {} as RuntimeEnv,
+      registeredCommands: [
+        {
+          id: "cmd-1",
+          teamId: "team-1",
+          trigger: "oc_models",
+          token: "valid-token",
+          url: callbackUrlFixture,
+          managed: false,
+        },
+      ],
+    });
+
+    await handler(createRequest(), createResponse().res);
+
+    expect(mockState.resolveMattermostModelPickerCurrentModel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        route: {
+          agentId: "agent-1",
+          sessionKey: "mattermost:session:1:thread:root-1",
+        },
       }),
     );
   });

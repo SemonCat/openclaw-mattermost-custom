@@ -40,30 +40,36 @@ describe("createMattermostProgressReceipt", () => {
     expect(receipt.hasPendingReceipt()).toBe(false);
   });
 
-  it("appends one compact receipt line to a successful final", () => {
+  it("appends two compact receipt lines to a successful final", () => {
     let clock = 1_000;
     const receipt = createMattermostProgressReceipt({ now: () => clock });
     clock += 3_000;
 
     const prepared = receipt.prepareFinalPayload({ text: "All done" });
 
-    expect(prepared.text).toBe("All done\n⏱️ 3s");
+    expect(prepared.text).toBe(
+      "All done\n⬆️ ? in · ⬇️ ? out · 🛠️ 0 tool calls\n⏱️ 3s · 🧠 3.0s · 🔧 0.0s",
+    );
     expect(receipt.hasPendingReceipt()).toBe(true);
   });
 
-  it("omits the tool segment when no tool ran, and pluralizes when more than one did", () => {
+  it("shows zero tool calls and pluralizes non-zero counts", () => {
     const zeroTools = createMattermostProgressReceipt({ now: () => 0 });
-    expect(zeroTools.prepareFinalPayload({ text: "ok" }).text).toBe("ok\n⏱️ 1s");
+    expect(zeroTools.prepareFinalPayload({ text: "ok" }).text).toBe(
+      "ok\n⬆️ ? in · ⬇️ ? out · 🛠️ 0 tool calls\n⏱️ 1s · 🧠 0.0s · 🔧 0.0s",
+    );
 
     const oneTool = createMattermostProgressReceipt({ now: () => 0 });
     oneTool.noteToolCall("bash");
-    expect(oneTool.prepareFinalPayload({ text: "ok" }).text).toBe("ok\n🛠️ 1 tool call · ⏱️ 1s");
+    expect(oneTool.prepareFinalPayload({ text: "ok" }).text).toBe(
+      "ok\n⬆️ ? in · ⬇️ ? out · 🛠️ 1 tool call\n⏱️ 1s · 🧠 0.0s · 🔧 0.0s",
+    );
 
     const twoTools = createMattermostProgressReceipt({ now: () => 0 });
     twoTools.noteToolCall("bash");
     twoTools.noteToolCall("read_file");
     expect(twoTools.prepareFinalPayload({ text: "ok" }).text).toBe(
-      "ok\n🛠️ 2 tool calls · ⏱️ 1s",
+      "ok\n⬆️ ? in · ⬇️ ? out · 🛠️ 2 tool calls\n⏱️ 1s · 🧠 0.0s · 🔧 0.0s",
     );
   });
 
@@ -71,11 +77,11 @@ describe("createMattermostProgressReceipt", () => {
     let clock = 0;
     const receipt = createMattermostProgressReceipt({ now: () => clock });
     receipt.noteRunStart("run-1");
-    receipt.noteUsage("run-1", 100);
+    receipt.noteUsage("run-1", { inputTokens: 15_500, outputTokens: 100 });
     clock = 5_000;
 
     expect(receipt.prepareFinalPayload({ text: "ok" }).text).toBe(
-      "ok\n⏱️ 5s · ⚡≈20.0 tok/s",
+      "ok\n⬆️ 15.5k in · ⬇️ 100 out · 🛠️ 0 tool calls\n⏱️ 5s · 🧠 5.0s · 🔧 0.0s · ⚡ ≈20.0 tok/s",
     );
   });
 
@@ -83,12 +89,12 @@ describe("createMattermostProgressReceipt", () => {
     let clock = 0;
     const receipt = createMattermostProgressReceipt({ now: () => clock });
     receipt.noteRunStart("run-1");
-    receipt.noteTranscriptUsage(50);
-    receipt.noteUsage("run-1", 100);
+    receipt.noteTranscriptUsage({ inputTokens: 15_500, outputTokens: 50 });
+    receipt.noteUsage("run-1", { outputTokens: 100 });
     clock = 5_000;
 
     expect(receipt.prepareFinalPayload({ text: "ok" }).text).toBe(
-      "ok\n⏱️ 5s · ⚡≈20.0 tok/s",
+      "ok\n⬆️ 15.5k in · ⬇️ 100 out · 🛠️ 0 tool calls\n⏱️ 5s · 🧠 5.0s · 🔧 0.0s · ⚡ ≈20.0 tok/s",
     );
   });
 
@@ -96,19 +102,21 @@ describe("createMattermostProgressReceipt", () => {
     let clock = 0;
     const receipt = createMattermostProgressReceipt({ now: () => clock });
     receipt.noteRunStart("run-1");
-    receipt.noteUsage("run-2", 100);
-    receipt.noteUsage("run-1", Number.NaN);
-    receipt.noteUsage("run-1", -1);
+    receipt.noteUsage("run-2", { outputTokens: 100 });
+    receipt.noteUsage("run-1", { inputTokens: Number.NaN, outputTokens: Number.NaN });
+    receipt.noteUsage("run-1", { inputTokens: -1, outputTokens: -1 });
     clock = 5_000;
 
-    expect(receipt.prepareFinalPayload({ text: "ok" }).text).toBe("ok\n⏱️ 5s");
+    expect(receipt.prepareFinalPayload({ text: "ok" }).text).toBe(
+      "ok\n⬆️ ? in · ⬇️ ? out · 🛠️ 0 tool calls\n⏱️ 5s · 🧠 5.0s · 🔧 0.0s",
+    );
   });
 
   it("deducts the union of overlapping tool intervals", () => {
     let clock = 0;
     const receipt = createMattermostProgressReceipt({ now: () => clock });
     receipt.noteRunStart("run-1");
-    receipt.noteUsage("run-1", 100);
+    receipt.noteUsage("run-1", { outputTokens: 100 });
 
     clock = 1_000;
     receipt.noteToolCall("bash", "tool-a");
@@ -122,7 +130,7 @@ describe("createMattermostProgressReceipt", () => {
 
     // Turn = 7s. Overlapping tools occupy the 1s..5s union (4s), leaving 3s.
     expect(receipt.prepareFinalPayload({ text: "ok" }).text).toBe(
-      "ok\n🛠️ 2 tool calls · ⏱️ 7s · ⚡≈33.3 tok/s",
+      "ok\n⬆️ ? in · ⬇️ 100 out · 🛠️ 2 tool calls\n⏱️ 7s · 🧠 3.0s · 🔧 4.0s · ⚡ ≈33.3 tok/s",
     );
   });
 
@@ -130,13 +138,13 @@ describe("createMattermostProgressReceipt", () => {
     let clock = 0;
     const receipt = createMattermostProgressReceipt({ now: () => clock });
     receipt.noteRunStart("run-1");
-    receipt.noteUsage("run-1", 100);
+    receipt.noteUsage("run-1", { outputTokens: 100 });
     clock = 1_000;
     receipt.noteToolCall("bash", "tool-a");
     clock = 6_000;
 
     expect(receipt.prepareFinalPayload({ text: "ok" }).text).toBe(
-      "ok\n🛠️ 1 tool call · ⏱️ 6s · ⚡≈100.0 tok/s",
+      "ok\n⬆️ ? in · ⬇️ 100 out · 🛠️ 1 tool call\n⏱️ 6s · 🧠 1.0s · 🔧 5.0s · ⚡ ≈100.0 tok/s",
     );
   });
 
@@ -144,12 +152,12 @@ describe("createMattermostProgressReceipt", () => {
     let clock = 0;
     const receipt = createMattermostProgressReceipt({ now: () => clock });
     receipt.noteRunStart("run-1");
-    receipt.noteUsage("run-1", 100);
+    receipt.noteUsage("run-1", { outputTokens: 100 });
     receipt.noteToolCall("bash", "tool-a");
     clock = 5_000;
 
     expect(receipt.prepareFinalPayload({ text: "ok" }).text).toBe(
-      "ok\n🛠️ 1 tool call · ⏱️ 5s",
+      "ok\n⬆️ ? in · ⬇️ 100 out · 🛠️ 1 tool call\n⏱️ 5s · 🧠 0.0s · 🔧 5.0s",
     );
   });
 
@@ -157,30 +165,32 @@ describe("createMattermostProgressReceipt", () => {
     let clock = 0;
     const receipt = createMattermostProgressReceipt({ now: () => clock });
     receipt.noteRunStart("run-1");
-    receipt.noteUsage("run-1", 100);
+    receipt.noteUsage("run-1", { outputTokens: 100 });
     clock = 5_000;
     const firstAttempt = receipt.prepareFinalPayload({ text: "answer" });
 
     receipt.settleFinalDelivery(false);
-    receipt.noteUsage("run-1", 200);
+    receipt.noteUsage("run-1", { outputTokens: 200 });
     clock = 10_000;
 
     expect(receipt.prepareFinalPayload({ text: "answer" }).text).toBe(firstAttempt.text);
-    expect(firstAttempt.text).toContain("⚡≈20.0 tok/s");
+    expect(firstAttempt.text).toContain("⚡ ≈20.0 tok/s");
   });
 
   it("clears run usage and tool timing when a queued followup resets the receipt", () => {
     let clock = 0;
     const receipt = createMattermostProgressReceipt({ now: () => clock });
     receipt.noteRunStart("run-1");
-    receipt.noteUsage("run-1", 100);
+    receipt.noteUsage("run-1", { outputTokens: 100 });
     clock = 1_000;
     receipt.noteToolCall("bash", "tool-a");
     clock = 5_000;
     receipt.reset();
     clock = 10_000;
 
-    expect(receipt.prepareFinalPayload({ text: "next" }).text).toBe("next\n⏱️ 5s");
+    expect(receipt.prepareFinalPayload({ text: "next" }).text).toBe(
+      "next\n⬆️ ? in · ⬇️ ? out · 🛠️ 0 tool calls\n⏱️ 5s · 🧠 5.0s · 🔧 0.0s",
+    );
   });
 
   it("does not append a receipt to an error payload, and leaves the tracker untouched", () => {
@@ -239,7 +249,9 @@ describe("createMattermostProgressReceipt", () => {
     clock = 7_000;
     const nextTurn = receipt.prepareFinalPayload({ text: "next answer" });
     // Fresh tally: no leftover tool count, elapsed time restarted at admission.
-    expect(nextTurn.text).toBe("next answer\n⏱️ 2s");
+    expect(nextTurn.text).toBe(
+      "next answer\n⬆️ ? in · ⬇️ ? out · 🛠️ 0 tool calls\n⏱️ 2s · 🧠 2.0s · 🔧 0.0s",
+    );
   });
 
   it("resets an unconsumed pending receipt on a queued-followup turn boundary", () => {
@@ -254,13 +266,17 @@ describe("createMattermostProgressReceipt", () => {
 
     clock = 2_000;
     const nextTurn = receipt.prepareFinalPayload({ text: "turn two" });
-    expect(nextTurn.text).toBe("turn two\n⏱️ 2s");
+    expect(nextTurn.text).toBe(
+      "turn two\n⬆️ ? in · ⬇️ ? out · 🛠️ 0 tool calls\n⏱️ 2s · 🧠 2.0s · 🔧 0.0s",
+    );
   });
 
   it("falls back to the receipt line alone when the final payload has no text", () => {
     const receipt = createMattermostProgressReceipt({ now: () => 0 });
     const prepared = receipt.prepareFinalPayload({});
-    expect(prepared.text).toBe("⏱️ 1s");
+    expect(prepared.text).toBe(
+      "⬆️ ? in · ⬇️ ? out · 🛠️ 0 tool calls\n⏱️ 1s · 🧠 0.0s · 🔧 0.0s",
+    );
   });
 
   it("never mutates the original payload object", () => {
@@ -273,7 +289,9 @@ describe("createMattermostProgressReceipt", () => {
   it("preserves leading whitespace in the final text", () => {
     const receipt = createMattermostProgressReceipt({ now: () => 0 });
     const prepared = receipt.prepareFinalPayload({ text: "  indented answer  \n" });
-    expect(prepared.text).toBe("  indented answer\n⏱️ 1s");
+    expect(prepared.text).toBe(
+      "  indented answer\n⬆️ ? in · ⬇️ ? out · 🛠️ 0 tool calls\n⏱️ 1s · 🧠 0.0s · 🔧 0.0s",
+    );
   });
 
   it("composes with the edit-in-place delivery path: attach, confirm ACK, then consume", async () => {
@@ -283,7 +301,9 @@ describe("createMattermostProgressReceipt", () => {
     const deliverFinal = vi.fn();
 
     const prepared = receipt.prepareFinalPayload({ text: "All good" });
-    expect(prepared.text).toBe("All good\n🛠️ 1 tool call · ⏱️ 1s");
+    expect(prepared.text).toBe(
+      "All good\n⬆️ ? in · ⬇️ ? out · 🛠️ 1 tool call\n⏱️ 1s · 🧠 0.0s · 🔧 0.0s",
+    );
 
     const result = await deliverMattermostReplyWithDraftPreview({
       payload: prepared as never,
@@ -299,7 +319,8 @@ describe("createMattermostProgressReceipt", () => {
     });
 
     expect(updateMattermostPostSpy).toHaveBeenCalledWith(expect.anything(), "preview-post-1", {
-      message: "All good\n🛠️ 1 tool call · ⏱️ 1s",
+      message:
+        "All good\n⬆️ ? in · ⬇️ ? out · 🛠️ 1 tool call\n⏱️ 1s · 🧠 0.0s · 🔧 0.0s",
     });
     // The in-place edit finalized the preview post directly; no separate send needed.
     expect(deliverFinal).not.toHaveBeenCalled();

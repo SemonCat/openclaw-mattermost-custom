@@ -9,6 +9,10 @@ import {
   renderMattermostProviderPickerView,
   resolveMattermostModelPickerCurrentModel,
 } from "./model-picker.js";
+import {
+  pinMattermostExplicitDefaultModelSelection,
+  rewriteMattermostPinnedModelReply,
+} from "./model-session-pin.js";
 import { authorizeMattermostCommandInvocation } from "./monitor-auth.js";
 import {
   buildMattermostModelPickerSelectMessageSid,
@@ -72,6 +76,7 @@ export function createMattermostModelPickerInteractionHandler(
     });
     const { deliveryBarrier, replyOptions, replyPipeline, tableMode, textLimit } =
       params.eventPlan.createReplyPlan();
+    let modelPinResult: ReturnType<typeof pinMattermostExplicitDefaultModelSelection> | undefined;
     await core.channel.inbound.dispatch({
       cfg: params.cfg,
       channel: "mattermost",
@@ -86,9 +91,32 @@ export function createMattermostModelPickerInteractionHandler(
         observeMessageSent: true,
         // Picker-triggered confirmations should stay immediate.
         deliver: async (payload: ReplyPayload) => {
+          let pinnedPayload = payload;
+          try {
+            modelPinResult ??= pinMattermostExplicitDefaultModelSelection({
+              agentId: route.agentId,
+              cfg: params.cfg,
+              commandText: params.commandText,
+              sessionKey: thread.sessionKey,
+            });
+            const pin = await modelPinResult;
+            if (pin.pinned) {
+              pinnedPayload = {
+                ...payload,
+                text: rewriteMattermostPinnedModelReply(payload.text ?? "", pin.modelRef),
+              };
+            }
+          } catch (error) {
+            runtime.error?.(`mattermost explicit model pin failed: ${String(error)}`);
+            pinnedPayload = {
+              ...payload,
+              text: "Model change could not be saved for this Mattermost session. Please retry.",
+              isError: true,
+            };
+          }
           const trimmedPayload = {
-            ...payload,
-            text: core.channel.text.convertMarkdownTables(payload.text ?? "", tableMode).trim(),
+            ...pinnedPayload,
+            text: core.channel.text.convertMarkdownTables(pinnedPayload.text ?? "", tableMode).trim(),
           };
           return await deliverMattermostReplyPayload({
             core,

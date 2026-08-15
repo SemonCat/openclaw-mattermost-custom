@@ -222,8 +222,8 @@ export async function dispatchMattermostInboundTurn(
   const eventRuntime = core as unknown as MattermostAgentEventRuntime;
   const transcriptUsage = createMattermostTranscriptUsageAccumulator({
     sessionKey: thread.sessionKey,
-    onCumulativeOutputTokens: (outputTokens) => {
-      progressReceipt.noteTranscriptUsage(outputTokens);
+    onCumulativeUsage: (usage) => {
+      progressReceipt.noteTranscriptUsage(usage);
     },
   });
   const unsubscribeUsageEvents =
@@ -231,9 +231,13 @@ export async function dispatchMattermostInboundTurn(
       if (evt.stream !== "usage") {
         return;
       }
-      const outputTokens = evt.data.outputTokens;
-      if (typeof evt.runId === "string" && typeof outputTokens === "number") {
-        progressReceipt.noteUsage(evt.runId, outputTokens);
+      if (typeof evt.runId === "string") {
+        progressReceipt.noteUsage(evt.runId, {
+          inputTokens:
+            typeof evt.data.inputTokens === "number" ? evt.data.inputTokens : undefined,
+          outputTokens:
+            typeof evt.data.outputTokens === "number" ? evt.data.outputTokens : undefined,
+        });
       }
     }) ?? (() => {});
   const unsubscribeTranscriptUpdates =
@@ -381,6 +385,8 @@ export async function dispatchMattermostInboundTurn(
     },
   };
   let anyReplyDelivered = false;
+  let queuedFollowupActive = false;
+  let queuedFollowupDeliveryError = false;
   const delivery: ChannelInboundTurnPlan["delivery"] = {
     observeMessageSent: true,
     deliver: async (payloadEntry: ReplyPayload, info) => {
@@ -527,6 +533,9 @@ export async function dispatchMattermostInboundTurn(
       }
     },
     onError: (err, info) => {
+      if (queuedFollowupActive) {
+        queuedFollowupDeliveryError = true;
+      }
       runtime.error?.(`mattermost ${info.kind} reply failed: ${String(err)}`);
     },
   };
@@ -610,31 +619,41 @@ export async function dispatchMattermostInboundTurn(
                 allowToolLifecycleWhenProgressHidden:
                   draftToolProgressEnabled || reactions.statusReactionsEnabled ? true : undefined,
                 preserveProgressCallbackStartOrder: draftPreviewEnabled ? true : undefined,
-                onObservedReplyDelivery: draftToolProgressEnabled
-                  ? () => draftStream.clear()
+                onObservedReplyDelivery:
+                  draftToolProgressEnabled || reactions.statusReactionsEnabled
+                    ? async () => {
+                        anyReplyDelivered = true;
+                        if (draftToolProgressEnabled) {
+                          await draftStream.clear();
+                        }
+                      }
                   : undefined,
                 disableBlockStreaming: draftPreviewEnabled ? true : replyOptions.disableBlockStreaming,
                 ...(suppressDefaultToolProgressMessages
                   ? { suppressDefaultToolProgressMessages: true }
                   : {}),
+                queuedDeliveryCorrelations: reactions.statusReactionsEnabled
+                  ? [{ begin: reactions.beginQueuedFollowup }]
+                  : undefined,
                 onAgentRunStart: (runId) => {
                   progressReceipt.noteRunStart(runId);
                 },
                 onModelSelected,
                 onPartialReply: (payloadResult) =>
                   account.streamingMode === "progress"
-                    ? undefined
+                    ? false
                     : updateDraftFromPartial(payloadResult.text),
                 onAssistantMessageStart: () => {
                   lastPartialText = "";
                   progressDraft.resetReasoningProgress();
                   if (account.streamingMode === "block") {
                     blockPreviewAssistantMessagePending = true;
-                    return;
+                    return false;
                   }
                   if (account.streamingMode !== "progress") {
                     progressDraft.reset();
                   }
+                  return false;
                 },
                 onReasoningEnd: () => {
                   // Hidden reasoning has no boundary; only rendered text, reasoning, or tools rotate preview posts.
@@ -643,15 +662,18 @@ export async function dispatchMattermostInboundTurn(
                   if (account.streamingMode !== "block" && account.streamingMode !== "progress") {
                     progressDraft.reset();
                   }
+                  return false;
                 },
                 onReasoningStream: async (payloadResult) => {
                   hasStartedWork = true;
                   reactions.setThinking();
                   if (account.streamingMode === "progress") {
-                    await progressDraft.pushReasoningProgress(payloadResult.text || "Thinking…", {
-                      snapshot: payloadResult.isReasoningSnapshot === true,
-                    });
-                    return;
+                    return await progressDraft.pushReasoningProgress(
+                      payloadResult.text || "Thinking…",
+                      {
+                        snapshot: payloadResult.isReasoningSnapshot === true,
+                      },
+                    );
                   }
                   if (!lastPartialText) {
                     const boundarySettled = enterBlockPreviewActivity("reasoning");
@@ -659,6 +681,7 @@ export async function dispatchMattermostInboundTurn(
                     previewBoundaryController.noteUpdate();
                     await boundarySettled;
                   }
+                  return false;
                 },
                 onToolStart: async (payloadValue) => {
                   hasStartedWork = true;
@@ -667,7 +690,7 @@ export async function dispatchMattermostInboundTurn(
                     progressReceipt.noteToolCall(payloadValue.name, payloadValue.toolCallId);
                   }
                   if (!draftToolProgressEnabled) {
-                    return;
+                    return false;
                   }
                   const boundarySettled = enterBlockPreviewActivity("tool");
                   // Boundary detach and progress staging both happen synchronously before
@@ -688,14 +711,15 @@ export async function dispatchMattermostInboundTurn(
                     { startImmediately: true },
                   );
                   previewBoundaryController.noteUpdate();
-                  await Promise.all([boundarySettled, progressSettled]);
+                  const [, visible] = await Promise.all([boundarySettled, progressSettled]);
+                  return visible;
                 },
                 onItemEvent: async (payloadLocal) => {
                   if (payloadLocal.kind === "tool" && payloadLocal.phase === "end") {
                     progressReceipt.noteToolCallEnd(payloadLocal.toolCallId);
                   }
                   if (!draftToolProgressEnabled) {
-                    return;
+                    return false;
                   }
                   const boundarySettled = enterBlockPreviewActivity("tool");
                   const progressSettled = progressDraft.pushToolProgress(
@@ -714,7 +738,8 @@ export async function dispatchMattermostInboundTurn(
                     { startImmediately: true },
                   );
                   previewBoundaryController.noteUpdate();
-                  await Promise.all([boundarySettled, progressSettled]);
+                  const [, visible] = await Promise.all([boundarySettled, progressSettled]);
+                  return visible;
                 },
                 onCompactionStart: () => {
                   reactions.setCompacting();
@@ -724,10 +749,24 @@ export async function dispatchMattermostInboundTurn(
                   reactions.setThinking();
                 },
                 onQueuedFollowupAdmitted: () => {
+                  queuedFollowupActive = true;
+                  queuedFollowupDeliveryError = false;
+                  anyReplyDelivered = false;
+                  reactions.admitQueuedFollowup();
                   // A pending receipt describes the turn that just finished; an
                   // admitted followup starts a fresh turn's tool/elapsed tally.
                   progressReceipt.reset();
                   transcriptUsage.reset();
+                },
+                onQueuedFollowupSettled: async () => {
+                  try {
+                    await reactions.finishQueuedFollowup({
+                      dispatchError: queuedFollowupDeliveryError,
+                      anyReplyDelivered,
+                    });
+                  } finally {
+                    queuedFollowupActive = false;
+                  }
                 },
               },
             }),

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const buildEventPlan = vi.hoisted(() => vi.fn(async () => null));
 
@@ -7,9 +7,14 @@ vi.mock("./monitor-event-plan.js", () => ({
 }));
 
 import { createMattermostPostHandler } from "./monitor-posts.js";
+import { runMattermostChannelModelTransition } from "./channel-model-transition.js";
 import type { MattermostMonitorContext } from "./monitor-types.js";
 
 describe("Mattermost post live config", () => {
+  beforeEach(() => {
+    buildEventPlan.mockClear();
+  });
+
   it("pins the current runtime config before planning an inbound event", async () => {
     const startupCfg = { channels: { modelByChannel: { mattermost: { room: "openai/old" } } } };
     const runtimeCfg = { channels: { modelByChannel: { mattermost: { room: "openai/new" } } } };
@@ -40,5 +45,81 @@ describe("Mattermost post live config", () => {
       expect.objectContaining({ channelId: "room", senderId: "user-1" }),
     );
     expect(monitor.cfg).toBe(startupCfg);
+  });
+
+  it("holds a new root post until the channel model transition settles", async () => {
+    let releaseTransition!: () => void;
+    const transitionGate = new Promise<void>((resolve) => {
+      releaseTransition = resolve;
+    });
+    const transition = runMattermostChannelModelTransition(
+      { accountId: "default", channelId: "room", targetModel: "openai/new" },
+      () => transitionGate,
+    );
+    const runtimeCfg = { channels: { modelByChannel: { mattermost: { room: "openai/new" } } } };
+    const current = vi.fn(() => runtimeCfg);
+    const monitor = {
+      account: { accountId: "default", config: {} },
+      botUserId: "bot-1",
+      cfg: {},
+      core: { config: { current } },
+      groupPolicy: "open",
+      pairing: {},
+      resources: {},
+      logVerboseMessage: vi.fn(),
+    } as unknown as MattermostMonitorContext;
+    const handlerPromise = createMattermostPostHandler(monitor)(
+      { id: "post-2", channel_id: "room", user_id: "user-1", message: "hello" },
+      { event: "posted", data: { channel_type: "O" } },
+    );
+
+    await Promise.resolve();
+    expect(current).not.toHaveBeenCalled();
+    expect(buildEventPlan).not.toHaveBeenCalled();
+
+    releaseTransition();
+    await transition;
+    await handlerPromise;
+    expect(buildEventPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ cfg: runtimeCfg }),
+      expect.objectContaining({ channelId: "room" }),
+    );
+  });
+
+  it("does not hold replies in an existing thread", async () => {
+    let releaseTransition!: () => void;
+    const transitionGate = new Promise<void>((resolve) => {
+      releaseTransition = resolve;
+    });
+    const transition = runMattermostChannelModelTransition(
+      { accountId: "default", channelId: "room", targetModel: "openai/new" },
+      () => transitionGate,
+    );
+    const current = vi.fn(() => ({}));
+    const monitor = {
+      account: { accountId: "default", config: {} },
+      botUserId: "bot-1",
+      cfg: {},
+      core: { config: { current } },
+      groupPolicy: "open",
+      pairing: {},
+      resources: {},
+      logVerboseMessage: vi.fn(),
+    } as unknown as MattermostMonitorContext;
+
+    await createMattermostPostHandler(monitor)(
+      {
+        id: "post-3",
+        root_id: "root-1",
+        channel_id: "room",
+        user_id: "user-1",
+        message: "reply",
+      },
+      { event: "posted", data: { channel_type: "O" } },
+    );
+
+    expect(current).toHaveBeenCalled();
+    releaseTransition();
+    await transition;
   });
 });

@@ -13,22 +13,38 @@ export type MattermostTranscriptUsageAccumulator = {
   reset: () => void;
 };
 
+export type MattermostCumulativeTokenUsage = {
+  inputTokens?: number;
+  outputTokens?: number;
+};
+
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object"
     ? (value as Record<string, unknown>)
     : undefined;
 }
 
-function resolveAssistantOutputTokens(message: unknown): number | undefined {
+function resolveTokenCount(usage: Record<string, unknown>, keys: string[]): number | undefined {
+  const value = keys.map((key) => usage[key]).find((candidate) => candidate !== undefined);
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function resolveAssistantUsage(message: unknown): MattermostCumulativeTokenUsage | undefined {
   const record = asRecord(message);
   if (record?.role !== "assistant") {
     return undefined;
   }
   const usage = asRecord(record.usage);
-  const value = usage?.output ?? usage?.outputTokens ?? usage?.output_tokens;
-  return typeof value === "number" && Number.isFinite(value) && value >= 0
-    ? value
-    : undefined;
+  if (!usage) {
+    return undefined;
+  }
+  const inputTokens = resolveTokenCount(usage, ["input", "inputTokens", "input_tokens"]);
+  const outputTokens = resolveTokenCount(usage, ["output", "outputTokens", "output_tokens"]);
+  return inputTokens === undefined && outputTokens === undefined
+    ? undefined
+    : { inputTokens, outputTokens };
 }
 
 function resolveUpdateIdentity(update: MattermostSessionTranscriptUpdate): string | undefined {
@@ -48,9 +64,10 @@ function resolveUpdateIdentity(update: MattermostSessionTranscriptUpdate): strin
  */
 export function createMattermostTranscriptUsageAccumulator(params: {
   sessionKey: string;
-  onCumulativeOutputTokens: (outputTokens: number) => void;
+  onCumulativeUsage: (usage: MattermostCumulativeTokenUsage) => void;
 }): MattermostTranscriptUsageAccumulator {
   const seenUpdates = new Set<string>();
+  let cumulativeInputTokens = 0;
   let cumulativeOutputTokens = 0;
 
   return {
@@ -60,15 +77,20 @@ export function createMattermostTranscriptUsageAccumulator(params: {
         return;
       }
       const identity = resolveUpdateIdentity(update);
-      const outputTokens = resolveAssistantOutputTokens(update.message);
-      if (!identity || outputTokens === undefined || seenUpdates.has(identity)) {
+      const usage = resolveAssistantUsage(update.message);
+      if (!identity || !usage || seenUpdates.has(identity)) {
         return;
       }
       seenUpdates.add(identity);
-      cumulativeOutputTokens += outputTokens;
-      params.onCumulativeOutputTokens(cumulativeOutputTokens);
+      cumulativeInputTokens += usage.inputTokens ?? 0;
+      cumulativeOutputTokens += usage.outputTokens ?? 0;
+      params.onCumulativeUsage({
+        ...(usage.inputTokens === undefined ? {} : { inputTokens: cumulativeInputTokens }),
+        ...(usage.outputTokens === undefined ? {} : { outputTokens: cumulativeOutputTokens }),
+      });
     },
     reset() {
+      cumulativeInputTokens = 0;
       cumulativeOutputTokens = 0;
     },
   };

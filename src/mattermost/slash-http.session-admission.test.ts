@@ -51,6 +51,10 @@ const mockState = vi.hoisted(() => ({
   },
   sendMessageMattermost: vi.fn(async () => ({ messageId: "post-1", channelId: "chan-1" })),
   deliverMattermostReplyPayload: vi.fn(async () => ({ visibleReplySent: true })),
+  pinExplicitDefaultModel: vi.fn(async () => ({ pinned: false })),
+  rewritePinnedModelReply: vi.fn((_text: string, modelRef: string) =>
+    `Model set to ${modelRef} for this session.`,
+  ),
 }));
 
 function resolveAgentRouteMock(params: { cfg: OpenClawConfig }) {
@@ -141,6 +145,11 @@ vi.mock("./model-picker.js", () => ({
   resolveMattermostModelPickerCurrentModel: vi.fn(),
   // Bypass the model-picker fast path so every command exercises dispatch/retry.
   resolveMattermostModelPickerEntry: vi.fn(() => null),
+}));
+
+vi.mock("./model-session-pin.js", () => ({
+  pinMattermostExplicitDefaultModelSelection: mockState.pinExplicitDefaultModel,
+  rewriteMattermostPinnedModelReply: mockState.rewritePinnedModelReply,
 }));
 
 vi.mock("./monitor-auth.js", () => ({
@@ -294,6 +303,9 @@ describe("slash-http session-admission race retry and fallback", () => {
     mockState.sendMessageMattermost.mockClear();
     mockState.deliverMattermostReplyPayload.mockClear();
     mockState.deliverMattermostReplyPayload.mockResolvedValue({ visibleReplySent: true });
+    mockState.pinExplicitDefaultModel.mockClear();
+    mockState.pinExplicitDefaultModel.mockResolvedValue({ pinned: false });
+    mockState.rewritePinnedModelReply.mockClear();
   });
 
   it("retries exactly once on the session-admission race, re-resolving session state, with no duplicate delivery", async () => {
@@ -325,6 +337,35 @@ describe("slash-http session-admission race retry and fallback", () => {
     expect(mockState.dispatchCalls).toHaveLength(1);
     expect(mockState.deliverMattermostReplyPayload).toHaveBeenCalledTimes(1);
     expect(mockState.sendMessageMattermost).not.toHaveBeenCalled();
+  });
+
+  it("pins an explicitly named global default to the resolved thread session", async () => {
+    mockState.pinExplicitDefaultModel.mockResolvedValueOnce({
+      pinned: true,
+      modelRef: "openai/gpt-5.6-sol",
+    });
+
+    await runHandler({
+      root_id: "root-model",
+      text: "/model openai/gpt-5.6-sol",
+    });
+
+    const dispatch = mockState.dispatchCalls[0];
+    expect(dispatch).toBeDefined();
+    expect(mockState.pinExplicitDefaultModel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        commandText: "/model openai/gpt-5.6-sol",
+        sessionKey: dispatch?.ctxPayload.SessionKey,
+      }),
+    );
+    expect(mockState.deliverMattermostReplyPayload).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          text: "Model set to openai/gpt-5.6-sol for this session.",
+        }),
+        replyToId: "root-model",
+      }),
+    );
   });
 
   it("does not retry, and does not duplicate dispatch, once delivery has started — even on a matching race error", async () => {

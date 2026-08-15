@@ -8,33 +8,39 @@ const target = {
 };
 
 describe("createMattermostTranscriptUsageAccumulator", () => {
-  it("accumulates assistant output usage for the matching session", () => {
-    const onCumulativeOutputTokens = vi.fn();
+  it("accumulates assistant input and output usage for the matching session", () => {
+    const onCumulativeUsage = vi.fn();
     const accumulator = createMattermostTranscriptUsageAccumulator({
       sessionKey: target.sessionKey,
-      onCumulativeOutputTokens,
+      onCumulativeUsage,
     });
 
     accumulator.onUpdate({
       target,
       messageId: "assistant-1",
-      message: { role: "assistant", usage: { output: 40 } },
+      message: { role: "assistant", usage: { input: 15_000, output: 40 } },
     });
     accumulator.onUpdate({
       target,
       messageId: "assistant-2",
-      message: { role: "assistant", usage: { outputTokens: 60 } },
+      message: { role: "assistant", usage: { inputTokens: 500, outputTokens: 60 } },
     });
 
-    expect(onCumulativeOutputTokens).toHaveBeenNthCalledWith(1, 40);
-    expect(onCumulativeOutputTokens).toHaveBeenNthCalledWith(2, 100);
+    expect(onCumulativeUsage).toHaveBeenNthCalledWith(1, {
+      inputTokens: 15_000,
+      outputTokens: 40,
+    });
+    expect(onCumulativeUsage).toHaveBeenNthCalledWith(2, {
+      inputTokens: 15_500,
+      outputTokens: 100,
+    });
   });
 
   it("ignores other sessions, non-assistant messages, malformed usage, and duplicate updates", () => {
-    const onCumulativeOutputTokens = vi.fn();
+    const onCumulativeUsage = vi.fn();
     const accumulator = createMattermostTranscriptUsageAccumulator({
       sessionKey: target.sessionKey,
-      onCumulativeOutputTokens,
+      onCumulativeUsage,
     });
     const valid = {
       target,
@@ -48,14 +54,14 @@ describe("createMattermostTranscriptUsageAccumulator", () => {
     accumulator.onUpdate(valid);
     accumulator.onUpdate(valid);
 
-    expect(onCumulativeOutputTokens).toHaveBeenCalledExactlyOnceWith(40);
+    expect(onCumulativeUsage).toHaveBeenCalledExactlyOnceWith({ outputTokens: 40 });
   });
 
   it("resets the turn total without allowing an old transcript event to count twice", () => {
-    const onCumulativeOutputTokens = vi.fn();
+    const onCumulativeUsage = vi.fn();
     const accumulator = createMattermostTranscriptUsageAccumulator({
       sessionKey: target.sessionKey,
-      onCumulativeOutputTokens,
+      onCumulativeUsage,
     });
     const first = {
       target,
@@ -72,7 +78,7 @@ describe("createMattermostTranscriptUsageAccumulator", () => {
       message: { role: "assistant", usage: { output_tokens: 25 } },
     });
 
-    expect(onCumulativeOutputTokens).toHaveBeenCalledTimes(2);
-    expect(onCumulativeOutputTokens).toHaveBeenLastCalledWith(25);
+    expect(onCumulativeUsage).toHaveBeenCalledTimes(2);
+    expect(onCumulativeUsage).toHaveBeenLastCalledWith({ outputTokens: 25 });
   });
 });

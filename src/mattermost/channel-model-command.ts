@@ -1,5 +1,9 @@
 // Mattermost plugin command for channel-scoped default model selection.
 import {
+  buildModelAliasIndex,
+  resolveModelRefFromString,
+} from "openclaw/plugin-sdk/agent-runtime";
+import {
   authorizeConfigWrite,
   formatConfigWriteDeniedMessage,
 } from "openclaw/plugin-sdk/channel-config-helpers";
@@ -22,6 +26,7 @@ import {
   patchMattermostChannelHeader,
 } from "./client.js";
 import { buildModelsProviderData, type OpenClawConfig } from "./runtime-api.js";
+import { runMattermostChannelModelTransition } from "./channel-model-transition.js";
 
 const COMMAND_NAME = "channel_model";
 const MATTERMOST_CHANNEL_ID = "mattermost";
@@ -30,6 +35,8 @@ const MANAGED_HEADER_LINE_PATTERN =
   /^🤖 \*\*Default model:\*\* `[^`\r\n]+`[\t ]*(?:\r?\n|$)/u;
 const SESSION_OVERRIDE_NOTE =
   "Existing threads keep their own `/model` overrides; changing the channel default clears only the parent channel session override.";
+const RUNTIME_ACTIVATION_TIMEOUT_MS = 60_000;
+const RUNTIME_ACTIVATION_POLL_INTERVAL_MS = 250;
 
 export type ClearParentSessionModelOverrideResult = {
   status: "cleared" | "already-default" | "missing";
@@ -42,6 +49,7 @@ export type ChannelModelCommandDependencies = {
   patchMattermostChannelHeader: typeof patchMattermostChannelHeader;
   resolveMattermostAccount: typeof resolveMattermostAccount;
   clearParentSessionModelOverride: typeof clearParentSessionModelOverride;
+  waitForRuntimeConfig: typeof waitForMattermostChannelModelRuntime;
 };
 
 const defaultDependencies: ChannelModelCommandDependencies = {
@@ -51,6 +59,7 @@ const defaultDependencies: ChannelModelCommandDependencies = {
   patchMattermostChannelHeader,
   resolveMattermostAccount,
   clearParentSessionModelOverride,
+  waitForRuntimeConfig: waitForMattermostChannelModelRuntime,
 };
 
 type ParsedModelReference = {
@@ -186,6 +195,25 @@ function parseModelReference(raw: string): ParsedModelReference | undefined {
   return { provider, model, ref: `${provider}/${model}` };
 }
 
+function resolveChannelModelReference(params: {
+  raw: string;
+  cfg: OpenClawConfig;
+  agentId: string;
+  defaultProvider: string;
+}): ParsedModelReference | undefined {
+  const resolved = resolveModelRefFromString({
+    cfg: params.cfg,
+    raw: params.raw,
+    defaultProvider: params.defaultProvider,
+    aliasIndex: buildModelAliasIndex({
+      cfg: params.cfg,
+      defaultProvider: params.defaultProvider,
+      agentId: params.agentId,
+    }),
+  });
+  return resolved ? parseModelReference(`${resolved.ref.provider}/${resolved.ref.model}`) : undefined;
+}
+
 export function currentMattermostChannelModelOverride(
   cfg: OpenClawConfig,
   channelId: string,
@@ -193,11 +221,43 @@ export function currentMattermostChannelModelOverride(
   return cfg.channels?.modelByChannel?.[MATTERMOST_CHANNEL_ID]?.[channelId]?.trim() || undefined;
 }
 
+export async function waitForMattermostChannelModelRuntime(params: {
+  currentConfig: () => OpenClawConfig;
+  channelId: string;
+  expectedOverride: string | undefined;
+  timeoutMs?: number;
+  pollIntervalMs?: number;
+}): Promise<OpenClawConfig> {
+  const timeoutMs = params.timeoutMs ?? RUNTIME_ACTIVATION_TIMEOUT_MS;
+  const pollIntervalMs = params.pollIntervalMs ?? RUNTIME_ACTIVATION_POLL_INTERVAL_MS;
+  const deadline = Date.now() + timeoutMs;
+  let current = params.currentConfig();
+
+  while (
+    currentMattermostChannelModelOverride(current, params.channelId) !== params.expectedOverride
+  ) {
+    if (Date.now() >= deadline) {
+      const active = currentMattermostChannelModelOverride(current, params.channelId);
+      throw new Error(
+        `timed out after ${timeoutMs}ms (runtime override: ${active ? `\`${active}\`` : "agent default"})`,
+      );
+    }
+    if (pollIntervalMs > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, pollIntervalMs));
+    } else {
+      await Promise.resolve();
+    }
+    current = params.currentConfig();
+  }
+
+  return current;
+}
+
 function commandUsage(): string {
   return [
     "Usage:",
     "- `/channel_model` — show this channel's default model",
-    "- `/channel_model <provider/model>` — set it",
+    "- `/channel_model <alias|provider/model>` — set it",
     "- `/channel_model default` — use the agent default",
   ].join("\n");
 }
@@ -263,9 +323,16 @@ export function createMattermostChannelModelCommand(
       }
 
       const resetToDefault = args.toLowerCase() === "default";
-      const parsed = resetToDefault ? undefined : parseModelReference(args);
+      const parsed = resetToDefault
+        ? undefined
+        : resolveChannelModelReference({
+            raw: args,
+            cfg,
+            agentId: ctx.agentId,
+            defaultProvider: data.resolvedDefault.provider,
+          });
       if (!resetToDefault && !parsed) {
-        return { text: `Expected a full \`provider/model\` reference.\n${commandUsage()}` };
+        return { text: `Expected a model alias or full \`provider/model\` reference.\n${commandUsage()}` };
       }
       if (
         parsed &&
@@ -294,80 +361,118 @@ export function createMattermostChannelModelCommand(
       if (!account.enabled || !account.baseUrl || !account.botToken) {
         return { text: "Mattermost account credentials are unavailable; no changes were made." };
       }
-      const client = dependencies.createMattermostClient({
-        baseUrl: account.baseUrl,
-        botToken: account.botToken,
-        allowPrivateNetwork: isPrivateNetworkOptInEnabled(account.config),
-      });
-
-      let channel;
-      try {
-        channel = await dependencies.fetchMattermostChannel(client, channelId);
-      } catch (error) {
-        return {
-          text: `Could not read the Mattermost channel header; no changes were made: ${errorMessage(error)}`,
-        };
-      }
-      const nextHeader = buildChannelModelHeader(channel.header, selectedModel);
-      if (countUnicodeCharacters(nextHeader) > MATTERMOST_HEADER_MAX_CHARS) {
-        return {
-          text: `The existing channel header is too long to add the model label (Mattermost limit: ${MATTERMOST_HEADER_MAX_CHARS} characters); no changes were made.`,
-        };
-      }
-
       const nextOverride = parsed?.ref;
-      if (currentOverride !== nextOverride) {
-        await api.runtime.config.mutateConfigFile({
-          base: "source",
-          afterWrite: { mode: "auto" },
-          mutate: (draft) => setMattermostChannelModel(draft, channelId, nextOverride),
-        });
-      }
-
-      let sessionOverrideResult: ClearParentSessionModelOverrideResult | undefined;
-      let sessionOverrideWarning: string | undefined;
-      try {
-        sessionOverrideResult = await dependencies.clearParentSessionModelOverride({
-          cfg,
-          agentId: ctx.agentId,
+      const transition = await runMattermostChannelModelTransition(
+        {
+          accountId: account.accountId,
           channelId,
-          effectiveModel: selectedModel,
-        });
-      } catch (error) {
-        sessionOverrideWarning = `⚠️ The channel default was saved, but the active channel session override could not be cleared: ${errorMessage(error)}`;
-      }
+          targetModel: selectedModel,
+        },
+        async () => {
+          const client = dependencies.createMattermostClient({
+            baseUrl: account.baseUrl,
+            botToken: account.botToken,
+            allowPrivateNetwork: isPrivateNetworkOptInEnabled(account.config),
+          });
 
-      let headerWarning: string | undefined;
-      if (channel.header !== nextHeader) {
-        try {
-          await dependencies.patchMattermostChannelHeader(client, channelId, nextHeader);
-        } catch (error) {
-          headerWarning = `⚠️ The model setting was saved, but the Mattermost header could not be updated: ${errorMessage(error)}`;
-        }
-      }
+          let channel;
+          try {
+            channel = await dependencies.fetchMattermostChannel(client, channelId);
+          } catch (error) {
+            return {
+              text: `Could not read the Mattermost channel header; no changes were made: ${errorMessage(error)}`,
+            };
+          }
+          const nextHeader = buildChannelModelHeader(channel.header, selectedModel);
+          if (countUnicodeCharacters(nextHeader) > MATTERMOST_HEADER_MAX_CHARS) {
+            return {
+              text: `The existing channel header is too long to add the model label (Mattermost limit: ${MATTERMOST_HEADER_MAX_CHARS} characters); no changes were made.`,
+            };
+          }
 
-      const result = resetToDefault
-        ? `✅ Channel model reset to agent default: \`${selectedModel}\`.`
-        : `✅ Channel default model set to \`${selectedModel}\`.`;
-      const sessionOverrideMessage =
-        sessionOverrideResult?.status === "cleared"
-          ? "✅ Cleared the active channel session model override; new threads will use the channel default."
-          : sessionOverrideResult?.status === "already-default"
-            ? "ℹ️ The active channel session already had no model override."
-            : sessionOverrideResult?.status === "missing"
-              ? "ℹ️ No active parent channel session existed yet; new threads will use the channel default."
-              : undefined;
-      return {
-        text: [
-          result,
-          sessionOverrideMessage,
-          sessionOverrideWarning,
-          headerWarning,
-          SESSION_OVERRIDE_NOTE,
-        ]
-          .filter(Boolean)
-          .join("\n"),
-      };
+          if (currentOverride !== nextOverride) {
+            try {
+              await api.runtime.config.mutateConfigFile({
+                base: "source",
+                afterWrite: { mode: "auto" },
+                mutate: (draft) => setMattermostChannelModel(draft, channelId, nextOverride),
+              });
+            } catch (error) {
+              return {
+                text: `Could not save the channel model; no changes were applied: ${errorMessage(error)}`,
+              };
+            }
+          }
+
+          let appliedCfg: OpenClawConfig;
+          try {
+            appliedCfg = await dependencies.waitForRuntimeConfig({
+              currentConfig: () => api.runtime.config.current() as OpenClawConfig,
+              channelId,
+              expectedOverride: nextOverride,
+            });
+          } catch (error) {
+            return {
+              text: [
+                `⚠️ The channel model setting was saved, but it is not active in Gateway runtime yet: ${errorMessage(error)}`,
+                "New root posts will continue with the currently active runtime model. Retry after Gateway reload completes.",
+              ].join("\n"),
+            };
+          }
+
+          let sessionOverrideResult: ClearParentSessionModelOverrideResult | undefined;
+          let sessionOverrideWarning: string | undefined;
+          try {
+            sessionOverrideResult = await dependencies.clearParentSessionModelOverride({
+              cfg: appliedCfg,
+              agentId: ctx.agentId,
+              channelId,
+              effectiveModel: selectedModel,
+            });
+          } catch (error) {
+            sessionOverrideWarning = `⚠️ The channel default is active, but the active channel session override could not be cleared: ${errorMessage(error)}`;
+          }
+
+          let headerWarning: string | undefined;
+          if (channel.header !== nextHeader) {
+            try {
+              await dependencies.patchMattermostChannelHeader(client, channelId, nextHeader);
+            } catch (error) {
+              headerWarning = `⚠️ The model setting is active, but the Mattermost header could not be updated: ${errorMessage(error)}`;
+            }
+          }
+
+          const result = resetToDefault
+            ? `✅ Channel model reset to agent default: \`${selectedModel}\`.`
+            : `✅ Channel default model set to \`${selectedModel}\`.`;
+          const sessionOverrideMessage =
+            sessionOverrideResult?.status === "cleared"
+              ? "✅ Cleared the active channel session model override; new threads will use the channel default."
+              : sessionOverrideResult?.status === "already-default"
+                ? "ℹ️ The active channel session already had no model override."
+                : sessionOverrideResult?.status === "missing"
+                  ? "ℹ️ No active parent channel session existed yet; new threads will use the channel default."
+                  : undefined;
+          return {
+            text: [
+              result,
+              sessionOverrideMessage,
+              sessionOverrideWarning,
+              headerWarning,
+              SESSION_OVERRIDE_NOTE,
+            ]
+              .filter(Boolean)
+              .join("\n"),
+          };
+        },
+      );
+
+      if (transition.status === "busy") {
+        return {
+          text: `⏳ This channel is already switching to \`${transition.targetModel}\`. Please wait for the completion notice.`,
+        };
+      }
+      return transition.value;
     },
   };
 }

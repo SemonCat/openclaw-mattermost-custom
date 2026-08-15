@@ -197,7 +197,9 @@ describe("createMattermostMessageReactionRuntime", () => {
       runtime.setTool("bash");
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
 
-      await runtime.finish({ dispatchError: false, anyReplyDelivered: true });
+      const finishPromise = runtime.finish({ dispatchError: false, anyReplyDelivered: true });
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.doneHoldMs);
+      await finishPromise;
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
 
       // Intermediate transitions only add; the terminal state removes every
@@ -223,7 +225,9 @@ describe("createMattermostMessageReactionRuntime", () => {
       runtime.queueInitialAckReactionAfterRecord();
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
 
-      await runtime.finish({ dispatchError: true, anyReplyDelivered: false });
+      const finishPromise = runtime.finish({ dispatchError: true, anyReplyDelivered: false });
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.errorHoldMs);
+      await finishPromise;
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
 
       // The error emoji stays on the post as the turn's recorded failure outcome.
@@ -270,9 +274,9 @@ describe("createMattermostMessageReactionRuntime", () => {
       runtime.queueInitialAckReactionAfterRecord();
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
 
-      await expect(
-        runtime.finish({ dispatchError: false, anyReplyDelivered: true }),
-      ).resolves.toBeUndefined();
+      const finishPromise = runtime.finish({ dispatchError: false, anyReplyDelivered: true });
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.doneHoldMs);
+      await expect(finishPromise).resolves.toBeUndefined();
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
 
       expect(params.log).toHaveBeenCalledWith(
@@ -314,7 +318,9 @@ describe("createMattermostMessageReactionRuntime", () => {
       await joined.finish({ dispatchError: false, anyReplyDelivered: false });
       owner.setTool("web_search");
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
-      await owner.finish({ dispatchError: false, anyReplyDelivered: true });
+      const ownerFinishPromise = owner.finish({ dispatchError: false, anyReplyDelivered: true });
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.doneHoldMs);
+      await ownerFinishPromise;
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
 
       for (const params of [ownerParams, joinedParams]) {
@@ -361,7 +367,12 @@ describe("createMattermostMessageReactionRuntime", () => {
 
       // The owner's turn is still running (never calls finish()) when the mispredicted
       // "joined" post turns out to have actually delivered its own visible reply.
-      await joined.finish({ dispatchError: false, anyReplyDelivered: true });
+      const joinedFinishPromise = joined.finish({
+        dispatchError: false,
+        anyReplyDelivered: true,
+      });
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.doneHoldMs);
+      await joinedFinishPromise;
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
 
       expect(requestedEmojis(joinedParams.request as ReturnType<typeof vi.fn>)).toEqual([
@@ -376,6 +387,131 @@ describe("createMattermostMessageReactionRuntime", () => {
       expect(requestedEmojis(ownerParams.request as ReturnType<typeof vi.fn>).at(-1)).toBe(
         "+brain",
       );
+    });
+
+    it("transfers a zero-count joined dispatch into its own queued follow-up lifecycle", async () => {
+      const lifecycleStore = createMattermostReactionLifecycleStore();
+      const cfg: OpenClawConfig = {
+        messages: { statusReactions: { enabled: true }, queue: { mode: "steer" } },
+      };
+      const ownerParams = createBaseParams({
+        cfg,
+        postId: "post-owner",
+        sessionKey: "session-shared",
+        lifecycleStore,
+      });
+      const followupParams = createBaseParams({
+        cfg,
+        postId: "post-followup",
+        sessionKey: "session-shared",
+        lifecycleStore,
+      });
+      const owner = createMattermostMessageReactionRuntime(ownerParams);
+      const followup = createMattermostMessageReactionRuntime(followupParams);
+
+      owner.queueInitialAckReactionAfterRecord();
+      followup.queueInitialAckReactionAfterRecord();
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+      owner.setThinking();
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+
+      await followup.finish({ dispatchError: false, anyReplyDelivered: false });
+      const endCorrelation = followup.beginQueuedFollowup();
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+
+      const ownerFinish = owner.finish({ dispatchError: false, anyReplyDelivered: true });
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.doneHoldMs);
+      await ownerFinish;
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+      expect(requestedEmojis(followupParams.request as ReturnType<typeof vi.fn>)).not.toContain(
+        "+white_check_mark",
+      );
+
+      followup.admitQueuedFollowup();
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+      followup.setTool("bash");
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+      followup.setCompacting();
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+
+      const followupFinish = followup.finishQueuedFollowup({
+        dispatchError: false,
+        anyReplyDelivered: true,
+      });
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.doneHoldMs);
+      await followupFinish;
+      endCorrelation?.();
+
+      const followupEmojis = requestedEmojis(
+        followupParams.request as ReturnType<typeof vi.fn>,
+      );
+      expect(followupEmojis).toEqual(
+        expect.arrayContaining([
+          "+eyes",
+          "+brain",
+          "+computer",
+          "+compression",
+          "+white_check_mark",
+        ]),
+      );
+      expect(followupEmojis.at(-1)).toBe("-compression");
+    });
+
+    it("lets admission ownership transfer win at the previous owner's final boundary", async () => {
+      const lifecycleStore = createMattermostReactionLifecycleStore();
+      const cfg: OpenClawConfig = {
+        messages: { statusReactions: { enabled: true }, queue: { mode: "steer" } },
+      };
+      const ownerParams = createBaseParams({
+        cfg,
+        postId: "post-owner-boundary",
+        sessionKey: "session-boundary",
+        lifecycleStore,
+      });
+      const followupParams = createBaseParams({
+        cfg,
+        postId: "post-followup-boundary",
+        sessionKey: "session-boundary",
+        lifecycleStore,
+      });
+      const owner = createMattermostMessageReactionRuntime(ownerParams);
+      const followup = createMattermostMessageReactionRuntime(followupParams);
+
+      owner.queueInitialAckReactionAfterRecord();
+      followup.queueInitialAckReactionAfterRecord();
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+      await followup.finish({ dispatchError: false, anyReplyDelivered: false });
+
+      // finish() has entered the old owner's terminal path, but the core queue-drain
+      // correlation transfers the second post before that settlement executes.
+      const ownerFinish = owner.finish({ dispatchError: false, anyReplyDelivered: true });
+      const endCorrelation = followup.beginQueuedFollowup();
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.doneHoldMs);
+      await ownerFinish;
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+
+      expect(requestedEmojis(ownerParams.request as ReturnType<typeof vi.fn>)).toContain(
+        "+white_check_mark",
+      );
+      expect(requestedEmojis(followupParams.request as ReturnType<typeof vi.fn>)).toEqual([
+        "+eyes",
+      ]);
+
+      followup.admitQueuedFollowup();
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+      const followupFinish = followup.finishQueuedFollowup({
+        dispatchError: true,
+        anyReplyDelivered: false,
+      });
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.errorHoldMs);
+      await followupFinish;
+      endCorrelation?.();
+
+      const followupEmojis = requestedEmojis(
+        followupParams.request as ReturnType<typeof vi.fn>,
+      );
+      expect(followupEmojis).toContain("+x");
+      expect(followupEmojis).not.toContain("+white_check_mark");
     });
   });
 });

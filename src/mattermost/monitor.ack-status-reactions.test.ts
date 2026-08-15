@@ -639,6 +639,116 @@ describe("mattermost lifecycle status reactions", () => {
     expect(finalByPost.get("post-steered")).toEqual(["+eyes", "+white_check_mark", "-eyes"]);
   });
 
+  it("rebinds a zero-count dispatch when core later admits it as a queued follow-up", async () => {
+    const socket = new FakeWebSocket();
+    const abortController = new AbortController();
+    const config: OpenClawConfig = {
+      ...baseConfig,
+      messages: {
+        ackReactionScope: "all",
+        statusReactions: { enabled: true },
+        queue: { mode: "steer" },
+      },
+    };
+    mockState.runtimeCore = createRuntimeCore(config);
+
+    let releaseOwner: (() => void) | undefined;
+    const ownerGate = new Promise<void>((resolve) => {
+      releaseOwner = resolve;
+    });
+    let ownerStarted = false;
+    let followupReplyOptions: Record<string, unknown> | undefined;
+    mockState.dispatchInboundMessage
+      .mockImplementationOnce(async () => {
+        ownerStarted = true;
+        await ownerGate;
+        return { queuedFinal: false, counts: { final: 1 } };
+      })
+      .mockImplementationOnce(async (params) => {
+        followupReplyOptions = params.replyOptions as Record<string, unknown>;
+        return { queuedFinal: false, counts: {} };
+      });
+
+    const monitor = monitorMattermostProvider({
+      config,
+      runtime: testRuntime(),
+      abortSignal: abortController.signal,
+      webSocketFactory: () => socket,
+    });
+    await vi.waitFor(() => expect(socket.openListenerCount).toBeGreaterThan(0));
+    socket.emitOpen();
+
+    const ownerEmit = emitMattermostChannelPost(socket, {
+      id: "post-queued-owner",
+      message: "start",
+    });
+    await vi.waitFor(() => expect(ownerStarted).toBe(true));
+    await emitMattermostChannelPost(socket, {
+      id: "post-queued-followup",
+      message: "continue afterward",
+    });
+
+    const correlations = followupReplyOptions?.queuedDeliveryCorrelations as
+      | Array<{ begin: () => (() => void) | void }>
+      | undefined;
+    const endCorrelation = correlations?.[0]?.begin();
+    expect(endCorrelation).toBeTypeOf("function");
+
+    // The prior owner can now cross its final boundary without terminalizing the
+    // controller that explicit queue-drain evidence just transferred away.
+    releaseOwner?.();
+    await ownerEmit;
+    expect(
+      requestedReactionsByPost(mockState.request).get("post-queued-followup"),
+    ).not.toContain("+white_check_mark");
+
+    const onQueuedFollowupAdmitted = followupReplyOptions?.onQueuedFollowupAdmitted as
+      | (() => Promise<void> | void)
+      | undefined;
+    const onToolStart = followupReplyOptions?.onToolStart as
+      | ((payload: Record<string, unknown>) => Promise<boolean> | boolean)
+      | undefined;
+    const onCompactionStart = followupReplyOptions?.onCompactionStart as
+      | (() => Promise<boolean> | boolean)
+      | undefined;
+    const onObservedReplyDelivery = followupReplyOptions?.onObservedReplyDelivery as
+      | (() => Promise<void> | void)
+      | undefined;
+    const onQueuedFollowupSettled = followupReplyOptions?.onQueuedFollowupSettled as
+      | (() => Promise<void> | void)
+      | undefined;
+
+    await onQueuedFollowupAdmitted?.();
+    await vi.waitFor(() =>
+      expect(requestedReactionsByPost(mockState.request).get("post-queued-followup")).toContain(
+        "+brain",
+      ),
+    );
+    await onToolStart?.({ name: "bash", phase: "start", toolCallId: "tool-1" });
+    await vi.waitFor(() =>
+      expect(requestedReactionsByPost(mockState.request).get("post-queued-followup")).toContain(
+        "+computer",
+      ),
+    );
+    await onCompactionStart?.();
+    await vi.waitFor(() =>
+      expect(requestedReactionsByPost(mockState.request).get("post-queued-followup")).toContain(
+        "+compression",
+      ),
+    );
+    await onObservedReplyDelivery?.();
+    await onQueuedFollowupSettled?.();
+    endCorrelation?.();
+
+    expect(requestedReactionsByPost(mockState.request).get("post-queued-followup")).toContain(
+      "+white_check_mark",
+    );
+
+    abortController.abort();
+    socket.emitClose(1000);
+    await monitor;
+  });
+
   it("keeps concurrent root threads in the same channel on independent reaction lifecycles", async () => {
     const socket = new FakeWebSocket();
     const abortController = new AbortController();

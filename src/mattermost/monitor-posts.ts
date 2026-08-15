@@ -17,6 +17,7 @@ import {
 } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
 import type { MattermostPost } from "./client.js";
+import { waitForMattermostChannelModelTransition } from "./channel-model-transition.js";
 import { resolveMattermostInboundMentionDecision } from "./monitor-activation.js";
 import {
   formatMattermostDirectMessageDropLog,
@@ -96,6 +97,14 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
       return;
     }
 
+    const threadRootId = normalizeOptionalString(post.root_id);
+    if (!threadRootId) {
+      await waitForMattermostChannelModelTransition({
+        accountId: account.accountId,
+        channelId,
+      });
+    }
+
     const eventMonitor = pinMattermostMonitorConfig(monitor);
     const { cfg } = eventMonitor;
 
@@ -103,7 +112,7 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
       channelId,
       senderId,
       postId: post.id,
-      threadRootId: normalizeOptionalString(post.root_id),
+      threadRootId,
       channelTypeFallback: payload.data?.channel_type,
       teamId: payload.data?.team_id,
       channelName: payload.data?.channel_name,

@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   dispatch: vi.fn(),
   markDeliverySettled: vi.fn(),
   parseContext: vi.fn(),
+  pinExplicitDefaultModel: vi.fn(),
   runDetachedWebhookWork: vi.fn(),
 }));
 
@@ -22,6 +23,12 @@ vi.mock("./model-picker.js", () => ({
   renderMattermostModelsPickerView: () => ({ text: "updated picker", buttons: [] }),
   renderMattermostProviderPickerView: () => ({ text: "provider picker", buttons: [] }),
   resolveMattermostModelPickerCurrentModel: () => "openai/gpt-5.4",
+}));
+
+vi.mock("./model-session-pin.js", () => ({
+  pinMattermostExplicitDefaultModelSelection: mocks.pinExplicitDefaultModel,
+  rewriteMattermostPinnedModelReply: (_text: string, modelRef: string) =>
+    `Model set to ${modelRef} for this session.`,
 }));
 
 vi.mock("./monitor-auth.js", () => ({
@@ -56,6 +63,10 @@ describe("Mattermost model-picker interaction dispatch", () => {
       provider: "openai",
       model: "gpt-5.4",
       page: 0,
+    });
+    mocks.pinExplicitDefaultModel.mockResolvedValue({
+      pinned: true,
+      modelRef: "openai/gpt-5.4",
     });
     mocks.authorize.mockResolvedValue({
       ok: true,
@@ -179,7 +190,12 @@ describe("Mattermost model-picker interaction dispatch", () => {
     );
     expect(mocks.markDeliverySettled).toHaveBeenCalledOnce();
     expect(mocks.deliverReply).toHaveBeenCalledWith(
-      expect.objectContaining({ replyToId: "picker-post-1" }),
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          text: "Model set to openai/gpt-5.4 for this session.",
+        }),
+        replyToId: "picker-post-1",
+      }),
     );
     expect(updateModelPickerPost).toHaveBeenCalledWith(
       expect.objectContaining({ message: "updated picker" }),
