@@ -24,7 +24,7 @@ export type MattermostTurnReactionGateFacts = {
 };
 
 type MattermostReactionLifecycleOwner = object;
-type MattermostReactionRegistration = "owner" | "joined" | "standalone";
+type MattermostReactionRegistration = "owner" | "joined" | "standalone" | "pending";
 type MattermostReactionLifecycleGroup = {
   sessionKey: string;
   owner: MattermostReactionLifecycleOwner;
@@ -112,6 +112,12 @@ export function createMattermostReactionLifecycleStore() {
     }
     group.controllers.delete(controller);
     groupsByController.delete(controller);
+    if (group.controllers.size === 0) {
+      groupsByOwner.delete(group.owner);
+      if (entries.get(sessionKey) === group) {
+        entries.delete(sessionKey);
+      }
+    }
   };
 
   const transfer = (params: {
@@ -124,8 +130,7 @@ export function createMattermostReactionLifecycleStore() {
       return;
     }
     if (previous) {
-      previous.controllers.delete(params.controller);
-      groupsByController.delete(params.controller);
+      detach(params.sessionKey, params.controller);
     }
     createGroup(params);
   };
@@ -259,7 +264,7 @@ export function createMattermostMessageReactionRuntime(params: {
       lifecycleStore.update(sessionKey, lifecycleOwner, apply);
       return;
     }
-    if (registration !== "joined") {
+    if (registration !== "joined" && registration !== "pending") {
       void Promise.resolve(apply(controller)).catch(() => undefined);
     }
   };
@@ -316,13 +321,13 @@ export function createMattermostMessageReactionRuntime(params: {
       return undefined;
     }
     queuedFollowupPending = true;
-    if (registration !== "owner") {
-      lifecycleStore.transfer({
-        sessionKey,
-        owner: lifecycleOwner,
-        controller,
-      });
-      registration = "owner";
+    if (registration !== "pending") {
+      // A drain attempt proves that this post is queued, but not that it owns the
+      // reply lane yet: admission can still defer or fail. Park it outside the
+      // previous owner's group so that owner's terminal result cannot settle it,
+      // without publishing a new active owner before core confirms admission.
+      lifecycleStore.detach(sessionKey, controller);
+      registration = "pending";
     }
     // A post may briefly have shared the previous owner's current activity before
     // core proves it is queued. Restore the queued marker until admission.
@@ -333,6 +338,14 @@ export function createMattermostMessageReactionRuntime(params: {
   const admitQueuedFollowup = () => {
     if (!queuedFollowupPending) {
       beginQueuedFollowup();
+    }
+    if (registration !== "owner") {
+      lifecycleStore.transfer({
+        sessionKey,
+        owner: lifecycleOwner,
+        controller,
+      });
+      registration = "owner";
     }
     update((targetController) => targetController.setThinking());
   };

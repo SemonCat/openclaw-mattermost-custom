@@ -457,6 +457,75 @@ describe("createMattermostMessageReactionRuntime", () => {
       expect(followupEmojis.at(-1)).toBe("-compression");
     });
 
+    it("does not make a queued follow-up the active owner before admission", async () => {
+      const lifecycleStore = createMattermostReactionLifecycleStore();
+      const cfg: OpenClawConfig = {
+        messages: { statusReactions: { enabled: true }, queue: { mode: "steer" } },
+      };
+      const ownerParams = createBaseParams({
+        cfg,
+        postId: "post-owner-before-admission",
+        sessionKey: "session-before-admission",
+        lifecycleStore,
+      });
+      const followupParams = createBaseParams({
+        cfg,
+        postId: "post-followup-before-admission",
+        sessionKey: "session-before-admission",
+        lifecycleStore,
+      });
+      const trailingParams = createBaseParams({
+        cfg,
+        postId: "post-trailing-before-admission",
+        sessionKey: "session-before-admission",
+        lifecycleStore,
+      });
+      const owner = createMattermostMessageReactionRuntime(ownerParams);
+      const followup = createMattermostMessageReactionRuntime(followupParams);
+
+      owner.queueInitialAckReactionAfterRecord();
+      followup.queueInitialAckReactionAfterRecord();
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+      await followup.finish({ dispatchError: false, anyReplyDelivered: false });
+
+      // A drain attempt proves that this post is queued, but admission has not
+      // succeeded yet. It must leave the current owner in place until core emits
+      // onQueuedFollowupAdmitted.
+      const endCorrelation = followup.beginQueuedFollowup();
+      const trailing = createMattermostMessageReactionRuntime(trailingParams);
+      trailing.queueInitialAckReactionAfterRecord();
+      owner.setTool("bash");
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+
+      expect(requestedEmojis(followupParams.request as ReturnType<typeof vi.fn>)).toEqual([
+        "+eyes",
+      ]);
+      expect(requestedEmojis(trailingParams.request as ReturnType<typeof vi.fn>)).toContain(
+        "+computer",
+      );
+
+      await trailing.finish({ dispatchError: false, anyReplyDelivered: false });
+      const ownerFinish = owner.finish({ dispatchError: false, anyReplyDelivered: true });
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.doneHoldMs);
+      await ownerFinish;
+      expect(requestedEmojis(trailingParams.request as ReturnType<typeof vi.fn>)).toContain(
+        "+white_check_mark",
+      );
+      expect(requestedEmojis(followupParams.request as ReturnType<typeof vi.fn>)).not.toContain(
+        "+white_check_mark",
+      );
+
+      followup.admitQueuedFollowup();
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+      const followupFinish = followup.finishQueuedFollowup({
+        dispatchError: false,
+        anyReplyDelivered: true,
+      });
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.doneHoldMs);
+      await followupFinish;
+      endCorrelation?.();
+    });
+
     it("lets admission ownership transfer win at the previous owner's final boundary", async () => {
       const lifecycleStore = createMattermostReactionLifecycleStore();
       const cfg: OpenClawConfig = {

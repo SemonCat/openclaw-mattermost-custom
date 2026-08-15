@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
 // Test files that import test-only Plugin SDK subpaths the published
@@ -12,7 +13,6 @@ const monorepoOnlySdkTestFiles = [
   "src/delivery-trace.test.ts",
   "src/mattermost/client.fetch-timeout.test.ts",
   "src/mattermost/monitor-ingress.test.ts",
-  "src/mattermost/monitor.ack-status-reactions.test.ts",
   "src/mattermost/reply-delivery.test.ts",
   "src/mattermost/send.test.ts",
   "src/mattermost/target-resolution.loopback.test.ts",
@@ -21,6 +21,13 @@ const monorepoOnlySdkTestFiles = [
 ];
 
 export default defineConfig({
+  resolve: {
+    alias: {
+      "openclaw/plugin-sdk/channel-test-helpers": fileURLToPath(
+        new URL("./src/test-support/channel-test-helpers.ts", import.meta.url),
+      ),
+    },
+  },
   test: {
     include: ["*.test.ts", "src/**/*.test.ts"],
     exclude: [

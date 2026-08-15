@@ -128,12 +128,15 @@ This repo builds and tests against the published `openclaw` npm package
 (`2026.8.1-beta.2`), not the OpenClaw monorepo checkout. One category of tests
 behaves differently from the monorepo for that reason:
 
-- Twelve suites import test-only Plugin SDK subpaths (`channel-test-helpers`,
+- Eleven suites import test-only Plugin SDK subpaths (`channel-test-helpers`,
   `plugin-test-runtime`, `test-env`, `test-state`,
   `plugin-state-test-runtime`, `plugin-test-api`, `channel-contract-testing`)
   that the published npm package intentionally does not ship (they exist only
   in the monorepo, resolved via tsconfig paths). They are excluded in
   `vitest.config.ts` and do not run in a standalone checkout.
+
+The Mattermost ack/status integration suite uses a minimal local test-only shim
+for its one debounce helper and therefore does run in the standalone checkout.
 
 All included suites run green via `vitest run`.
 
