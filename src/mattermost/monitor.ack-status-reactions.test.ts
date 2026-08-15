@@ -67,12 +67,18 @@ class FakeWebSocket {
 }
 
 const mockState = vi.hoisted(() => ({
+  createMattermostIngressMonitor: vi.fn(),
   createMattermostClient: vi.fn(),
   createMattermostDraftStream: vi.fn(),
   dispatchInboundMessage: vi.fn(),
   createReplyDispatcherWithTyping: vi.fn(),
   fetchMattermostMe: vi.fn(),
   getGlobalHookRunner: vi.fn(),
+  ingressOnAbandoned: vi.fn(async () => {}),
+  ingressOnAdopted: vi.fn(async () => {}),
+  ingressOnAdoptionFinalizing: vi.fn(),
+  ingressOnDeferred: vi.fn(),
+  ingressReceive: vi.fn(),
   recordMattermostThreadParticipation: vi.fn(),
   registerMattermostMonitorSlashCommands: vi.fn(),
   registerPluginHttpRoute: vi.fn(),
@@ -141,27 +147,31 @@ vi.mock("./monitor-ingress.js", async (importOriginal) => {
     ...actual,
     createMattermostIngressMonitor: (
       options: Parameters<typeof actual.createMattermostIngressMonitor>[0],
-    ) => ({
-      receive: async (rawEvent: string) => {
-        const payload = JSON.parse(rawEvent) as MattermostEventPayload;
-        const post =
-          typeof payload.data?.post === "string"
-            ? (JSON.parse(payload.data.post) as MattermostPost)
-            : (payload.data?.post as MattermostPost | undefined);
-        if (payload.event !== "posted" || !post) {
-          return;
-        }
-        await options.dispatch(post, payload, {
-          abortSignal: new AbortController().signal,
-          onAdopted: async () => {},
-          onDeferred: () => {},
-          onAdoptionFinalizing: () => {},
-          onAbandoned: async () => {},
-        });
-      },
-      stop: async () => {},
-      waitForIdle: async () => {},
-    }),
+    ) => {
+      mockState.createMattermostIngressMonitor(options);
+      return {
+        receive: async (rawEvent: string) => {
+          mockState.ingressReceive(rawEvent);
+          const payload = JSON.parse(rawEvent) as MattermostEventPayload;
+          const post =
+            typeof payload.data?.post === "string"
+              ? (JSON.parse(payload.data.post) as MattermostPost)
+              : (payload.data?.post as MattermostPost | undefined);
+          if (payload.event !== "posted" || !post) {
+            return;
+          }
+          await options.dispatch(post, payload, {
+            abortSignal: new AbortController().signal,
+            onAdopted: mockState.ingressOnAdopted,
+            onDeferred: mockState.ingressOnDeferred,
+            onAdoptionFinalizing: mockState.ingressOnAdoptionFinalizing,
+            onAbandoned: mockState.ingressOnAbandoned,
+          });
+        },
+        stop: async () => {},
+        waitForIdle: async () => {},
+      };
+    },
   };
 });
 
@@ -438,6 +448,33 @@ beforeEach(() => {
 });
 
 describe("mattermost ack reactions", () => {
+  it("routes posted events through durable ingress and settles the accepted claim", async () => {
+    const socket = new FakeWebSocket();
+    const abortController = new AbortController();
+    const runtimeCore = createRuntimeCore(baseConfig);
+    mockState.runtimeCore = runtimeCore;
+    mockState.dispatchInboundMessage.mockResolvedValue({ queuedFinal: false, counts: {} });
+
+    const monitor = monitorMattermostProvider({
+      config: baseConfig,
+      runtime: testRuntime(),
+      abortSignal: abortController.signal,
+      webSocketFactory: () => socket,
+    });
+    await vi.waitFor(() => expect(socket.openListenerCount).toBeGreaterThan(0));
+    socket.emitOpen();
+    await emitMattermostChannelPost(socket, { id: "post-durable-ingress", message: "hello" });
+    abortController.abort();
+    socket.emitClose(1000);
+    await monitor;
+
+    expect(mockState.createMattermostIngressMonitor).toHaveBeenCalledWith(
+      expect.objectContaining({ accountId: "default" }),
+    );
+    expect(mockState.ingressReceive).toHaveBeenCalledTimes(1);
+    expect(mockState.ingressOnAdopted).toHaveBeenCalledTimes(1);
+  });
+
   it("reacts with the ack emoji only after the accepted post is recorded", async () => {
     const socket = new FakeWebSocket();
     const abortController = new AbortController();

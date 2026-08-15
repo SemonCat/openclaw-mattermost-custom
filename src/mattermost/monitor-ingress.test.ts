@@ -43,6 +43,7 @@ function startMonitor(
   dispatch: MattermostIngressDispatch,
 ) {
   return createMattermostIngressMonitor({
+    accountId: "default",
     queue,
     dispatch,
     runtime: { error: vi.fn(), log: vi.fn() },

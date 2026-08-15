@@ -1,5 +1,6 @@
 // Mattermost plugin module orchestrates monitor setup, ingress, and teardown.
 import { isLoopbackHost } from "openclaw/plugin-sdk/gateway-runtime";
+import { fanInChannelIngressLifecycles } from "openclaw/plugin-sdk/channel-ingress-runtime";
 import { isPrivateNetworkOptInEnabled } from "openclaw/plugin-sdk/ssrf-runtime";
 import {
   normalizeOptionalString,
@@ -21,6 +22,10 @@ import {
   setInteractionSecret,
 } from "./interactions.js";
 import { registerMattermostInteractions } from "./monitor-interactions.js";
+import {
+  createMattermostIngressMonitor,
+  type MattermostIngressLifecycle,
+} from "./monitor-ingress.js";
 import { createMattermostModelPickerInteractionHandler } from "./monitor-model-picker.js";
 import { createMattermostPostHandler } from "./monitor-posts.js";
 import { createMattermostReactionHandler } from "./monitor-reactions.js";
@@ -29,8 +34,6 @@ import { registerMattermostMonitorSlashCommands } from "./monitor-slash.js";
 import type { MattermostMonitorContext } from "./monitor-types.js";
 import {
   createMattermostConnectOnce,
-  parseMattermostEventPayload,
-  parseMattermostPost,
   type MattermostEventPayload,
   type MattermostWebSocketFactory,
 } from "./monitor-websocket.js";
@@ -242,6 +245,7 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
   const debouncer = core.channel.debounce.createInboundDebouncer<{
     post: MattermostPost;
     payload: MattermostEventPayload;
+    turnAdoptionLifecycle: MattermostIngressLifecycle;
   }>({
     debounceMs: core.channel.debounce.resolveInboundDebounceMs({
       cfg,
@@ -267,7 +271,11 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
     },
     onFlush: (entries, createFlush) => {
       const last = entries.at(-1);
+      const { lifecycle, settle } = fanInChannelIngressLifecycles(
+        entries.map((entry) => entry.turnAdoptionLifecycle),
+      );
       return createFlush({
+        lifecycle,
         dispatch: async (admissionLifecycle) => {
           if (!last) {
             return;
@@ -275,6 +283,7 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
           try {
             if (entries.length === 1) {
               await handlePost(last.post, last.payload, admissionLifecycle);
+              await settle();
               return;
             }
             const mergedPost: MattermostPost = {
@@ -291,6 +300,7 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
               admissionLifecycle,
               entries.map((entry) => entry.post.id),
             );
+            await settle();
           } catch (error) {
             await admissionLifecycle.onAbandoned();
             throw error;
@@ -300,6 +310,17 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
     },
     onError: (err) => {
       runtime.error?.(`mattermost debounce flush failed: ${String(err)}`);
+    },
+  });
+  const ingress = createMattermostIngressMonitor({
+    accountId: account.accountId,
+    runtime,
+    abortSignal: opts.abortSignal,
+    dispatch: async (post, payload, turnAdoptionLifecycle) => {
+      // Deferred claims settle through lifecycle callbacks, so terminal flush
+      // errors spend the drain's bounded retry budget before dead-lettering.
+      await debouncer.enqueue({ post, payload, turnAdoptionLifecycle });
+      return { kind: "deferred" };
     },
   });
   let sequence = 1;
@@ -317,15 +338,7 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
     webSocketFactory: opts.webSocketFactory,
     nextSeq: () => sequence++,
     getBotUpdateAt: async () => (await fetchMattermostMe(client)).update_at ?? 0,
-    onPosted: async (rawEvent) => {
-      const payload = parseMattermostEventPayload(rawEvent);
-      const post = parseMattermostPost(payload?.data?.post);
-      if (!payload || payload.event !== "posted" || !post) {
-        runtime.error?.("mattermost: dropped invalid posted websocket event");
-        return;
-      }
-      await debouncer.enqueue({ post, payload });
-    },
+    onPosted: ingress.receive,
     onReaction: handleReactionEvent,
   });
 
@@ -342,6 +355,7 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
       },
     });
   } finally {
+    await ingress.stop();
     unregisterInteractions();
     deactivateSlashCommands(account.accountId);
   }

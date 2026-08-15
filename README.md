@@ -81,11 +81,13 @@ Compared with the official plugin, this build preserves:
 - Ack and lifecycle status reactions, including same-session steer correlation.
 - The Mattermost slash-trigger length cap fix.
 
-Because this is a private external plugin rather than an OpenClaw-trusted official
-installation, inbound WebSocket posts are dispatched directly and are not replayed
-from OpenClaw's privileged durable ingress queue after a Gateway restart. Thread
-participation is also process-local, so its seven-day mention-bypass window resets
-when the Gateway restarts instead of persisting like the trusted official plugin.
+Inbound WebSocket posts are persisted through a plugin-owned SQLite ingress
+queue under the OpenClaw state directory before dispatch. The separate spool is
+required because beta.2 reserves the host channel-ingress queue for trusted
+official plugins. Uncompleted posts can still be reclaimed after a Gateway
+restart, and debounce/adoption lifecycle settlement keeps retry and dead-letter
+handling bounded. Thread participation remains process-local, so its seven-day
+mention-bypass window resets when the Gateway restarts.
 
 ## Package build
 
