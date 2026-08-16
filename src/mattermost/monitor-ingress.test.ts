@@ -38,7 +38,18 @@ function postedEvent(params?: {
   });
 }
 
-function startMonitor(
+function startMonitor(queue: MattermostIngressQueue, dispatch: MattermostIngressDispatch) {
+  return createMattermostIngressMonitor({
+    accountId: "default",
+    queue,
+    dispatch,
+    runtime: { error: vi.fn(), log: vi.fn() },
+    pollIntervalMs: 60_000,
+    adoptionStallTimeoutMs: 5_000,
+  });
+}
+
+function startMonitorWithProductionTimeout(
   queue: MattermostIngressQueue,
   dispatch: MattermostIngressDispatch,
 ) {
@@ -47,8 +58,7 @@ function startMonitor(
     queue,
     dispatch,
     runtime: { error: vi.fn(), log: vi.fn() },
-    pollIntervalMs: 60_000,
-    adoptionStallTimeoutMs: 5_000,
+    pollIntervalMs: 60 * 60_000,
   });
 }
 
@@ -295,6 +305,67 @@ describe("Mattermost durable ingress", () => {
         ]);
       } finally {
         await monitor.stop();
+      }
+    });
+  });
+
+  it("dispatches another channel while an earlier channel is still awaiting adoption", async () => {
+    await withQueue(async (queue) => {
+      const lifecycles = new Map<string, MattermostIngressLifecycle>();
+      const dispatched: string[] = [];
+      const monitor = startMonitor(queue, async (post, _payload, lifecycle) => {
+        dispatched.push(post.id);
+        lifecycles.set(post.id, lifecycle);
+        lifecycle.onDeferred();
+        return { kind: "deferred" } as const;
+      });
+      try {
+        await monitor.receive(
+          postedEvent({ postId: "post-blocked", channelId: "channel-blocked" }),
+        );
+        await vi.waitFor(() => expect(dispatched).toEqual(["post-blocked"]));
+
+        await monitor.receive(
+          postedEvent({ postId: "post-independent", channelId: "channel-independent" }),
+        );
+        await vi.waitFor(() => expect(dispatched).toEqual(["post-blocked", "post-independent"]), {
+          timeout: 1_000,
+        });
+      } finally {
+        await Promise.all([...lifecycles.values()].map((lifecycle) => lifecycle.onAbandoned()));
+        await monitor.stop();
+      }
+    });
+  });
+
+  it("keeps a deferred turn alive through the core stale-reply takeover window", async () => {
+    await withQueue(async (queue) => {
+      vi.useFakeTimers();
+      const lifecycleReady = createDeferred();
+      let deferredLifecycle: MattermostIngressLifecycle | undefined;
+      const monitor = startMonitorWithProductionTimeout(queue, (_post, _payload, lifecycle) => {
+        deferredLifecycle = lifecycle;
+        lifecycle.onDeferred();
+        lifecycleReady.resolve();
+        return { kind: "deferred" } as const;
+      });
+      try {
+        await monitor.receive(postedEvent({ postId: "post-stale-takeover" }));
+        await lifecycleReady.promise;
+
+        // Core's quiet tool/reply takeover can take 15 minutes. The durable
+        // claim must still be adoptable after that recovery boundary.
+        await vi.advanceTimersByTimeAsync(15 * 60_000 + 1);
+        expect(await queue.listClaims()).toEqual([
+          expect.objectContaining({ id: "post-stale-takeover" }),
+        ]);
+
+        await deferredLifecycle?.onAdopted();
+        expect(await queue.listClaims()).toEqual([]);
+      } finally {
+        await deferredLifecycle?.onAbandoned();
+        await monitor.stop();
+        vi.useRealTimers();
       }
     });
   });

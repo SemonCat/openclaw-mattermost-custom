@@ -166,6 +166,11 @@ export function createMattermostIngressMonitor(options: {
   adoptionStallTimeoutMs?: number;
   abortSignal?: AbortSignal;
 }): MattermostIngressMonitor {
+  // Core may retain a busy reply owner for up to 15 minutes while proving that
+  // a quiet tool/reply run is stale. Keep a durably queued Mattermost turn alive
+  // beyond that takeover window so recovery can admit it instead of racing the
+  // generic five-minute ingress watchdog.
+  const adoptionStallTimeoutMs = options.adoptionStallTimeoutMs ?? 20 * 60_000;
   const monitor = createChannelIngressMonitor<
     string,
     Omit<MattermostIngressPayload, "version">,
@@ -201,14 +206,10 @@ export function createMattermostIngressMonitor(options: {
       return await options.dispatch(post, payload, lifecycle);
     },
     pollIntervalMs: options.pollIntervalMs ?? MATTERMOST_INGRESS_POLL_INTERVAL_MS,
-    // Preserve Mattermost's existing one-drain-at-a-time delivery cycle.
-    waitForDeliveryIdleBeforeRepump: true,
     retention: "standard",
     drain: {
       resolveNonRetryableFailure: resolveMattermostIngressNonRetryableFailure,
-      ...(options.adoptionStallTimeoutMs === undefined
-        ? {}
-        : { adoptionStallTimeoutMs: options.adoptionStallTimeoutMs }),
+      adoptionStallTimeoutMs,
       onLog: (message) => options.runtime.log?.(`mattermost ${message}`),
     },
     ...(options.abortSignal ? { abortSignal: options.abortSignal } : {}),
