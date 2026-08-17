@@ -25,7 +25,15 @@ export type MattermostIngressLifecycle = {
   onAdopted: () => void | Promise<void>;
   onDeferred: () => void;
   onAdoptionFinalizing: () => void;
+  onFailed?: (error: unknown) => void | Promise<void>;
   onAbandoned: () => void | Promise<void>;
+};
+
+export type MattermostIngressLaneFacts = {
+  channelId: string;
+  postId: string;
+  rootId?: string;
+  channelType?: string;
 };
 
 type MattermostIngressPayload = {
@@ -86,7 +94,14 @@ function requiredString(value: unknown, field: string): string {
   );
 }
 
-function inspectMattermostIngressEvent(rawEvent: string): {
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function inspectMattermostIngressEvent(
+  rawEvent: string,
+  resolveThreadId?: (facts: MattermostIngressLaneFacts) => string | undefined,
+): {
   eventId: string;
   laneKey: string;
 } | null {
@@ -108,7 +123,17 @@ function inspectMattermostIngressEvent(rawEvent: string): {
       : typeof data?.channel_id === "string" && data.channel_id.trim()
         ? data.channel_id.trim()
         : requiredString(broadcast?.channel_id, "channel_id");
-  return { eventId, laneKey: `channel:${channelId}` };
+  const rootId = optionalString(post.root_id);
+  const channelType = optionalString(data?.channel_type);
+  const facts = {
+    channelId,
+    postId: eventId,
+    ...(rootId ? { rootId } : {}),
+    ...(channelType ? { channelType } : {}),
+  } satisfies MattermostIngressLaneFacts;
+  const threadId = optionalString(resolveThreadId?.(facts));
+  const channelLane = `channel:${channelId}`;
+  return { eventId, laneKey: threadId ? `${channelLane}:thread:${threadId}` : channelLane };
 }
 
 function parseClaimedEvent(
@@ -162,6 +187,7 @@ export function createMattermostIngressMonitor(options: {
   queue?: ChannelIngressQueue<MattermostIngressPayload>;
   dispatch: MattermostIngressDispatch;
   runtime: Pick<RuntimeEnv, "error" | "log">;
+  resolveThreadId?: (facts: MattermostIngressLaneFacts) => string | undefined;
   pollIntervalMs?: number;
   adoptionStallTimeoutMs?: number;
   abortSignal?: AbortSignal;
@@ -171,6 +197,16 @@ export function createMattermostIngressMonitor(options: {
   // beyond that takeover window so recovery can admit it instead of racing the
   // generic five-minute ingress watchdog.
   const adoptionStallTimeoutMs = options.adoptionStallTimeoutMs ?? 20 * 60_000;
+  const inspect = (rawEvent: string) =>
+    inspectMattermostIngressEvent(rawEvent, options.resolveThreadId);
+  const deriveLaneKey = (record: { laneKey?: string; payload: MattermostIngressPayload }) => {
+    try {
+      return inspect(record.payload.rawEvent)?.laneKey ?? record.laneKey;
+    } catch {
+      // Claim-side payload validation owns malformed-row dead-lettering.
+      return record.laneKey;
+    }
+  };
   const monitor = createChannelIngressMonitor<
     string,
     Omit<MattermostIngressPayload, "version">,
@@ -183,7 +219,7 @@ export function createMattermostIngressMonitor(options: {
           accountId: options.accountId,
           stateDir: getMattermostRuntime().state.resolveStateDir(),
         })),
-    inspect: (rawEvent) => inspectMattermostIngressEvent(rawEvent),
+    inspect: (rawEvent) => inspect(rawEvent),
     payload: {
       version: MATTERMOST_INGRESS_PAYLOAD_VERSION,
       serialize: (rawEvent, { receivedAt }) => ({ receivedAt, rawEvent }),
@@ -209,6 +245,9 @@ export function createMattermostIngressMonitor(options: {
     retention: "standard",
     drain: {
       resolveNonRetryableFailure: resolveMattermostIngressNonRetryableFailure,
+      deriveLaneKey,
+      reconcileStoredLaneKey: (_record, storedLaneKey, derivedLaneKey) =>
+        derivedLaneKey.startsWith(`${storedLaneKey}:thread:`),
       adoptionStallTimeoutMs,
       onLog: (message) => options.runtime.log?.(`mattermost ${message}`),
     },

@@ -131,7 +131,7 @@ export function formatMattermostFinalDeliveryOutcomeLog(params: {
   return undefined;
 }
 
-function resolveMattermostEffectiveReplyToId(params: {
+export function resolveMattermostEffectiveReplyToId(params: {
   kind: ChatType;
   postId?: string | null;
   replyToMode: "off" | "first" | "all" | "batched";

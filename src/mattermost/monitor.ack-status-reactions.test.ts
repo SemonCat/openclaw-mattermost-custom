@@ -78,6 +78,7 @@ const mockState = vi.hoisted(() => ({
   ingressOnAdopted: vi.fn(async () => {}),
   ingressOnAdoptionFinalizing: vi.fn(),
   ingressOnDeferred: vi.fn(),
+  ingressOnFailed: vi.fn(async () => {}),
   ingressReceive: vi.fn(),
   recordMattermostThreadParticipation: vi.fn(),
   registerMattermostMonitorSlashCommands: vi.fn(),
@@ -165,6 +166,7 @@ vi.mock("./monitor-ingress.js", async (importOriginal) => {
             onAdopted: mockState.ingressOnAdopted,
             onDeferred: mockState.ingressOnDeferred,
             onAdoptionFinalizing: mockState.ingressOnAdoptionFinalizing,
+            onFailed: mockState.ingressOnFailed,
             onAbandoned: mockState.ingressOnAbandoned,
           });
         },
@@ -529,7 +531,7 @@ describe("mattermost ack reactions", () => {
     });
   });
 
-  it("keeps the ingress receipt when recording fails without status reactions", async () => {
+  it("reports a pre-admission recording failure without abandoning its ingress claim", async () => {
     const socket = new FakeWebSocket();
     const abortController = new AbortController();
     const config: OpenClawConfig = {
@@ -561,6 +563,12 @@ describe("mattermost ack reactions", () => {
         emoji_name: "eyes",
       }),
     });
+    expect(mockState.ingressOnFailed).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: "record failed",
+      }),
+    );
+    expect(mockState.ingressOnAbandoned).not.toHaveBeenCalled();
   });
 
   it("does not react at all under the default group-mentions scope without a mention", async () => {
@@ -755,9 +763,9 @@ describe("mattermost lifecycle status reactions", () => {
     // controller that explicit queue-drain evidence just transferred away.
     releaseOwner?.();
     await ownerEmit;
-    expect(
-      requestedReactionsByPost(mockState.request).get("post-queued-followup"),
-    ).not.toContain("+white_check_mark");
+    expect(requestedReactionsByPost(mockState.request).get("post-queued-followup")).not.toContain(
+      "+white_check_mark",
+    );
 
     const onQueuedFollowupAdmitted = followupReplyOptions?.onQueuedFollowupAdmitted as
       | (() => Promise<void> | void)

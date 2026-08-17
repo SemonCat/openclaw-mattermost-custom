@@ -7,7 +7,7 @@ import {
   normalizeTrimmedStringList,
 } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { getMattermostRuntime } from "../runtime.js";
-import { resolveMattermostAccount } from "./accounts.js";
+import { resolveMattermostAccount, resolveMattermostReplyToMode } from "./accounts.js";
 import {
   createMattermostClient,
   fetchMattermostMe,
@@ -21,10 +21,13 @@ import {
   setInteractionCallbackUrl,
   setInteractionSecret,
 } from "./interactions.js";
+import { resolveMattermostTrustedChatKind } from "./monitor-auth.js";
+import { resolveMattermostEffectiveReplyToId } from "./monitor-context.js";
 import { registerMattermostInteractions } from "./monitor-interactions.js";
 import {
   createMattermostIngressMonitor,
   type MattermostIngressLifecycle,
+  type MattermostIngressLaneFacts,
 } from "./monitor-ingress.js";
 import { createMattermostModelPickerInteractionHandler } from "./monitor-model-picker.js";
 import { createMattermostPostHandler } from "./monitor-posts.js";
@@ -241,6 +244,19 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
   };
   const handlePost = createMattermostPostHandler(monitor);
   const handleReactionEvent = createMattermostReactionHandler(monitor);
+  const resolveIngressThreadId = ({ postId, rootId, channelType }: MattermostIngressLaneFacts) => {
+    const resolvedChannelType = normalizeOptionalString(channelType);
+    if (!resolvedChannelType) {
+      return undefined;
+    }
+    const kind = resolveMattermostTrustedChatKind({ channelType: resolvedChannelType });
+    return resolveMattermostEffectiveReplyToId({
+      kind,
+      postId,
+      replyToMode: resolveMattermostReplyToMode(account, kind),
+      threadRootId: rootId,
+    });
+  };
 
   const debouncer = core.channel.debounce.createInboundDebouncer<{
     post: MattermostPost;
@@ -259,7 +275,14 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
       if (!channelId) {
         return null;
       }
-      const threadId = normalizeOptionalString(entry.post.root_id);
+      const rootId = normalizeOptionalString(entry.post.root_id);
+      const channelType = normalizeOptionalString(entry.payload.data?.channel_type);
+      const threadId = resolveIngressThreadId({
+        channelId,
+        postId: entry.post.id,
+        ...(rootId ? { rootId } : {}),
+        ...(channelType ? { channelType } : {}),
+      });
       return `mattermost:${account.accountId}:${channelId}:${threadId ? `thread:${threadId}` : "channel"}`;
     },
     shouldDebounce: (entry) => {
@@ -302,7 +325,7 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
             );
             await settle();
           } catch (error) {
-            await admissionLifecycle.onAbandoned();
+            await admissionLifecycle.onFailed?.(error);
             throw error;
           }
         },
@@ -316,6 +339,7 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
     accountId: account.accountId,
     runtime,
     abortSignal: opts.abortSignal,
+    resolveThreadId: resolveIngressThreadId,
     dispatch: async (post, payload, turnAdoptionLifecycle) => {
       // Deferred claims settle through lifecycle callbacks, so terminal flush
       // errors spend the drain's bounded retry budget before dead-lettering.

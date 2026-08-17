@@ -62,10 +62,6 @@ function changed(result: StatementResultingChanges): boolean {
   return Number(result.changes) > 0;
 }
 
-function parseOptionalJson<T>(value: string | null): T | undefined {
-  return value === null ? undefined : (JSON.parse(value) as T);
-}
-
 export function createMattermostIngressQueue<
   TPayload,
   TMetadata = unknown,
@@ -127,9 +123,7 @@ export function createMattermostIngressQueue<
     accountId,
     queueName,
     payload: JSON.parse(row.payload_json) as TPayload,
-    ...(row.metadata_json === null
-      ? {}
-      : { metadata: JSON.parse(row.metadata_json) as TMetadata }),
+    ...(row.metadata_json === null ? {} : { metadata: JSON.parse(row.metadata_json) as TMetadata }),
     receivedAt: row.received_at,
     updatedAt: row.updated_at,
     ...(row.lane_key === null ? {} : { laneKey: row.lane_key }),
@@ -270,6 +264,21 @@ export function createMattermostIngressQueue<
       const candidates =
         claimOptions?.candidateIds === undefined ? undefined : new Set(claimOptions.candidateIds);
       const order = claimOptions?.orderBy === "id" ? "event_id" : "received_at, event_id";
+      const resolveClaimLaneKey = (record: QueueRecord<TPayload, TMetadata>) => {
+        const storedLaneKey = record.laneKey;
+        if (!storedLaneKey) {
+          return claimOptions?.deriveLaneKey?.(record);
+        }
+        if (!claimOptions?.deriveLaneKey || !claimOptions.reconcileStoredLaneKey) {
+          return storedLaneKey;
+        }
+        const derivedLaneKey = claimOptions.deriveLaneKey(record);
+        return derivedLaneKey &&
+          derivedLaneKey !== storedLaneKey &&
+          claimOptions.reconcileStoredLaneKey(record, storedLaneKey, derivedLaneKey)
+          ? derivedLaneKey
+          : storedLaneKey;
+      };
       return withTransaction(() => {
         const rows = database
           .prepare(
@@ -280,18 +289,7 @@ export function createMattermostIngressQueue<
           if (candidates && !candidates.has(row.event_id)) {
             return false;
           }
-          const record = baseRecord(row);
-          let laneKey = record.laneKey ?? claimOptions?.deriveLaneKey?.(record);
-          if (record.laneKey && claimOptions?.deriveLaneKey && claimOptions.reconcileStoredLaneKey) {
-            const derived = claimOptions.deriveLaneKey(record);
-            if (
-              derived &&
-              derived !== record.laneKey &&
-              claimOptions.reconcileStoredLaneKey(record, record.laneKey, derived)
-            ) {
-              laneKey = derived;
-            }
-          }
+          const laneKey = resolveClaimLaneKey(baseRecord(row));
           return !laneKey || !blocked.has(laneKey);
         });
         if (!selected) {
@@ -301,7 +299,7 @@ export function createMattermostIngressQueue<
         const token = randomUUID();
         const ownerId = claimOptions?.ownerId?.trim() || `${process.pid}`;
         const record = baseRecord(selected);
-        const derivedLane = record.laneKey ?? claimOptions?.deriveLaneKey?.(record) ?? null;
+        const derivedLane = resolveClaimLaneKey(record) ?? null;
         const updated = database
           .prepare(`
             UPDATE ingress_events
@@ -309,7 +307,15 @@ export function createMattermostIngressQueue<
                 lane_key = COALESCE(?, lane_key), updated_at = ?
             WHERE account_id = ? AND event_id = ? AND status = 'pending'
           `)
-          .run(token, ownerId, transitionAt, derivedLane, transitionAt, accountId, selected.event_id);
+          .run(
+            token,
+            ownerId,
+            transitionAt,
+            derivedLane,
+            transitionAt,
+            accountId,
+            selected.event_id,
+          );
         const row = selectRow(selected.event_id);
         return changed(updated) && row ? claimRecord(row) : null;
       });

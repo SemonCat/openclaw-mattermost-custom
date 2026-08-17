@@ -7,7 +7,9 @@ import { createMattermostIngressQueue } from "./ingress-queue.js";
 const cleanupPaths: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(cleanupPaths.splice(0).map((entry) => fs.rm(entry, { recursive: true, force: true })));
+  await Promise.all(
+    cleanupPaths.splice(0).map((entry) => fs.rm(entry, { recursive: true, force: true })),
+  );
 });
 
 async function stateDir(): Promise<string> {
@@ -63,5 +65,23 @@ describe("plugin-owned Mattermost ingress queue", () => {
 
     expect(await queue.complete(stale!)).toBe(false);
     expect(await queue.complete(current!)).toBe(true);
+  });
+
+  it("persists an approved lane reconciliation when claiming a legacy row", async () => {
+    const root = await stateDir();
+    const queue = createMattermostIngressQueue<{ rawEvent: string }>({
+      accountId: "default",
+      stateDir: root,
+    });
+    await queue.enqueue("post-thread", { rawEvent: "event" }, { laneKey: "channel:channel-1" });
+
+    const claimed = await queue.claimNext({
+      deriveLaneKey: () => "channel:channel-1:thread:root-1",
+      reconcileStoredLaneKey: (_record, storedLaneKey, derivedLaneKey) =>
+        storedLaneKey === "channel:channel-1" &&
+        derivedLaneKey === "channel:channel-1:thread:root-1",
+    });
+
+    expect(claimed?.laneKey).toBe("channel:channel-1:thread:root-1");
   });
 });

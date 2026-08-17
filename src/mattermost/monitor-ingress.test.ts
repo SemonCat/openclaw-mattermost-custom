@@ -22,27 +22,38 @@ type MattermostIngressDispatch = Parameters<typeof createMattermostIngressMonito
 function postedEvent(params?: {
   postId?: string;
   channelId?: string;
+  rootId?: string;
+  channelType?: string;
   message?: string;
   event?: "posted" | "post_edited";
 }): string {
   return JSON.stringify({
     event: params?.event ?? "posted",
     data: {
+      channel_type: params?.channelType ?? "O",
       post: JSON.stringify({
         id: params?.postId ?? "post-1",
         channel_id: params?.channelId ?? "channel-1",
         user_id: "user-1",
         message: params?.message ?? "hello",
+        ...(params?.rootId ? { root_id: params.rootId } : {}),
       }),
     },
   });
 }
 
-function startMonitor(queue: MattermostIngressQueue, dispatch: MattermostIngressDispatch) {
+function startMonitor(
+  queue: MattermostIngressQueue,
+  dispatch: MattermostIngressDispatch,
+  resolveThreadId?: NonNullable<
+    Parameters<typeof createMattermostIngressMonitor>[0]["resolveThreadId"]
+  >,
+) {
   return createMattermostIngressMonitor({
     accountId: "default",
     queue,
     dispatch,
+    ...(resolveThreadId ? { resolveThreadId } : {}),
     runtime: { error: vi.fn(), log: vi.fn() },
     pollIntervalMs: 60_000,
     adoptionStallTimeoutMs: 5_000,
@@ -329,6 +340,39 @@ describe("Mattermost durable ingress", () => {
           postedEvent({ postId: "post-independent", channelId: "channel-independent" }),
         );
         await vi.waitFor(() => expect(dispatched).toEqual(["post-blocked", "post-independent"]), {
+          timeout: 1_000,
+        });
+      } finally {
+        await Promise.all([...lifecycles.values()].map((lifecycle) => lifecycle.onAbandoned()));
+        await monitor.stop();
+      }
+    });
+  });
+
+  it("isolates threads while preserving order inside one thread", async () => {
+    await withQueue(async (queue) => {
+      const lifecycles = new Map<string, MattermostIngressLifecycle>();
+      const dispatched: string[] = [];
+      const monitor = startMonitor(
+        queue,
+        async (post, _payload, lifecycle) => {
+          dispatched.push(post.id);
+          lifecycles.set(post.id, lifecycle);
+          lifecycle.onDeferred();
+          return { kind: "deferred" } as const;
+        },
+        ({ postId, rootId }) => rootId ?? postId,
+      );
+      try {
+        await monitor.receive(postedEvent({ postId: "thread-a-1", rootId: "root-a" }));
+        await vi.waitFor(() => expect(dispatched).toEqual(["thread-a-1"]));
+
+        await monitor.receive(postedEvent({ postId: "thread-a-2", rootId: "root-a" }));
+        await monitor.waitForIdle();
+        expect(dispatched).toEqual(["thread-a-1"]);
+
+        await monitor.receive(postedEvent({ postId: "thread-b-1", rootId: "root-b" }));
+        await vi.waitFor(() => expect(dispatched).toEqual(["thread-a-1", "thread-b-1"]), {
           timeout: 1_000,
         });
       } finally {
