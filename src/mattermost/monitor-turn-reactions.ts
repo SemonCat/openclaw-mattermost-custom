@@ -226,28 +226,17 @@ export function createMattermostMessageReactionRuntime(params: {
     },
   });
 
-  let initialAckReactionQueued = false;
+  let ingressReceiptStarted = false;
+  let lifecycleActivated = false;
   const lifecycleOwner: MattermostReactionLifecycleOwner = {};
   let registration: MattermostReactionRegistration | undefined;
   let queuedFollowupPending = false;
-  const queueInitialAckReactionAfterRecord = () => {
-    if (initialAckReactionQueued) {
+  const startIngressReceipt = () => {
+    if (ingressReceiptStarted) {
       return;
     }
-    initialAckReactionQueued = true;
+    ingressReceiptStarted = true;
     if (statusReactionsEnabled) {
-      // Only steer mode is known to actually resume the owner's still-running turn; other
-      // queue modes eventually run this post's own independent turn, so joining them would
-      // strand this controller. A misconfigured/inconsistent effective mode still self-heals
-      // in finish() below once this call's own dispatch outcome proves it wasn't steered.
-      registration = lifecycleStore.attach({
-        sessionKey,
-        owner: lifecycleOwner,
-        controller,
-        allowJoin:
-          (cfg.messages?.queue?.byChannel?.mattermost ?? cfg.messages?.queue?.mode ?? "steer") ===
-          "steer",
-      });
       void controller.setQueued();
       return;
     }
@@ -256,6 +245,28 @@ export function createMattermostMessageReactionRuntime(params: {
     }
     void adapter.setReaction(ackReaction).catch((err: unknown) => {
       logAckFailure({ log, channel: "mattermost", target, error: err });
+    });
+  };
+
+  const activateAfterRecord = () => {
+    startIngressReceipt();
+    if (lifecycleActivated) {
+      return;
+    }
+    lifecycleActivated = true;
+    if (!statusReactionsEnabled) {
+      return;
+    }
+    // Only durable turns may own or join a shared session lifecycle. An ingress receipt can
+    // exist before recording completes, but registering it here earlier would let a failed
+    // record terminalize unrelated same-session posts.
+    registration = lifecycleStore.attach({
+      sessionKey,
+      owner: lifecycleOwner,
+      controller,
+      allowJoin:
+        (cfg.messages?.queue?.byChannel?.mattermost ?? cfg.messages?.queue?.mode ?? "steer") ===
+        "steer",
     });
   };
 
@@ -270,7 +281,7 @@ export function createMattermostMessageReactionRuntime(params: {
   };
 
   const settle = async (result: { dispatchError: boolean; anyReplyDelivered: boolean }) => {
-    if (!statusReactionsEnabled || !initialAckReactionQueued) {
+    if (!statusReactionsEnabled || !ingressReceiptStarted) {
       return;
     }
     const settleController = async (targetController: StatusReactionController) => {
@@ -317,7 +328,7 @@ export function createMattermostMessageReactionRuntime(params: {
   };
 
   const beginQueuedFollowup = () => {
-    if (!statusReactionsEnabled || !initialAckReactionQueued) {
+    if (!statusReactionsEnabled || !ingressReceiptStarted) {
       return undefined;
     }
     queuedFollowupPending = true;
@@ -361,7 +372,8 @@ export function createMattermostMessageReactionRuntime(params: {
   return {
     statusReactionsEnabled,
     controller,
-    queueInitialAckReactionAfterRecord,
+    startIngressReceipt,
+    activateAfterRecord,
     setThinking: () => update((targetController) => targetController.setThinking()),
     setTool: (toolName?: string) =>
       update((targetController) => targetController.setTool(toolName)),

@@ -147,6 +147,7 @@ export async function dispatchMattermostInboundTurn(
     },
     log: monitor.logVerboseMessage,
   });
+  reactions.startIngressReceipt();
   const {
     deliveryBarrier,
     replyOptions,
@@ -573,7 +574,7 @@ export async function dispatchMattermostInboundTurn(
                 sessionKey: route.sessionKey,
               },
               ctxPayload,
-              afterRecord: reactions.queueInitialAckReactionAfterRecord,
+              afterRecord: reactions.activateAfterRecord,
               record: {
                 updateLastRoute:
                   kind === "direct"

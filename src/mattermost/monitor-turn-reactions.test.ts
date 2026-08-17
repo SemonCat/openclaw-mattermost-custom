@@ -68,7 +68,7 @@ describe("createMattermostMessageReactionRuntime", () => {
       });
       const runtime = createMattermostMessageReactionRuntime(params);
 
-      runtime.queueInitialAckReactionAfterRecord();
+      runtime.activateAfterRecord();
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
 
       expect(params.request).not.toHaveBeenCalled();
@@ -85,7 +85,7 @@ describe("createMattermostMessageReactionRuntime", () => {
       });
       const runtime = createMattermostMessageReactionRuntime(params);
 
-      runtime.queueInitialAckReactionAfterRecord();
+      runtime.activateAfterRecord();
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
 
       expect(params.request).not.toHaveBeenCalled();
@@ -98,7 +98,7 @@ describe("createMattermostMessageReactionRuntime", () => {
       });
       const runtime = createMattermostMessageReactionRuntime(params);
 
-      runtime.queueInitialAckReactionAfterRecord();
+      runtime.activateAfterRecord();
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
 
       expect(params.request).toHaveBeenCalledExactlyOnceWith("/reactions", {
@@ -111,7 +111,7 @@ describe("createMattermostMessageReactionRuntime", () => {
       const params = createBaseParams({ cfg: { messages: { ackReactionScope: "off" } } });
       const runtime = createMattermostMessageReactionRuntime(params);
 
-      runtime.queueInitialAckReactionAfterRecord();
+      runtime.activateAfterRecord();
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
 
       expect(params.request).not.toHaveBeenCalled();
@@ -126,7 +126,7 @@ describe("createMattermostMessageReactionRuntime", () => {
 
       expect(runtime.statusReactionsEnabled).toBe(false);
 
-      runtime.queueInitialAckReactionAfterRecord();
+      runtime.activateAfterRecord();
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
 
       // Exactly one static ack reaction, never replaced/removed by lifecycle transitions.
@@ -147,8 +147,8 @@ describe("createMattermostMessageReactionRuntime", () => {
       const params = createBaseParams({});
       const runtime = createMattermostMessageReactionRuntime(params);
 
-      runtime.queueInitialAckReactionAfterRecord();
-      runtime.queueInitialAckReactionAfterRecord();
+      runtime.activateAfterRecord();
+      runtime.activateAfterRecord();
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
 
       expect(params.request).toHaveBeenCalledTimes(1);
@@ -169,16 +169,62 @@ describe("createMattermostMessageReactionRuntime", () => {
       });
     }
 
-    it("does not react when durable session recording failed before activation", async () => {
+    it("settles a pre-record ingress receipt as an error without shared lifecycle activation", async () => {
       const params = createBaseParams({
         cfg: { messages: { statusReactions: { enabled: true } } },
       });
       const runtime = createMattermostMessageReactionRuntime(params);
 
-      await runtime.finish({ dispatchError: true, anyReplyDelivered: false });
+      runtime.startIngressReceipt();
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
 
-      expect(params.request).not.toHaveBeenCalled();
+      const finishPromise = runtime.finish({ dispatchError: true, anyReplyDelivered: false });
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.errorHoldMs);
+      await finishPromise;
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+
+      expect(requestedEmojis(params.request as ReturnType<typeof vi.fn>)).toEqual([
+        "+eyes",
+        "+x",
+        "-eyes",
+      ]);
+    });
+
+    it("does not join a shared session lifecycle before durable record activation", async () => {
+      const lifecycleStore = createMattermostReactionLifecycleStore();
+      const cfg: OpenClawConfig = {
+        messages: { statusReactions: { enabled: true }, queue: { mode: "steer" } },
+      };
+      const ownerParams = createBaseParams({
+        cfg,
+        postId: "post-owner-recorded",
+        sessionKey: "session-record-boundary",
+        lifecycleStore,
+      });
+      const pendingParams = createBaseParams({
+        cfg,
+        postId: "post-record-pending",
+        sessionKey: "session-record-boundary",
+        lifecycleStore,
+      });
+      const owner = createMattermostMessageReactionRuntime(ownerParams);
+      const pending = createMattermostMessageReactionRuntime(pendingParams);
+
+      owner.activateAfterRecord();
+      pending.startIngressReceipt();
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+
+      owner.setThinking();
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+      expect(requestedEmojis(pendingParams.request as ReturnType<typeof vi.fn>)).toEqual(["+eyes"]);
+
+      pending.activateAfterRecord();
+      owner.setTool("bash");
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+      expect(requestedEmojis(pendingParams.request as ReturnType<typeof vi.fn>)).toEqual([
+        "+eyes",
+        "+computer",
+      ]);
     });
 
     it("moves queued -> thinking -> tool -> done, replacing the prior emoji at each step", async () => {
@@ -188,7 +234,7 @@ describe("createMattermostMessageReactionRuntime", () => {
       const runtime = createMattermostMessageReactionRuntime(params);
       expect(runtime.statusReactionsEnabled).toBe(true);
 
-      runtime.queueInitialAckReactionAfterRecord();
+      runtime.activateAfterRecord();
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
 
       runtime.setThinking();
@@ -222,7 +268,7 @@ describe("createMattermostMessageReactionRuntime", () => {
       });
       const runtime = createMattermostMessageReactionRuntime(params);
 
-      runtime.queueInitialAckReactionAfterRecord();
+      runtime.activateAfterRecord();
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
 
       const finishPromise = runtime.finish({ dispatchError: true, anyReplyDelivered: false });
@@ -244,7 +290,7 @@ describe("createMattermostMessageReactionRuntime", () => {
       });
       const runtime = createMattermostMessageReactionRuntime(params);
 
-      runtime.queueInitialAckReactionAfterRecord();
+      runtime.activateAfterRecord();
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
 
       await runtime.finish({ dispatchError: false, anyReplyDelivered: false });
@@ -271,7 +317,7 @@ describe("createMattermostMessageReactionRuntime", () => {
       });
       const runtime = createMattermostMessageReactionRuntime(params);
 
-      runtime.queueInitialAckReactionAfterRecord();
+      runtime.activateAfterRecord();
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
 
       const finishPromise = runtime.finish({ dispatchError: false, anyReplyDelivered: true });
@@ -309,8 +355,8 @@ describe("createMattermostMessageReactionRuntime", () => {
       // keeps running and finishes after the steered message has already
       // returned control (no error, no visible reply of its own) — this is
       // NOT two sequential/restarted turns, it is a genuine overlap.
-      owner.queueInitialAckReactionAfterRecord();
-      joined.queueInitialAckReactionAfterRecord();
+      owner.activateAfterRecord();
+      joined.activateAfterRecord();
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
       owner.setThinking();
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
@@ -361,8 +407,8 @@ describe("createMattermostMessageReactionRuntime", () => {
       const owner = createMattermostMessageReactionRuntime(ownerParams);
       const joined = createMattermostMessageReactionRuntime(joinedParams);
 
-      owner.queueInitialAckReactionAfterRecord();
-      joined.queueInitialAckReactionAfterRecord();
+      owner.activateAfterRecord();
+      joined.activateAfterRecord();
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
 
       // The owner's turn is still running (never calls finish()) when the mispredicted
@@ -409,8 +455,8 @@ describe("createMattermostMessageReactionRuntime", () => {
       const owner = createMattermostMessageReactionRuntime(ownerParams);
       const followup = createMattermostMessageReactionRuntime(followupParams);
 
-      owner.queueInitialAckReactionAfterRecord();
-      followup.queueInitialAckReactionAfterRecord();
+      owner.activateAfterRecord();
+      followup.activateAfterRecord();
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
       owner.setThinking();
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
@@ -483,8 +529,8 @@ describe("createMattermostMessageReactionRuntime", () => {
       const owner = createMattermostMessageReactionRuntime(ownerParams);
       const followup = createMattermostMessageReactionRuntime(followupParams);
 
-      owner.queueInitialAckReactionAfterRecord();
-      followup.queueInitialAckReactionAfterRecord();
+      owner.activateAfterRecord();
+      followup.activateAfterRecord();
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
       await followup.finish({ dispatchError: false, anyReplyDelivered: false });
 
@@ -493,7 +539,7 @@ describe("createMattermostMessageReactionRuntime", () => {
       // onQueuedFollowupAdmitted.
       const endCorrelation = followup.beginQueuedFollowup();
       const trailing = createMattermostMessageReactionRuntime(trailingParams);
-      trailing.queueInitialAckReactionAfterRecord();
+      trailing.activateAfterRecord();
       owner.setTool("bash");
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
 
@@ -546,8 +592,8 @@ describe("createMattermostMessageReactionRuntime", () => {
       const owner = createMattermostMessageReactionRuntime(ownerParams);
       const followup = createMattermostMessageReactionRuntime(followupParams);
 
-      owner.queueInitialAckReactionAfterRecord();
-      followup.queueInitialAckReactionAfterRecord();
+      owner.activateAfterRecord();
+      followup.activateAfterRecord();
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
       await followup.finish({ dispatchError: false, anyReplyDelivered: false });
 

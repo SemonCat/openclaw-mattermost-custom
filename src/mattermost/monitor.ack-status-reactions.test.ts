@@ -475,17 +475,23 @@ describe("mattermost ack reactions", () => {
     expect(mockState.ingressOnAdopted).toHaveBeenCalledTimes(1);
   });
 
-  it("reacts with the ack emoji only after the accepted post is recorded", async () => {
+  it("reacts with the ack emoji while durable session recording is still pending", async () => {
     const socket = new FakeWebSocket();
     const abortController = new AbortController();
     const recordOrder: string[] = [];
+    let releaseRecord: (() => void) | undefined;
+    const recordGate = new Promise<void>((resolve) => {
+      releaseRecord = resolve;
+    });
     const config: OpenClawConfig = {
       ...baseConfig,
       messages: { ackReactionScope: "all" },
     };
     const runtimeCore = createRuntimeCore(config);
     runtimeCore.channel.session.recordInboundSession.mockImplementation(async () => {
-      recordOrder.push("record");
+      recordOrder.push("record:start");
+      await recordGate;
+      recordOrder.push("record:end");
     });
     mockState.runtimeCore = runtimeCore;
     mockState.request.mockImplementation(async () => {
@@ -505,18 +511,25 @@ describe("mattermost ack reactions", () => {
     });
     await vi.waitFor(() => expect(socket.openListenerCount).toBeGreaterThan(0));
     socket.emitOpen();
-    await emitMattermostChannelPost(socket, { id: "post-ack", message: "hello" });
-    socket.emitClose(1000);
-    await monitor;
+    const emitPromise = emitMattermostChannelPost(socket, { id: "post-ack", message: "hello" });
+    try {
+      await vi.waitFor(() => expect(mockState.request).toHaveBeenCalledTimes(1));
+      expect(recordOrder).toEqual(["react", "record:start"]);
+    } finally {
+      releaseRecord?.();
+      await emitPromise;
+      socket.emitClose(1000);
+      await monitor;
+    }
 
-    expect(recordOrder).toEqual(["record", "react"]);
+    expect(recordOrder).toEqual(["react", "record:start", "record:end"]);
     expect(mockState.request).toHaveBeenCalledExactlyOnceWith("/reactions", {
       method: "POST",
       body: JSON.stringify({ user_id: "bot-user", post_id: "post-ack", emoji_name: "eyes" }),
     });
   });
 
-  it("does not react when durable session recording fails", async () => {
+  it("keeps the ingress receipt when recording fails without status reactions", async () => {
     const socket = new FakeWebSocket();
     const abortController = new AbortController();
     const config: OpenClawConfig = {
@@ -540,7 +553,14 @@ describe("mattermost ack reactions", () => {
     socket.emitClose(1000);
     await monitor;
 
-    expect(mockState.request).not.toHaveBeenCalled();
+    expect(mockState.request).toHaveBeenCalledExactlyOnceWith("/reactions", {
+      method: "POST",
+      body: JSON.stringify({
+        user_id: "bot-user",
+        post_id: "post-record-failed",
+        emoji_name: "eyes",
+      }),
+    });
   });
 
   it("does not react at all under the default group-mentions scope without a mention", async () => {
