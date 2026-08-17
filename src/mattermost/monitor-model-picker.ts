@@ -1,4 +1,8 @@
 // Mattermost plugin module owns native model-picker interactions.
+import { randomUUID } from "node:crypto";
+import type { ModelsProviderData } from "openclaw/plugin-sdk/command-auth-native";
+import { applySessionModelSelection } from "openclaw/plugin-sdk/model-session-runtime";
+import { getSessionEntry, resolveStorePath } from "openclaw/plugin-sdk/session-store-runtime";
 import { runDetachedWebhookWork } from "openclaw/plugin-sdk/webhook-request-guards";
 import type { MattermostPost } from "./client.js";
 import type { MattermostInteractionResponse } from "./interactions.js";
@@ -9,10 +13,7 @@ import {
   renderMattermostProviderPickerView,
   resolveMattermostModelPickerCurrentModel,
 } from "./model-picker.js";
-import {
-  pinMattermostExplicitDefaultModelSelection,
-  rewriteMattermostPinnedModelReply,
-} from "./model-session-pin.js";
+import { pinMattermostExplicitDefaultModelSelection } from "./model-session-pin.js";
 import { authorizeMattermostCommandInvocation } from "./monitor-auth.js";
 import {
   buildMattermostModelPickerSelectMessageSid,
@@ -21,20 +22,9 @@ import {
 } from "./monitor-context.js";
 import { buildMattermostEventPlan, type MattermostEventPlan } from "./monitor-event-plan.js";
 import type { MattermostMonitorContext } from "./monitor-types.js";
-import { deliverMattermostReplyPayload } from "./reply-delivery.js";
-import type { OpenClawConfig, ReplyPayload } from "./runtime-api.js";
+import type { OpenClawConfig } from "./runtime-api.js";
 import { buildModelsProviderData } from "./runtime-api.js";
 import { sendMessageMattermost } from "./send.js";
-
-type RunModelPickerCommandParams = {
-  cfg: OpenClawConfig;
-  commandText: string;
-  commandAuthorized: boolean;
-  eventPlan: MattermostEventPlan;
-  senderName: string;
-  messageSid: string;
-  sourcePostId: string;
-};
 
 export type MattermostModelPickerInteractionHandler = (params: {
   payload: {
@@ -53,103 +43,82 @@ export function createMattermostModelPickerInteractionHandler(
 ): MattermostModelPickerInteractionHandler {
   const { account, core, pairing, resources, runtime } = monitor;
   const { resolveChannelInfo, updateModelPickerPost } = resources;
+  const activeModelSelections = new Set<string>();
 
-  const runModelPickerCommand = async (params: RunModelPickerCommandParams): Promise<void> => {
-    const { channelDisplay, kind, roomLabel, route, thread, to } = params.eventPlan;
-    const fromLabel =
-      kind === "direct"
-        ? `Mattermost DM from ${params.senderName}`
-        : `Mattermost message in ${roomLabel} from ${params.senderName}`;
-    const ctxPayload = params.eventPlan.finalizeContext({
-      Body: params.commandText,
-      BodyForAgent: params.commandText,
-      RawBody: params.commandText,
-      CommandBody: params.commandText,
-      ConversationLabel: fromLabel,
-      GroupSubject: kind !== "direct" ? channelDisplay || roomLabel : undefined,
-      SenderName: params.senderName,
-      MessageSid: params.messageSid,
-      Timestamp: Date.now(),
-      WasMentioned: true,
-      CommandAuthorized: params.commandAuthorized,
-      CommandSource: "native" as const,
+  const applyModelPickerSelection = async (params: {
+    cfg: OpenClawConfig;
+    data: ModelsProviderData;
+    eventPlan: MattermostEventPlan;
+    model: string;
+    provider: string;
+  }): Promise<string> => {
+    const { route, thread } = params.eventPlan;
+    const storePath = resolveStorePath(params.cfg.session?.store, { agentId: route.agentId });
+    const persistedSessionEntry = getSessionEntry({
+      storePath,
+      sessionKey: thread.sessionKey,
+      readConsistency: "latest",
     });
-    const { deliveryBarrier, replyOptions, replyPipeline, tableMode, textLimit } =
-      params.eventPlan.createReplyPlan();
-    let modelPinResult: ReturnType<typeof pinMattermostExplicitDefaultModelSelection> | undefined;
-    await core.channel.inbound.dispatch({
+    const sessionEntryMissing = persistedSessionEntry === undefined;
+    const sessionEntry = persistedSessionEntry ?? {
+      sessionId: randomUUID(),
+      updatedAt: Date.now(),
+    };
+    const currentModelRef = resolveMattermostModelPickerCurrentModel({
       cfg: params.cfg,
-      channel: "mattermost",
-      accountId: account.accountId,
-      route: {
-        agentId: route.agentId,
-        dmScope: route.dmScope,
-        sessionKey: thread.sessionKey,
-      },
-      ctxPayload,
-      delivery: {
-        observeMessageSent: true,
-        // Picker-triggered confirmations should stay immediate.
-        deliver: async (payload: ReplyPayload) => {
-          let pinnedPayload = payload;
-          try {
-            modelPinResult ??= pinMattermostExplicitDefaultModelSelection({
-              agentId: route.agentId,
-              cfg: params.cfg,
-              commandText: params.commandText,
-              sessionKey: thread.sessionKey,
-            });
-            const pin = await modelPinResult;
-            if (pin.pinned) {
-              pinnedPayload = {
-                ...payload,
-                text: rewriteMattermostPinnedModelReply(payload.text ?? "", pin.modelRef),
-              };
-            }
-          } catch (error) {
-            runtime.error?.(`mattermost explicit model pin failed: ${String(error)}`);
-            pinnedPayload = {
-              ...payload,
-              text: "Model change could not be saved for this Mattermost session. Please retry.",
-              isError: true,
-            };
-          }
-          const trimmedPayload = {
-            ...pinnedPayload,
-            text: core.channel.text.convertMarkdownTables(pinnedPayload.text ?? "", tableMode).trim(),
-          };
-          return await deliverMattermostReplyPayload({
-            core,
-            cfg: params.cfg,
-            payload: trimmedPayload,
-            to,
-            accountId: account.accountId,
-            agentId: route.agentId,
-            replyToId: resolveMattermostInteractionReplyRootId({
-              kind,
-              threadRootId: thread.effectiveReplyToId,
-              replyToId: trimmedPayload.replyToId,
-              interactionMessageSid: params.messageSid,
-              sourcePostId: params.sourcePostId,
-            }),
-            textLimit,
-            // The picker path already converts and trims text before delivery.
-            tableMode: "off",
-            sendMessage: sendMessageMattermost,
-            onDmChannelResolution: deliveryBarrier.trackDmChannelResolution,
-          });
-        },
-        onError: (err, info) => {
-          runtime.error?.(`mattermost model picker ${info.kind} reply failed: ${String(err)}`);
-        },
-      },
-      replyPipeline,
-      dispatcherOptions: {
-        resolveFollowupAdmissionBarrierTimeoutPolicy: deliveryBarrier.resolveTimeoutPolicy,
-        onDeliverySettled: deliveryBarrier.markDeliverySettled,
-      },
-      replyOptions,
+      route: { agentId: route.agentId, sessionKey: thread.sessionKey },
+      data: params.data,
+      readConsistency: "latest",
     });
+    const separator = currentModelRef.indexOf("/");
+    const currentProvider =
+      separator > 0 ? currentModelRef.slice(0, separator) : params.data.resolvedDefault.provider;
+    const currentModel =
+      separator > 0 ? currentModelRef.slice(separator + 1) : params.data.resolvedDefault.model;
+    const modelCatalog = [...params.data.byProvider.entries()].flatMap(([provider, models]) =>
+      [...models].map((model) => ({
+        provider,
+        id: model,
+        name: params.data.modelNames.get(`${provider}/${model}`) ?? model,
+      })),
+    );
+    const targetModelRef = `${params.provider}/${params.model}`;
+    const applied = await applySessionModelSelection({
+      cfg: params.cfg,
+      agentId: route.agentId,
+      sessionKey: thread.sessionKey,
+      storePath,
+      sessionEntry,
+      sessionStore: { [thread.sessionKey]: sessionEntry },
+      allowCreate: sessionEntryMissing,
+      defaultProvider: params.data.resolvedDefault.provider,
+      defaultModel: params.data.resolvedDefault.model,
+      currentProvider,
+      currentModel,
+      allowedModelKeys: buildMattermostAllowedModelRefs(params.data),
+      modelCatalog,
+      canPersistStickyModelSelection: false,
+      request: {
+        provider: params.provider,
+        model: params.model,
+        isDefault:
+          targetModelRef ===
+          `${params.data.resolvedDefault.provider}/${params.data.resolvedDefault.model}`,
+        runtime: { kind: "unchanged" },
+      },
+      markLiveSwitchPending: true,
+    });
+    if (applied.status !== "applied") {
+      return `❌ ${applied.message}`;
+    }
+    await pinMattermostExplicitDefaultModelSelection({
+      agentId: route.agentId,
+      cfg: params.cfg,
+      commandText: `/model ${applied.effectiveModelRef}`,
+      modelsData: params.data,
+      sessionKey: thread.sessionKey,
+    });
+    return `✅ Model set to ${applied.effectiveModelRef} for this session.`;
   };
 
   return async (params) => {
@@ -240,79 +209,107 @@ export function createMattermostModelPickerInteractionHandler(
       agentId: eventPlan.route.agentId,
       sessionKey: eventPlan.thread.sessionKey,
     };
-    const data = await buildModelsProviderData(cfg, eventPlan.route.agentId);
-    if (data.providers.length === 0) {
-      return await updatePickerPost("No models available.");
-    }
-
-    if (pickerState.action === "providers" || pickerState.action === "back") {
+    if (pickerState.action !== "select") {
+      const data = await buildModelsProviderData(cfg, eventPlan.route.agentId);
+      if (data.providers.length === 0) {
+        return await updatePickerPost("No models available.");
+      }
       const currentModel = resolveMattermostModelPickerCurrentModel({
         cfg,
         route: modelSessionRoute,
         data,
       });
-      const view = renderMattermostProviderPickerView({
-        ownerUserId: pickerState.ownerUserId,
-        data,
-        currentModel,
-      });
-      return await updatePickerPost(view.text, view.buttons);
-    }
-
-    if (pickerState.action === "list") {
-      const currentModel = resolveMattermostModelPickerCurrentModel({
-        cfg,
-        route: modelSessionRoute,
-        data,
-      });
-      const view = renderMattermostModelsPickerView({
-        ownerUserId: pickerState.ownerUserId,
-        data,
-        provider: pickerState.provider,
-        page: pickerState.page,
-        currentModel,
-      });
+      const view =
+        pickerState.action === "providers" || pickerState.action === "back"
+          ? renderMattermostProviderPickerView({
+              ownerUserId: pickerState.ownerUserId,
+              data,
+              currentModel,
+            })
+          : renderMattermostModelsPickerView({
+              ownerUserId: pickerState.ownerUserId,
+              data,
+              provider: pickerState.provider,
+              page: pickerState.page,
+              currentModel,
+            });
       return await updatePickerPost(view.text, view.buttons);
     }
 
     const targetModelRef = `${pickerState.provider}/${pickerState.model}`;
-    if (!buildMattermostAllowedModelRefs(data).has(targetModelRef)) {
-      return { ephemeral_text: `That model is no longer available: ${targetModelRef}` };
+    if (activeModelSelections.has(eventPlan.thread.sessionKey)) {
+      return { ephemeral_text: "A model change is already in progress for this chat." };
     }
+    activeModelSelections.add(eventPlan.thread.sessionKey);
     const messageSid = buildMattermostModelPickerSelectMessageSid({
       postId: params.payload.post_id,
       provider: pickerState.provider,
       model: pickerState.model,
     });
 
-    // The HTTP response returns before the command finishes. Reserve a new root
-    // while the request is still admitted so session dispatch survives that ack.
+    // Acknowledge before direct persistence so control actions never queue behind reply admission.
     void runDetachedWebhookWork(async () => {
-      await runModelPickerCommand({
-        cfg,
-        commandText: `/model ${targetModelRef}`,
-        commandAuthorized: auth.commandAuthorized,
-        eventPlan,
-        senderName: params.userName,
-        messageSid,
-        sourcePostId: params.post.id || params.payload.post_id,
-      });
-      const currentModel = resolveMattermostModelPickerCurrentModel({
-        cfg,
-        route: modelSessionRoute,
-        data,
-        readConsistency: "latest",
-      });
-      const view = renderMattermostModelsPickerView({
-        ownerUserId: pickerState.ownerUserId,
-        data,
-        provider: pickerState.provider,
-        page: pickerState.page,
-        currentModel,
-      });
-      await updatePickerPost(view.text, view.buttons);
-    }).catch((err: unknown) => {
+      try {
+        const data = await buildModelsProviderData(cfg, eventPlan.route.agentId);
+        let notice: string;
+        if (!buildMattermostAllowedModelRefs(data).has(targetModelRef)) {
+          notice = `❌ That model is no longer available: ${targetModelRef}`;
+        } else {
+          try {
+            notice = await applyModelPickerSelection({
+              cfg,
+              data,
+              eventPlan,
+              provider: pickerState.provider,
+              model: pickerState.model,
+            });
+          } catch (error) {
+            runtime.error?.(`mattermost model picker selection failed: ${String(error)}`);
+            notice = `❌ Failed to set ${targetModelRef}. Try /oc_model ${targetModelRef} directly.`;
+          }
+        }
+        await sendMessageMattermost(eventPlan.to, notice, {
+          cfg,
+          accountId: account.accountId,
+          replyToId: resolveMattermostInteractionReplyRootId({
+            kind: eventPlan.kind,
+            threadRootId: eventPlan.thread.effectiveReplyToId,
+            replyToId: messageSid,
+            interactionMessageSid: messageSid,
+            sourcePostId: params.post.id || params.payload.post_id,
+          }),
+        });
+        if (data.providers.length === 0) {
+          await updatePickerPost("No models available.");
+          return;
+        }
+        const currentModel = resolveMattermostModelPickerCurrentModel({
+          cfg,
+          route: modelSessionRoute,
+          data,
+          readConsistency: "latest",
+        });
+        const view = renderMattermostModelsPickerView({
+          ownerUserId: pickerState.ownerUserId,
+          data,
+          provider: pickerState.provider,
+          page: pickerState.page,
+          currentModel,
+        });
+        await updatePickerPost(view.text, view.buttons);
+      } finally {
+        activeModelSelections.delete(eventPlan.thread.sessionKey);
+      }
+    }).catch(async (err: unknown) => {
+      activeModelSelections.delete(eventPlan.thread.sessionKey);
       runtime.error?.(`mattermost model picker select failed: ${String(err)}`);
+      try {
+        await updatePickerPost(
+          `❌ Failed to set ${targetModelRef}. Try /oc_model ${targetModelRef} directly.`,
+        );
+      } catch (updateError) {
+        runtime.error?.(`mattermost model picker failure update failed: ${String(updateError)}`);
+      }
     });
 
     return {};

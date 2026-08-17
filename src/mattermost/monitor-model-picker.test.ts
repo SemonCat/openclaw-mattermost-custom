@@ -2,19 +2,29 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  applySessionModelSelection: vi.fn(),
   authorize: vi.fn(),
   buildEventPlan: vi.fn(),
   buildModelsProviderData: vi.fn(),
-  deliverReply: vi.fn(),
   dispatch: vi.fn(),
-  markDeliverySettled: vi.fn(),
+  getSessionEntry: vi.fn(),
   parseContext: vi.fn(),
   pinExplicitDefaultModel: vi.fn(),
   runDetachedWebhookWork: vi.fn(),
+  sendMessage: vi.fn(),
 }));
 
 vi.mock("openclaw/plugin-sdk/webhook-request-guards", () => ({
   runDetachedWebhookWork: mocks.runDetachedWebhookWork,
+}));
+
+vi.mock("openclaw/plugin-sdk/model-session-runtime", () => ({
+  applySessionModelSelection: mocks.applySessionModelSelection,
+}));
+
+vi.mock("openclaw/plugin-sdk/session-store-runtime", () => ({
+  getSessionEntry: mocks.getSessionEntry,
+  resolveStorePath: () => "/tmp/mattermost-model-picker-sessions.sqlite",
 }));
 
 vi.mock("./model-picker.js", () => ({
@@ -39,10 +49,6 @@ vi.mock("./monitor-event-plan.js", () => ({
   buildMattermostEventPlan: mocks.buildEventPlan,
 }));
 
-vi.mock("./reply-delivery.js", () => ({
-  deliverMattermostReplyPayload: mocks.deliverReply,
-}));
-
 vi.mock("./runtime-api.js", async () => {
   const actual = await vi.importActual<typeof import("./runtime-api.js")>("./runtime-api.js");
   return {
@@ -50,6 +56,10 @@ vi.mock("./runtime-api.js", async () => {
     buildModelsProviderData: mocks.buildModelsProviderData,
   };
 });
+
+vi.mock("./send.js", () => ({
+  sendMessageMattermost: mocks.sendMessage,
+}));
 
 import { createMattermostModelPickerInteractionHandler } from "./monitor-model-picker.js";
 import type { MattermostMonitorContext } from "./monitor-types.js";
@@ -68,6 +78,15 @@ describe("Mattermost model-picker interaction dispatch", () => {
       pinned: true,
       modelRef: "openai/gpt-5.4",
     });
+    mocks.applySessionModelSelection.mockResolvedValue({
+      status: "applied",
+      provider: "openai",
+      model: "gpt-5.4",
+      effectiveModelRef: "openai/gpt-5.4",
+      changed: true,
+      contextTokens: 128_000,
+    });
+    mocks.getSessionEntry.mockReturnValue({ sessionId: "session-1", updatedAt: 1 });
     mocks.authorize.mockResolvedValue({
       ok: true,
       commandAuthorized: true,
@@ -78,11 +97,14 @@ describe("Mattermost model-picker interaction dispatch", () => {
       channelDisplay: "Lifecycle",
       roomLabel: "#lifecycle",
     });
-    mocks.buildModelsProviderData.mockResolvedValue({ providers: [{ id: "openai" }] });
-    mocks.deliverReply.mockResolvedValue({
-      outcome: "text",
-      visibleReplySent: true,
-      messageIds: ["confirmation-1"],
+    mocks.buildModelsProviderData.mockResolvedValue({
+      byProvider: new Map([["openai", new Set(["gpt-5.4"])]]),
+      providers: ["openai"],
+      resolvedDefault: { provider: "openai", model: "gpt-5.4" },
+      modelNames: new Map([["openai/gpt-5.4", "GPT-5.4"]]),
+    });
+    mocks.sendMessage.mockResolvedValue({
+      id: "confirmation-1",
       content: "model updated",
     });
     mocks.buildEventPlan.mockResolvedValue({
@@ -93,35 +115,11 @@ describe("Mattermost model-picker interaction dispatch", () => {
       thread: { sessionKey: "agent:main:mm", effectiveReplyToId: undefined },
       to: "channel:channel-1",
       finalizeContext: (context: Record<string, unknown>) => context,
-      createReplyPlan: () => ({
-        deliveryBarrier: {
-          trackDmChannelResolution: vi.fn(),
-          resolveTimeoutPolicy: vi.fn(),
-          markDeliverySettled: mocks.markDeliverySettled,
-        },
-        replyOptions: {},
-        replyPipeline: {},
-        tableMode: "off",
-        textLimit: 4000,
-      }),
     });
-    mocks.dispatch.mockImplementation(async (params: Record<string, unknown>) => {
-      const delivery = params.delivery as
-        | { deliver?: (payload: { text: string; replyToId?: string }) => Promise<unknown> }
-        | undefined;
-      const dispatcherOptions = params.dispatcherOptions as
-        | { onDeliverySettled?: () => void }
-        | undefined;
-      await delivery?.deliver?.({
-        text: "model updated",
-        replyToId: "interaction:picker-post-1:select:openai/gpt-5.4",
-      });
-      dispatcherOptions?.onDeliverySettled?.();
-      return {};
-    });
+    mocks.dispatch.mockImplementation(() => new Promise(() => undefined));
   });
 
-  it("reserves independent work before ack and observes terminal settlement", async () => {
+  it("applies directly outside reply admission and coalesces concurrent clicks", async () => {
     let detachedRun: (() => Promise<void>) | undefined;
     mocks.runDetachedWebhookWork.mockImplementation((run: () => Promise<void>) => {
       detachedRun = run;
@@ -171,34 +169,95 @@ describe("Mattermost model-picker interaction dispatch", () => {
       expect.objectContaining({ cfg: runtimeCfg }),
       expect.objectContaining({ channelId: "channel-1" }),
     );
-    expect(mocks.buildModelsProviderData).toHaveBeenCalledWith(runtimeCfg, "main");
     expect(mocks.runDetachedWebhookWork).toHaveBeenCalledOnce();
     expect(mocks.dispatch).not.toHaveBeenCalled();
+    expect(mocks.buildModelsProviderData).not.toHaveBeenCalled();
     expect(detachedRun).toBeTypeOf("function");
+
+    await expect(
+      handler({
+        payload: {
+          channel_id: "channel-1",
+          post_id: "picker-post-1",
+          team_id: "team-1",
+          user_id: "user-1",
+        },
+        userName: "tester",
+        context: {},
+        post: { id: "picker-post-1", channel_id: "channel-1", message: "picker" },
+      }),
+    ).resolves.toEqual({ ephemeral_text: "A model change is already in progress for this chat." });
+    expect(mocks.runDetachedWebhookWork).toHaveBeenCalledOnce();
+    expect(mocks.buildModelsProviderData).not.toHaveBeenCalled();
 
     await detachedRun?.();
 
-    expect(mocks.dispatch).toHaveBeenCalledWith(
+    expect(mocks.buildModelsProviderData).toHaveBeenCalledOnce();
+    expect(mocks.buildModelsProviderData).toHaveBeenCalledWith(runtimeCfg, "main");
+    expect(mocks.applySessionModelSelection).toHaveBeenCalledWith(
       expect.objectContaining({
         cfg: runtimeCfg,
-        channel: "mattermost",
-        delivery: expect.objectContaining({ observeMessageSent: true }),
-        dispatcherOptions: expect.objectContaining({
-          onDeliverySettled: mocks.markDeliverySettled,
-        }),
+        agentId: "main",
+        sessionKey: "agent:main:mm",
+        storePath: "/tmp/mattermost-model-picker-sessions.sqlite",
+        defaultProvider: "openai",
+        defaultModel: "gpt-5.4",
+        currentProvider: "openai",
+        currentModel: "gpt-5.4",
+        allowedModelKeys: new Set(["openai/gpt-5.4"]),
+        modelCatalog: [{ provider: "openai", id: "gpt-5.4", name: "GPT-5.4" }],
+        request: {
+          provider: "openai",
+          model: "gpt-5.4",
+          isDefault: true,
+          runtime: { kind: "unchanged" },
+        },
+        markLiveSwitchPending: true,
       }),
     );
-    expect(mocks.markDeliverySettled).toHaveBeenCalledOnce();
-    expect(mocks.deliverReply).toHaveBeenCalledWith(
+    expect(mocks.dispatch).not.toHaveBeenCalled();
+    expect(mocks.pinExplicitDefaultModel).toHaveBeenCalledWith(
       expect.objectContaining({
-        payload: expect.objectContaining({
-          text: "Model set to openai/gpt-5.4 for this session.",
-        }),
+        modelsData: expect.objectContaining({ providers: ["openai"] }),
+      }),
+    );
+    expect(mocks.sendMessage).toHaveBeenCalledWith(
+      "channel:channel-1",
+      "✅ Model set to openai/gpt-5.4 for this session.",
+      expect.objectContaining({
+        cfg: runtimeCfg,
+        accountId: "default",
         replyToId: "picker-post-1",
       }),
     );
     expect(updateModelPickerPost).toHaveBeenCalledWith(
       expect.objectContaining({ message: "updated picker" }),
     );
+
+    mocks.applySessionModelSelection.mockResolvedValueOnce({
+      status: "conflict",
+      message: "Model change conflicted with a newer session update. Retry.",
+    });
+    await expect(
+      handler({
+        payload: {
+          channel_id: "channel-1",
+          post_id: "picker-post-1",
+          team_id: "team-1",
+          user_id: "user-1",
+        },
+        userName: "tester",
+        context: {},
+        post: { id: "picker-post-1", channel_id: "channel-1", message: "picker" },
+      }),
+    ).resolves.toEqual({});
+    await detachedRun?.();
+
+    expect(mocks.sendMessage).toHaveBeenLastCalledWith(
+      "channel:channel-1",
+      "❌ Model change conflicted with a newer session update. Retry.",
+      expect.any(Object),
+    );
+    expect(mocks.pinExplicitDefaultModel).toHaveBeenCalledOnce();
   });
 });
