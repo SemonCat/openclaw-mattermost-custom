@@ -92,6 +92,7 @@ export async function buildMattermostEventPlan(
         SenderId: params.senderId,
         Provider: "mattermost" as const,
         Surface: "mattermost" as const,
+        NativeChannelId: params.channelId,
         ReplyToId: thread.effectiveReplyToId,
         MessageThreadId: thread.effectiveReplyToId,
         OriginatingChannel: "mattermost" as const,

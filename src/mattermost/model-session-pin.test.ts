@@ -4,6 +4,7 @@ import path from "node:path";
 import {
   getSessionEntry,
   normalizeSessionDeliveryState,
+  type SessionEntry,
   upsertSessionEntry,
 } from "openclaw/plugin-sdk/session-store-runtime";
 import { describe, expect, it } from "vitest";
@@ -12,6 +13,16 @@ import {
   pinMattermostExplicitDefaultModelSelection,
   rewriteMattermostPinnedModelReply,
 } from "./model-session-pin.js";
+
+const pinnedEntry = {
+  liveModelSwitchPending: true,
+  modelOverride: "gpt-5.6-sol",
+  modelOverrideRouteResolution: "resolved",
+  modelOverrideSource: "user",
+  providerOverride: "openai",
+  sessionId: "thread-session",
+  updatedAt: 1,
+} satisfies SessionEntry;
 
 const modelsData = {
   byProvider: new Map<string, Set<string>>([
@@ -119,6 +130,68 @@ describe("Mattermost explicit default-model pin", () => {
         sessionKey: "agent:main:mattermost:channel:chan-1:thread:root-1",
       }),
     ).resolves.toEqual({ pinned: false });
+  });
+
+  it("accepts an explicit default pin when the write commits before reporting an error", async () => {
+    const writeError = new Error("ambiguous session-store write failure");
+
+    await expect(
+      pinMattermostExplicitDefaultModelSelection(
+        {
+          agentId: "main",
+          cfg: {},
+          commandText: "/model openai/gpt-5.6-sol",
+          modelsData,
+          sessionKey: "agent:main:mattermost:channel:chan-1:thread:root-1",
+        },
+        {
+          getSessionEntry: () => pinnedEntry,
+          patchSessionEntry: async () => {
+            throw writeError;
+          },
+        },
+      ),
+    ).resolves.toEqual({ pinned: true, modelRef: "openai/gpt-5.6-sol" });
+  });
+
+  it("accepts an explicit default pin when an ambiguous write result is already persisted", async () => {
+    await expect(
+      pinMattermostExplicitDefaultModelSelection(
+        {
+          agentId: "main",
+          cfg: {},
+          commandText: "/model openai/gpt-5.6-sol",
+          modelsData,
+          sessionKey: "agent:main:mattermost:channel:chan-1:thread:root-1",
+        },
+        {
+          getSessionEntry: () => pinnedEntry,
+          patchSessionEntry: async () => null,
+        },
+      ),
+    ).resolves.toEqual({ pinned: true, modelRef: "openai/gpt-5.6-sol" });
+  });
+
+  it("preserves a real write failure when the requested model was not persisted", async () => {
+    const writeError = new Error("session-store write failed");
+
+    await expect(
+      pinMattermostExplicitDefaultModelSelection(
+        {
+          agentId: "main",
+          cfg: {},
+          commandText: "/model openai/gpt-5.6-sol",
+          modelsData,
+          sessionKey: "agent:main:mattermost:channel:chan-1:thread:root-1",
+        },
+        {
+          getSessionEntry: () => undefined,
+          patchSessionEntry: async () => {
+            throw writeError;
+          },
+        },
+      ),
+    ).rejects.toBe(writeError);
   });
 
   it("rewrites the misleading reset acknowledgement after pinning", () => {

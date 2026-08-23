@@ -50,11 +50,13 @@ function currentMattermostChannelId(context: OpenClawPluginToolContext): string 
   if (context.messageChannel?.trim().toLowerCase() !== "mattermost") {
     return undefined;
   }
-  const raw = context.nativeChannelId?.trim();
-  if (!raw) {
-    return undefined;
+  const nativeChannelId = context.nativeChannelId?.trim();
+  if (nativeChannelId) {
+    return nativeChannelId.replace(/^channel:/i, "").trim() || undefined;
   }
-  return raw.replace(/^channel:/i, "").trim() || undefined;
+  const deliveryTarget = context.deliveryContext?.to?.trim();
+  const channelTarget = deliveryTarget?.match(/^channel:(.+)$/i)?.[1]?.trim();
+  return channelTarget || undefined;
 }
 
 export function createMattermostThreadTool(

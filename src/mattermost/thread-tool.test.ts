@@ -33,6 +33,20 @@ describe("mattermost_thread tool", () => {
         nativeChannelId: "CURRENT",
       }),
     ).toMatchObject({ name: "mattermost_thread", resultContentSource: "network" });
+    expect(
+      createMattermostThreadTool(api, {
+        runtimeConfig: cfg,
+        messageChannel: "mattermost",
+        deliveryContext: { channel: "mattermost", to: "channel:CURRENT" },
+      }),
+    ).toMatchObject({ name: "mattermost_thread", resultContentSource: "network" });
+    expect(
+      createMattermostThreadTool(api, {
+        runtimeConfig: cfg,
+        messageChannel: "mattermost",
+        deliveryContext: { channel: "mattermost", to: "user:someone-else" },
+      }),
+    ).toBeNull();
   });
 
   it("reads an authorized same-instance thread and rejects foreign-host links", async () => {

@@ -132,6 +132,7 @@ const mockState = vi.hoisted(() => ({
   fetchMattermostMe: vi.fn(),
   fetchMattermostPost: vi.fn(),
   getGlobalHookRunner: vi.fn(),
+  hasMattermostThreadParticipation: vi.fn(),
   sessionTranscriptListeners: [] as Array<(update: {
     target: { agentId: string; sessionId: string; sessionKey: string };
     message?: unknown;
@@ -253,6 +254,7 @@ vi.mock("./monitor-slash.js", () => ({
 
 vi.mock("./thread-participation.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./thread-participation.js")>()),
+  hasMattermostThreadParticipation: mockState.hasMattermostThreadParticipation,
   recordMattermostThreadParticipation: mockState.recordMattermostThreadParticipation,
 }));
 
@@ -601,6 +603,7 @@ describe("mattermost inbound user posts", () => {
     mockState.progressDrafts.length = 0;
     mockState.sessionTranscriptListeners.length = 0;
     mockState.getGlobalHookRunner.mockReturnValue(null);
+    mockState.hasMattermostThreadParticipation.mockResolvedValue(false);
     mockState.runtimeCore = createRuntimeCore(testConfig);
     mockState.createMattermostClient.mockReturnValue({});
     mockState.createMattermostDraftStream.mockReturnValue({
@@ -778,6 +781,92 @@ describe("mattermost inbound user posts", () => {
     expect(ctx?.MessageSid).toBe("post-inbound-system-event-regular");
     expect(ctx?.OriginatingChannel).toBe("mattermost");
     expect(ctx?.Provider).toBe("mattermost");
+    expect(ctx?.NativeChannelId).toBe("chan-1");
+  });
+
+  it("hydrates an automation alert root on the first plain-text thread reply", async () => {
+    const socket = new FakeWebSocket();
+    const abortController = new AbortController();
+    mockState.abortController = abortController;
+    const rootId = "aaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const replyId = "bbbbbbbbbbbbbbbbbbbbbbbbbb";
+    mockState.fetchMattermostPost.mockResolvedValueOnce({
+      id: rootId,
+      channel_id: "chan-1",
+      user_id: "bot-user",
+      message: 'Automation "daily-diary" failed: delivery timed out',
+      create_at: 1_714_000_000_000,
+    });
+    const request = vi.fn(async (path: string) => {
+      if (path === "/channels/chan-1") {
+        return {
+          id: "chan-1",
+          name: "town-square",
+          display_name: "Town Square",
+          type: "O",
+        };
+      }
+      if (path === `/posts/${rootId}/thread?perPage=51`) {
+        return {
+          order: [rootId, replyId],
+          posts: {
+            [rootId]: {
+              id: rootId,
+              channel_id: "chan-1",
+              user_id: "bot-user",
+              message: 'Automation "daily-diary" failed: delivery timed out',
+              create_at: 1_714_000_000_000,
+            },
+            [replyId]: {
+              id: replyId,
+              root_id: rootId,
+              channel_id: "chan-1",
+              user_id: "user-1",
+              message: "這又怎麼了",
+              create_at: 1_714_000_001_000,
+            },
+          },
+        };
+      }
+      if (path === "/users/ids") {
+        return [
+          { id: "bot-user", username: "openclaw" },
+          { id: "user-1", username: "alice" },
+        ];
+      }
+      throw new Error(`Unexpected Mattermost request: ${path}`);
+    });
+    mockState.createMattermostClient.mockReturnValue({
+      baseUrl: "https://mattermost.example.com",
+      apiBaseUrl: "https://mattermost.example.com/api/v4",
+      token: "bot-token",
+      request,
+      fetchImpl: vi.fn(),
+    });
+
+    const monitor = monitorMattermostProvider({
+      config: testConfig,
+      runtime: testRuntime(),
+      abortSignal: abortController.signal,
+      webSocketFactory: () => socket,
+    });
+
+    await vi.waitFor(() => {
+      expect(socket.openListenerCount).toBeGreaterThan(0);
+    });
+    socket.emitOpen();
+    await emitMattermostChannelPost(socket, {
+      id: replyId,
+      rootId,
+      message: "這又怎麼了",
+    });
+    await monitor;
+
+    expect(mockState.dispatchInboundMessage).toHaveBeenCalledTimes(1);
+    const ctx = mockState.dispatchInboundMessage.mock.calls.at(0)?.[0].ctx;
+    expect(mockState.fetchMattermostPost).toHaveBeenCalledWith(expect.anything(), rootId);
+    expect(ctx?.BodyForAgent).toContain('Automation "daily-diary" failed');
+    expect(ctx?.BodyForAgent).toContain("[Begin untrusted Mattermost thread context]");
   });
 
   it("appends the progress receipt after a routed final delivery is acknowledged", async () => {

@@ -28,6 +28,7 @@ export async function hydrateMattermostPermalinks(params: {
   currentChannelId: string;
   text: string;
   props?: MattermostPost["props"];
+  implicitPostIds?: readonly string[];
   log?: (message: string) => void;
 }): Promise<string> {
   const config = params.account.config.permalinkHydration;
@@ -40,6 +41,7 @@ export async function hydrateMattermostPermalinks(params: {
   const postIds = collectMattermostPermalinkReferences({
     text: params.text,
     props: params.props,
+    implicitPostIds: params.implicitPostIds,
     baseUrl: params.account.baseUrl,
     allowedOrigins: config?.allowedOrigins,
     maxLinks,

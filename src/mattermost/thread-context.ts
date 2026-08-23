@@ -129,6 +129,7 @@ export function parseMattermostPermalinkReference(params: {
 export function collectMattermostPermalinkReferences(params: {
   text: string;
   props?: Record<string, unknown> | null;
+  implicitPostIds?: readonly string[];
   baseUrl: string;
   allowedOrigins?: readonly string[];
   maxLinks?: number;
@@ -143,6 +144,9 @@ export function collectMattermostPermalinkReferences(params: {
       postIds.push(postId);
     }
   };
+  for (const postId of params.implicitPostIds ?? []) {
+    add(normalizePostId(postId));
+  }
   for (const match of params.text.matchAll(MATTERMOST_URL_PATTERN)) {
     add(
       parseMattermostPermalinkReference({

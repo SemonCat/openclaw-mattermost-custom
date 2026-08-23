@@ -359,6 +359,8 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
       currentChannelId: channelId,
       text: rawText,
       props: post.props,
+      implicitPostIds:
+        threadRootId && !threadAlreadyEngaged ? [threadRootId] : undefined,
       log: monitor.logVerboseMessage,
     });
     // Mention-only turns need non-empty agent text; the shared reply runner rejects empty
