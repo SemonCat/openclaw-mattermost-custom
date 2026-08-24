@@ -12,7 +12,6 @@ import {
   createMattermostClient,
   fetchMattermostMe,
   normalizeMattermostBaseUrl,
-  type MattermostPost,
   type MattermostUser,
 } from "./client.js";
 import {
@@ -28,6 +27,7 @@ import {
   createMattermostIngressMonitor,
   type MattermostIngressLifecycle,
   type MattermostIngressLaneFacts,
+  type MattermostIngressPost,
 } from "./monitor-ingress.js";
 import { createMattermostModelPickerInteractionHandler } from "./monitor-model-picker.js";
 import { createMattermostPostHandler } from "./monitor-posts.js";
@@ -259,7 +259,7 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
   };
 
   const debouncer = core.channel.debounce.createInboundDebouncer<{
-    post: MattermostPost;
+    post: MattermostIngressPost;
     payload: MattermostEventPayload;
     turnAdoptionLifecycle: MattermostIngressLifecycle;
   }>({
@@ -272,7 +272,7 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
         entry.post.channel_id ??
         entry.payload.data?.channel_id ??
         entry.payload.broadcast?.channel_id;
-      if (!channelId) {
+      if (!channelId || !entry.post.user_id) {
         return null;
       }
       const rootId = normalizeOptionalString(entry.post.root_id);
@@ -283,10 +283,14 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
         ...(rootId ? { rootId } : {}),
         ...(channelType ? { channelType } : {}),
       });
-      return `mattermost:${account.accountId}:${channelId}:${threadId ? `thread:${threadId}` : "channel"}`;
+      // Access checks use the final post identity, so different senders must
+      // never share a debounced turn.
+      return `mattermost:${account.accountId}:${channelId}:${threadId ? `thread:${threadId}` : "channel"}:${entry.post.user_id}`;
     },
     shouldDebounce: (entry) => {
-      if (entry.post.file_ids?.length) {
+      // Typed/system posts are dropped downstream and must not influence a
+      // neighboring user post through batching.
+      if (normalizeOptionalString(entry.post.type) !== undefined || entry.post.file_ids?.length) {
         return false;
       }
       const text = normalizeOptionalString(entry.post.message) ?? "";
@@ -309,7 +313,7 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
               await settle();
               return;
             }
-            const mergedPost: MattermostPost = {
+            const mergedPost: MattermostIngressPost = {
               ...last.post,
               message: entries
                 .map((entry) => normalizeOptionalString(entry.post.message) ?? "")

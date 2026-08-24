@@ -41,7 +41,7 @@ mkdir -p /tmp/openclaw/mattermost-custom
 npm run build
 npm pack --omit=dev --pack-destination /tmp/openclaw/mattermost-custom
 openclaw plugins install \
-  /tmp/openclaw/mattermost-custom/openclaw-mattermost-custom-2026.8.1-beta.2.tgz --force
+  /tmp/openclaw/mattermost-custom/openclaw-mattermost-custom-2026.8.1-beta.3.tgz --force
 ```
 
 Do not use `plugins install --link` or add this source checkout to
@@ -127,7 +127,7 @@ shared Mattermost contract tests and the downstream behavior tests.
 ### Test status against the published npm SDK
 
 This repo builds and tests against the published `openclaw` npm package
-(`2026.8.1-beta.2`), not the OpenClaw monorepo checkout. One category of tests
+(`2026.8.1-beta.3`), not the OpenClaw monorepo checkout. One category of tests
 behaves differently from the monorepo for that reason:
 
 - Eleven suites import test-only Plugin SDK subpaths (`channel-test-helpers`,

@@ -42,10 +42,12 @@ type MattermostIngressPayload = {
   rawEvent: string;
 };
 
+export type MattermostIngressPost = MattermostPost & { user_id: string };
+
 type MattermostIngressDispatchResult = ChannelIngressMonitorDeliveryResult;
 
 type MattermostIngressDispatch = (
-  post: MattermostPost,
+  post: MattermostIngressPost,
   payload: MattermostEventPayload,
   lifecycle: MattermostIngressLifecycle,
 ) => Promise<MattermostIngressDispatchResult | void> | MattermostIngressDispatchResult | void;
@@ -112,6 +114,7 @@ function inspectMattermostIngressEvent(
   const data = isRecord(envelope.data) ? envelope.data : null;
   const post = parseRawPost(data?.post);
   const eventId = requiredString(post.id, "post.id");
+  requiredString(post.user_id, "post.user_id");
   // Mattermost can carry the channel id on the post, the event data, or the
   // broadcast envelope (the monitor dispatch honors all three). Rejecting the
   // envelope-level shapes as permanent would drop valid posts and tear the
@@ -140,7 +143,7 @@ function parseClaimedEvent(
   rawEvent: string,
   eventId: string,
 ): {
-  post: MattermostPost;
+  post: MattermostIngressPost;
   payload: MattermostEventPayload;
 } {
   const payload = parseMattermostEventPayload(rawEvent);
@@ -157,13 +160,14 @@ function parseClaimedEvent(
     post?.channel_id?.trim() ||
     payload.data?.channel_id?.trim() ||
     payload.broadcast?.channel_id?.trim();
-  if (!post || post.id !== eventId || !claimedChannelId) {
+  const senderId = post?.user_id?.trim();
+  if (!post || post.id !== eventId || !senderId || !claimedChannelId) {
     throw new MattermostIngressPermanentError(
       "invalid-event",
       `Mattermost ingress row ${eventId} has invalid post identity.`,
     );
   }
-  return { post, payload };
+  return { post: { ...post, user_id: senderId }, payload };
 }
 
 function resolveMattermostIngressNonRetryableFailure(error: unknown) {
@@ -259,7 +263,21 @@ export function createMattermostIngressMonitor(options: {
   monitor.start();
 
   return {
-    receive: (rawEvent) => monitor.admit(rawEvent).then(() => undefined),
+    receive: async (rawEvent) => {
+      try {
+        await monitor.admit(rawEvent);
+      } catch (error) {
+        // Reconnecting cannot repair an invalid event shape. Keep reading while
+        // still allowing durable storage failures to terminate the socket.
+        if (
+          !(error instanceof MattermostIngressPermanentError) ||
+          error.reason !== "invalid-event"
+        ) {
+          throw error;
+        }
+        options.runtime.error?.(`mattermost ingress rejected invalid event: ${error.message}`);
+      }
+    },
     stop: monitor.stop,
     waitForIdle: monitor.waitForIdle,
   };

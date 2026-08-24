@@ -1671,6 +1671,20 @@ describe("mattermostPlugin", () => {
   });
 
   describe("outbound", () => {
+    it("returns the beta.3 canonical delivery target", async () => {
+      await expect(
+        requireMattermostSendText()({
+          cfg: createMattermostTestConfig(),
+          to: "channel:CHAN1",
+          text: "hello",
+        }),
+      ).resolves.toEqual({
+        channel: "mattermost",
+        messageId: "post-1",
+        target: { kind: "channel", id: "channel-1" },
+      });
+    });
+
     it.each([
       {
         name: "text",
@@ -1732,7 +1746,7 @@ describe("mattermostPlugin", () => {
       expect(onDeliveryResult).toHaveBeenCalledWith({
         channel: "mattermost",
         messageId: "post-final",
-        channelId: "CHAN1",
+        target: { kind: "channel", id: "CHAN1" },
         content: "provider-final",
       });
     });
