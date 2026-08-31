@@ -129,8 +129,12 @@ class FakeWebSocket {
 
 const mockState = vi.hoisted(() => ({
   abortController: undefined as AbortController | undefined,
+  agentEventListeners: [] as Array<
+    (event: { runId?: string; stream: string; data: Record<string, unknown> }) => void
+  >,
   createReplyDispatcherWithTyping: vi.fn(),
   createMattermostClient: vi.fn(),
+  createMattermostPost: vi.fn(),
   createMattermostDraftStream: vi.fn(),
   deliveryPlanObserver: vi.fn(),
   dispatchInboundMessage: vi.fn(),
@@ -213,6 +217,7 @@ vi.mock("./client.js", async () => {
   return {
     ...actual,
     createMattermostClient: mockState.createMattermostClient,
+    createMattermostPost: mockState.createMattermostPost,
     fetchMattermostMe: mockState.fetchMattermostMe,
     fetchMattermostPost: mockState.fetchMattermostPost,
     normalizeMattermostBaseUrl: (value: string | undefined) => value?.trim() ?? "",
@@ -463,7 +468,17 @@ function createRuntimeCore(
       current: () => cfg,
     },
     events: {
-      onAgentEvent: () => () => {},
+      onAgentEvent: (
+        listener: (typeof mockState.agentEventListeners)[number],
+      ) => {
+        mockState.agentEventListeners.push(listener);
+        return () => {
+          const index = mockState.agentEventListeners.indexOf(listener);
+          if (index >= 0) {
+            mockState.agentEventListeners.splice(index, 1);
+          }
+        };
+      },
       onSessionTranscriptUpdate: (listener: (typeof mockState.sessionTranscriptListeners)[number]) => {
         mockState.sessionTranscriptListeners.push(listener);
         return () => {
@@ -591,6 +606,15 @@ const testRuntime = (): RuntimeEnv =>
     }) as RuntimeEnv["exit"],
   }) satisfies RuntimeEnv;
 
+function withAgentRunTerminalOutcome<T extends object>(
+  result: T,
+  outcome: "completed" | "failed",
+): T {
+  return Object.assign(result, {
+    [Symbol.for("openclaw.agentRunTerminalOutcome")]: outcome,
+  });
+}
+
 async function emitMattermostChannelPost(
   socket: FakeWebSocket,
   params: {
@@ -632,17 +656,24 @@ describe("mattermost inbound user posts", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockState.abortController = undefined;
+    mockState.agentEventListeners.length = 0;
     mockState.progressDrafts.length = 0;
     mockState.sessionTranscriptListeners.length = 0;
     mockState.getGlobalHookRunner.mockReturnValue(null);
     mockState.hasMattermostThreadParticipation.mockResolvedValue(false);
     mockState.runtimeCore = createRuntimeCore(testConfig);
     mockState.createMattermostClient.mockReturnValue({});
+    mockState.createMattermostPost.mockResolvedValue({ id: "task-card-post" });
     mockState.createMattermostDraftStream.mockReturnValue({
       update: vi.fn(),
       updateAssistantText: vi.fn(),
       flush: vi.fn(async () => {}),
+      postId: vi.fn(() => undefined),
+      clear: vi.fn(async () => {}),
+      discardPending: vi.fn(async () => {}),
+      seal: vi.fn(async () => {}),
       stop: vi.fn(async () => {}),
+      forceNewMessage: vi.fn(async () => {}),
       settleBoundaries: vi.fn(async () => {}),
       resolveFinalText: (text: string) => ({ kind: "full" as const, text, publishedParts: [] }),
     });
@@ -1597,6 +1628,272 @@ describe("mattermost inbound user posts", () => {
     expect(updates.at(-1)).not.toContain("ThinkingChecking");
   });
 
+  it("keeps a threaded durable plan card separate from tool progress and the final answer", async () => {
+    const socket = new FakeWebSocket();
+    const abortController = new AbortController();
+    mockState.abortController = abortController;
+    const draftStream = {
+      update: vi.fn(),
+      updateAssistantText: vi.fn(),
+      flush: vi.fn(async () => {}),
+      postId: vi.fn(() => undefined),
+      clear: vi.fn(async () => {}),
+      discardPending: vi.fn(async () => {}),
+      seal: vi.fn(async () => {}),
+      stop: vi.fn(async () => {}),
+      forceNewMessage: vi.fn(async () => {}),
+      settleBoundaries: vi.fn(async () => {}),
+      resolveFinalText: (text: string) => ({ kind: "full" as const, text, publishedParts: [] }),
+    };
+    mockState.createMattermostDraftStream.mockReturnValue(draftStream);
+    mockState.sendMessageMattermost.mockResolvedValue({
+      messageId: "final-answer-post",
+      channelId: "chan-1",
+      receipt: createMessageReceiptFromOutboundResults({
+        results: [{ messageId: "final-answer-post", channelId: "chan-1" }],
+        kind: "text",
+      }),
+      content: "Final answer",
+    });
+    const progressConfig: OpenClawConfig = {
+      channels: {
+        mattermost: {
+          enabled: true,
+          baseUrl: "https://mattermost.example.com",
+          botToken: "bot-token",
+          chatmode: "onmessage",
+          dmPolicy: "open",
+          groupPolicy: "open",
+          replyToMode: "all",
+          streaming: {
+            mode: "progress",
+            progress: { label: false, toolProgress: true },
+          },
+        },
+      },
+    };
+    mockState.runtimeCore = createRuntimeCore(progressConfig);
+    mockState.dispatchInboundMessage.mockImplementation(async (params) => {
+      params.replyOptions?.onAgentRunStart?.("run-plan-1");
+      await params.replyOptions?.onPlanUpdate?.({
+        title: "Implement durable cards",
+        steps: [{ step: "Inspect", status: "in_progress" }],
+      });
+      await params.replyOptions?.onToolStart?.({
+        toolCallId: "tool-1",
+        name: "read",
+        phase: "start",
+      });
+      await params.replyOptions?.onPlanUpdate?.({
+        title: "Implement durable cards",
+        steps: [
+          { step: "Inspect", status: "completed" },
+          { step: "Test", status: "in_progress" },
+        ],
+      });
+      const delivery = mockState.deliveryPlanObserver.mock.calls.at(-1)?.[0] as {
+        deliver: (payload: ReplyPayload, info: { kind: "final" }) => Promise<unknown>;
+      };
+      await delivery.deliver({ text: "Final answer" }, { kind: "final" });
+      return withAgentRunTerminalOutcome({ counts: { final: 1 } }, "completed");
+    });
+
+    const monitor = monitorMattermostProvider({
+      config: progressConfig,
+      runtime: testRuntime(),
+      abortSignal: abortController.signal,
+      webSocketFactory: () => socket,
+    });
+    await vi.waitFor(() => expect(socket.openListenerCount).toBeGreaterThan(0));
+    socket.emitOpen();
+    await emitMattermostChannelPost(socket, {
+      id: "post-durable-plan",
+      rootId: "thread-root-1",
+      message: "implement this",
+    });
+    await vi.waitFor(() => {
+      expect(mockState.updateMattermostPost.mock.calls.at(-1)?.[2].message).toContain(
+        "✅ Completed",
+      );
+    });
+    abortController.abort();
+    socket.emitClose(1000);
+    await monitor;
+
+    expect(mockState.createMattermostPost).toHaveBeenCalledOnce();
+    expect(mockState.createMattermostPost).toHaveBeenCalledWith(
+      {},
+      expect.objectContaining({ channelId: "chan-1", rootId: "thread-root-1" }),
+    );
+    expect(mockState.updateMattermostPost).toHaveBeenCalledTimes(2);
+    expect(mockState.updateMattermostPost.mock.calls.at(-1)?.[2].message).toContain("✅ Completed");
+    expect(draftStream.update).toHaveBeenCalled();
+    expect(String(draftStream.update.mock.calls.at(-1)?.[0])).toContain("Read");
+    expect(mockState.sendMessageMattermost).toHaveBeenCalledWith(
+      "channel:chan-1",
+      "Final answer",
+      expect.objectContaining({ replyToId: "thread-root-1" }),
+    );
+  });
+
+  it("does not create a task card for a final-only turn", async () => {
+    const socket = new FakeWebSocket();
+    const abortController = new AbortController();
+    mockState.abortController = abortController;
+    mockState.sendMessageMattermost.mockResolvedValue({
+      messageId: "final-only-post",
+      channelId: "chan-1",
+      receipt: createMessageReceiptFromOutboundResults({
+        results: [{ messageId: "final-only-post", channelId: "chan-1" }],
+        kind: "text",
+      }),
+      content: "Direct answer",
+    });
+    mockState.dispatchInboundMessage.mockImplementation(async () => {
+      const delivery = mockState.deliveryPlanObserver.mock.calls.at(-1)?.[0] as {
+        deliver: (payload: ReplyPayload, info: { kind: "final" }) => Promise<unknown>;
+      };
+      await delivery.deliver({ text: "Direct answer" }, { kind: "final" });
+      return withAgentRunTerminalOutcome({ counts: { final: 1 } }, "completed");
+    });
+
+    const monitor = monitorMattermostProvider({
+      config: testConfig,
+      runtime: testRuntime(),
+      abortSignal: abortController.signal,
+      webSocketFactory: () => socket,
+    });
+    await vi.waitFor(() => expect(socket.openListenerCount).toBeGreaterThan(0));
+    socket.emitOpen();
+    await emitMattermostChannelPost(socket, {
+      id: "post-without-plan",
+      message: "answer directly",
+    });
+    await vi.waitFor(() => expect(mockState.dispatchInboundMessage).toHaveBeenCalledOnce());
+    abortController.abort();
+    socket.emitClose(1000);
+    await monitor;
+
+    expect(mockState.createMattermostPost).not.toHaveBeenCalled();
+    expect(mockState.updateMattermostPost).not.toHaveBeenCalled();
+    expect(mockState.sendMessageMattermost).toHaveBeenCalledOnce();
+  });
+
+  it("keeps final delivery successful when durable card creation fails", async () => {
+    const socket = new FakeWebSocket();
+    const abortController = new AbortController();
+    mockState.abortController = abortController;
+    mockState.createMattermostPost.mockRejectedValue(new Error("card API unavailable"));
+    mockState.sendMessageMattermost.mockResolvedValue({
+      messageId: "final-after-card-error",
+      channelId: "chan-1",
+      receipt: createMessageReceiptFromOutboundResults({
+        results: [{ messageId: "final-after-card-error", channelId: "chan-1" }],
+        kind: "text",
+      }),
+      content: "Final survives",
+    });
+    mockState.dispatchInboundMessage.mockImplementation(async (params) => {
+      await params.replyOptions?.onPlanUpdate?.({
+        steps: [{ step: "Attempt work", status: "in_progress" }],
+      });
+      const delivery = mockState.deliveryPlanObserver.mock.calls.at(-1)?.[0] as {
+        deliver: (payload: ReplyPayload, info: { kind: "final" }) => Promise<unknown>;
+      };
+      await delivery.deliver({ text: "Final survives" }, { kind: "final" });
+      return withAgentRunTerminalOutcome({ counts: { final: 1 } }, "completed");
+    });
+
+    const monitor = monitorMattermostProvider({
+      config: testConfig,
+      runtime: testRuntime(),
+      abortSignal: abortController.signal,
+      webSocketFactory: () => socket,
+    });
+    await vi.waitFor(() => expect(socket.openListenerCount).toBeGreaterThan(0));
+    socket.emitOpen();
+    await emitMattermostChannelPost(socket, {
+      id: "post-card-create-failure",
+      message: "do this even if status fails",
+    });
+    await vi.waitFor(() => expect(mockState.createMattermostPost).toHaveBeenCalledTimes(2));
+    abortController.abort();
+    socket.emitClose(1000);
+    await monitor;
+
+    expect(mockState.sendMessageMattermost).toHaveBeenCalledWith(
+      "channel:chan-1",
+      "Final survives",
+      expect.any(Object),
+    );
+    expect(mockState.createMattermostPost).toHaveBeenCalledTimes(2);
+    expect(mockState.updateMattermostPost).not.toHaveBeenCalled();
+  });
+
+  it("routes a direct-message task card to the resolved DM channel", async () => {
+    const socket = new FakeWebSocket();
+    const abortController = new AbortController();
+    mockState.abortController = abortController;
+    const directConfig: OpenClawConfig = {
+      channels: {
+        mattermost: {
+          enabled: true,
+          baseUrl: "https://mattermost.example.com",
+          botToken: "bot-token",
+          chatmode: "onmessage",
+          dmPolicy: "allowlist",
+          groupPolicy: "open",
+          allowFrom: ["user-1"],
+        },
+      },
+    };
+    mockState.runtimeCore = createRuntimeCore(directConfig);
+    mockState.resolveChannelInfo.mockResolvedValue({
+      id: "dm-1",
+      name: "",
+      display_name: "",
+      type: "D",
+    });
+    mockState.dispatchInboundMessage.mockImplementation(async (params) => {
+      await params.replyOptions?.onPlanUpdate?.({
+        steps: [{ step: "Handle DM task", status: "in_progress" }],
+      });
+    });
+
+    const monitor = monitorMattermostProvider({
+      config: directConfig,
+      runtime: testRuntime(),
+      abortSignal: abortController.signal,
+      webSocketFactory: () => socket,
+    });
+    await vi.waitFor(() => expect(socket.openListenerCount).toBeGreaterThan(0));
+    socket.emitOpen();
+    await socket.emitMessage({
+      event: "posted",
+      data: {
+        channel_id: "dm-1",
+        sender_name: "alice",
+        post: JSON.stringify({
+          id: "post-dm-plan",
+          channel_id: "dm-1",
+          user_id: "user-1",
+          message: "do a task",
+          create_at: 1_714_000_000_000,
+        }),
+      },
+      broadcast: { channel_id: "dm-1", user_id: "user-1" },
+    });
+    await vi.waitFor(() => expect(mockState.createMattermostPost).toHaveBeenCalledOnce());
+    abortController.abort();
+    socket.emitClose(1000);
+    await monitor;
+
+    expect(mockState.createMattermostPost).toHaveBeenCalledWith(
+      {},
+      expect.objectContaining({ channelId: "dm-1", rootId: undefined }),
+    );
+  });
+
   it("does not drop inline command-looking group text from non-command-authorized senders", async () => {
     const socket = new FakeWebSocket();
     const abortController = new AbortController();
@@ -2290,7 +2587,9 @@ describe("mattermost inbound user posts", () => {
     const replyOptions = mockState.dispatchInboundMessage.mock.calls.at(0)?.[0].replyOptions;
     expect(replyOptions?.disableBlockStreaming).toBeUndefined();
     expect(replyOptions?.preserveProgressCallbackStartOrder).toBeUndefined();
-    expect(replyOptions?.allowProgressCallbacksWhenSourceDeliverySuppressed).toBeUndefined();
+    // Durable task cards still need structured plan callbacks even when provider
+    // text previews are disabled by outbound-mutating hooks.
+    expect(replyOptions?.allowProgressCallbacksWhenSourceDeliverySuppressed).toBe(true);
     expect(replyOptions?.onObservedReplyDelivery).toBeUndefined();
   });
 

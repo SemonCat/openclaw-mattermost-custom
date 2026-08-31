@@ -79,7 +79,17 @@ Compared with the official plugin, this build preserves:
 - Safe Mattermost command reconciliation without mutating foreign commands.
 - Thread-aware slash-command callbacks and replies.
 - Ack and lifecycle status reactions, including same-session steer correlation.
+- Durable plan-backed task progress cards that remain after the final answer.
 - The Mattermost slash-trigger length cap fix.
+
+When an agent emits a structured plan update, the plugin lazily creates one
+Mattermost task card in the same channel or thread and edits that post for the
+rest of the turn. Tool/reasoning streaming keeps its existing preview post, and
+the final answer keeps its existing delivery path; neither reuses or deletes the
+task-card post. Successful runs mark the card completed, while failed or aborted
+runs retain a truthful failed or cancelled terminal state. Turns without a plan
+do not create an extra post. Card API failures are isolated from final-answer
+delivery and use bounded create fallback to avoid duplicate posts.
 
 Inbound WebSocket posts are persisted through a plugin-owned SQLite ingress
 queue under the OpenClaw state directory before dispatch. The separate spool is

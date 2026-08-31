@@ -3,6 +3,7 @@ import { resolveHumanDelayConfig } from "openclaw/plugin-sdk/agent-runtime";
 import {
   hasVisibleInboundReplyDispatch,
   isChannelPartialDeliveryError,
+  readAgentRunTerminalOutcome,
   type ChannelInboundTurnPlan,
 } from "openclaw/plugin-sdk/channel-inbound";
 import {
@@ -55,6 +56,7 @@ import {
   createMattermostTranscriptUsageAccumulator,
   type MattermostSessionTranscriptUpdate,
 } from "./transcript-usage.js";
+import { createMattermostTaskProgressCard } from "./task-progress-card.js";
 
 type MattermostAgentEventRuntime = {
   events?: {
@@ -217,6 +219,12 @@ export async function dispatchMattermostInboundTurn(
     },
   });
   const progressReceipt = createMattermostProgressReceipt();
+  const taskProgressCard = createMattermostTaskProgressCard({
+    client,
+    channelId,
+    rootId: effectiveReplyToId,
+    log: monitor.logVerboseMessage,
+  });
   // Public, ungated agent-event bus (not the trusted-plugin-only `core.state.*`
   // APIs this plugin already avoids relying on for durability): correlates
   // cumulative output-token usage snapshots to this turn's run id.
@@ -229,6 +237,7 @@ export async function dispatchMattermostInboundTurn(
   });
   const unsubscribeUsageEvents =
     eventRuntime.events?.onAgentEvent?.((evt) => {
+      taskProgressCard.noteAgentEvent(evt);
       if (evt.stream !== "usage") {
         return;
       }
@@ -616,7 +625,7 @@ export async function dispatchMattermostInboundTurn(
                   ? bindIngressLifecycleToReplyOptions(turnAdoptionLifecycle)
                   : {}),
                 allowProgressCallbacksWhenSourceDeliverySuppressed:
-                  draftToolProgressEnabled || reactions.statusReactionsEnabled ? true : undefined,
+                  true,
                 allowToolLifecycleWhenProgressHidden:
                   draftToolProgressEnabled || reactions.statusReactionsEnabled ? true : undefined,
                 preserveProgressCallbackStartOrder: draftPreviewEnabled ? true : undefined,
@@ -638,8 +647,20 @@ export async function dispatchMattermostInboundTurn(
                   : undefined,
                 onAgentRunStart: (runId) => {
                   progressReceipt.noteRunStart(runId);
+                  taskProgressCard.noteRunStart(runId);
                 },
                 onModelSelected,
+                onPlanUpdate: (planUpdate) => {
+                  hasStartedWork = true;
+                  // The card is observational UI. Never hold the agent/final-answer
+                  // pipeline behind a Mattermost control-plane request.
+                  void taskProgressCard.updatePlan(planUpdate).catch((error: unknown) => {
+                    monitor.logVerboseMessage(
+                      `mattermost task progress card callback failed: ${String(error)}`,
+                    );
+                  });
+                  return true;
+                },
                 onPartialReply: (payloadResult) =>
                   account.streamingMode === "progress"
                     ? false
@@ -778,8 +799,6 @@ export async function dispatchMattermostInboundTurn(
     dispatchError = true;
     throw err;
   } finally {
-    unsubscribeUsageEvents();
-    unsubscribeTranscriptUpdates();
     try {
       await draftStream.stop();
     } catch (err) {
@@ -789,6 +808,12 @@ export async function dispatchMattermostInboundTurn(
       ? (turnResult.dispatchResult as MattermostReplyDispatchResult)
       : undefined;
     const finalDeliveryFailed = (dispatchResult?.failedCounts?.final ?? 0) > 0;
+    await taskProgressCard.finish({
+      outcome: readAgentRunTerminalOutcome(dispatchResult),
+      deliveryFailed: dispatchError || finalDeliveryFailed,
+    });
+    unsubscribeUsageEvents();
+    unsubscribeTranscriptUpdates();
     await reactions.finish({
       dispatchError: dispatchError || finalDeliveryFailed,
       anyReplyDelivered: anyReplyDelivered || hasVisibleInboundReplyDispatch(dispatchResult),
