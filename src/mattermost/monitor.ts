@@ -32,6 +32,7 @@ import {
 import { createMattermostModelPickerInteractionHandler } from "./monitor-model-picker.js";
 import { createMattermostPostHandler } from "./monitor-posts.js";
 import { createMattermostReactionHandler } from "./monitor-reactions.js";
+import { attachMattermostRestartRecoveryProgress } from "./restart-recovery-progress.js";
 import { createMattermostMonitorResources } from "./monitor-resources.js";
 import { registerMattermostMonitorSlashCommands } from "./monitor-slash.js";
 import type { MattermostMonitorContext } from "./monitor-types.js";
@@ -223,6 +224,7 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
       allowedInteractionSourceIps.length > 0 ? allowedInteractionSourceIps : ["127.0.0.1", "::1"],
     handleModelPickerInteraction: createMattermostModelPickerInteractionHandler(monitor),
   });
+  const restartRecoveryProgress = attachMattermostRestartRecoveryProgress(monitor);
   let slashRegistrationTask: Promise<void> | null = null;
   const startSlashRegistration = () => {
     if (slashRegistrationTask || opts.abortSignal?.aborted) {
@@ -384,6 +386,7 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
     });
   } finally {
     await ingress.stop();
+    await restartRecoveryProgress.stop();
     unregisterInteractions();
     deactivateSlashCommands(account.accountId);
   }

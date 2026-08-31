@@ -91,6 +91,13 @@ runs retain a truthful failed or cancelled terminal state. Turns without a plan
 do not create an extra post. Card API failures are isolated from final-answer
 delivery and use bounded create fallback to avoid duplicate posts.
 
+OpenClaw 2026.8.1 restart-recovery runs also reconnect channel/group session
+events to the original Mattermost thread. Recovery keeps the typing indicator
+alive and restores tool progress in a temporary preview post; terminal recovery
+clears that preview and leaves core's durable final-answer delivery unchanged.
+Ordinary (non-recovery) turns continue to use only their existing inbound-turn
+callbacks, so they are not double-rendered.
+
 Inbound WebSocket posts are persisted through a plugin-owned SQLite ingress
 queue under the OpenClaw state directory before dispatch. The separate spool is
 required because beta.2 reserves the host channel-ingress queue for trusted

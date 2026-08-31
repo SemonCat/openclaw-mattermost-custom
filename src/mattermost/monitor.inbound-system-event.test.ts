@@ -130,7 +130,13 @@ class FakeWebSocket {
 const mockState = vi.hoisted(() => ({
   abortController: undefined as AbortController | undefined,
   agentEventListeners: [] as Array<
-    (event: { runId?: string; stream: string; data: Record<string, unknown> }) => void
+    (event: {
+      runId?: string;
+      stream: string;
+      data: Record<string, unknown>;
+      sessionKey?: string;
+      mainSessionRestartRecovery?: true;
+    }) => void
   >,
   createReplyDispatcherWithTyping: vi.fn(),
   createMattermostClient: vi.fn(),
@@ -157,6 +163,7 @@ const mockState = vi.hoisted(() => ({
   resolveMattermostMedia: vi.fn(),
   resolveUserInfo: vi.fn(),
   runtimeCore: undefined as unknown,
+  sendTypingIndicator: vi.fn(async () => {}),
   sendMessageMattermost: vi.fn(),
   updateMattermostPost: vi.fn(),
 }));
@@ -238,7 +245,7 @@ vi.mock("./monitor-resources.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./monitor-resources.js")>()),
   createMattermostMonitorResources: () => ({
     resolveMattermostMedia: mockState.resolveMattermostMedia,
-    sendTypingIndicator: vi.fn(async () => {}),
+    sendTypingIndicator: mockState.sendTypingIndicator,
     resolveChannelInfo: mockState.resolveChannelInfo,
     resolveUserInfo: mockState.resolveUserInfo,
     updateModelPickerPost: vi.fn(async () => {}),
@@ -791,6 +798,69 @@ describe("mattermost inbound user posts", () => {
     await monitor;
     expect(unregisterInteractions).toHaveBeenCalledOnce();
     expect(webSocketFactory).toHaveBeenCalledOnce();
+  });
+
+  it("reattaches restart recovery typing and tool progress to the original thread", async () => {
+    const socket = new FakeWebSocket();
+    const abortController = new AbortController();
+    const draftStream = mockState.createMattermostDraftStream();
+    mockState.createMattermostDraftStream.mockReturnValue(draftStream);
+    const config: OpenClawConfig = {
+      channels: {
+        mattermost: {
+          ...testConfig.channels?.mattermost,
+          streaming: { mode: "progress" },
+        },
+      },
+    };
+    mockState.runtimeCore = createRuntimeCore(config);
+
+    const monitor = monitorMattermostProvider({
+      config,
+      runtime: testRuntime(),
+      abortSignal: abortController.signal,
+      webSocketFactory: () => socket,
+    });
+    await vi.waitFor(() => expect(socket.openListenerCount).toBeGreaterThan(0));
+
+    const emitAgentEvent = (event: Parameters<(typeof mockState.agentEventListeners)[number]>[0]) => {
+      for (const listener of [...mockState.agentEventListeners]) {
+        listener(event);
+      }
+    };
+    emitAgentEvent({
+      runId: "restart-run-1",
+      sessionKey: "agent:main:mattermost:channel:chan-1:thread:root-1",
+      mainSessionRestartRecovery: true,
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    emitAgentEvent({
+      runId: "restart-run-1",
+      mainSessionRestartRecovery: true,
+      stream: "tool",
+      data: { phase: "start", name: "read", toolCallId: "tool-1", args: { path: "a" } },
+    });
+
+    await vi.waitFor(() => {
+      expect(mockState.sendTypingIndicator).toHaveBeenCalledWith("chan-1", "root-1");
+      expect(draftStream.update).toHaveBeenCalled();
+    });
+    expect(mockState.createMattermostDraftStream).toHaveBeenLastCalledWith(
+      expect.objectContaining({ channelId: "chan-1", rootId: "root-1" }),
+    );
+
+    emitAgentEvent({
+      runId: "restart-run-1",
+      sessionKey: "agent:main:mattermost:channel:chan-1:thread:root-1",
+      mainSessionRestartRecovery: true,
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+    await vi.waitFor(() => expect(draftStream.clear).toHaveBeenCalledOnce());
+
+    abortController.abort();
+    await monitor;
   });
 
   it("does not enqueue regular user posts as system events", async () => {
