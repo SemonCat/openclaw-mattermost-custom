@@ -204,7 +204,6 @@ describe("Mattermost model-picker interaction dispatch", () => {
         defaultModel: "gpt-5.4",
         currentProvider: "openai",
         currentModel: "gpt-5.4",
-        allowedModelKeys: new Set(["openai/gpt-5.4"]),
         modelCatalog: [{ provider: "openai", id: "gpt-5.4", name: "GPT-5.4" }],
         request: {
           provider: "openai",

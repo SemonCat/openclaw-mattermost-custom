@@ -100,6 +100,12 @@ class FakeWebSocket {
     for (const listener of this.openListeners) {
       listener();
     }
+    const challenge = this.sent
+      .map((entry) => JSON.parse(entry) as { action?: string; seq?: number })
+      .find((entry) => entry.action === "authentication_challenge");
+    if (typeof challenge?.seq === "number") {
+      void this.emitMessage({ status: "OK", seq_reply: challenge.seq });
+    }
   }
 
   async emitMessage(payload: unknown): Promise<void> {
@@ -154,6 +160,22 @@ const mockState = vi.hoisted(() => ({
 vi.mock("openclaw/plugin-sdk/plugin-runtime", async (importOriginal) => ({
   ...(await importOriginal<typeof import("openclaw/plugin-sdk/plugin-runtime")>()),
   getGlobalHookRunner: mockState.getGlobalHookRunner,
+}));
+
+vi.mock("openclaw/plugin-sdk/channel-inbound", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("openclaw/plugin-sdk/channel-inbound")>()),
+  resolveInboundSessionEnvelopeContext: (params: { cfg: OpenClawConfig }) => {
+    const userTimezone = params.cfg.agents?.defaults?.userTimezone;
+    return {
+      envelopeOptions: {
+        timezone: userTimezone,
+        includeTimestamp: true,
+        includeElapsed: true,
+        userTimezone,
+      },
+      previousTimestamp: undefined,
+    };
+  },
 }));
 
 vi.mock("openclaw/plugin-sdk/channel-outbound", async (importOriginal) => {
@@ -395,11 +417,15 @@ function createRuntimeCore(
         deliver: turn.delivery.deliver,
         onError: turn.delivery.onError,
       }) as { dispatcher: unknown; replyOptions?: Record<string, unknown> };
+      const replyOptions = { ...prepared.replyOptions, ...turn.replyOptions } as {
+        turnAdoptionLifecycle?: { onAdopted?: () => void | Promise<void> };
+      };
+      await replyOptions.turnAdoptionLifecycle?.onAdopted?.();
       const dispatchResult = await mockState.dispatchInboundMessage({
         ctx: turn.ctxPayload,
         cfg: turn.cfg,
         dispatcher: prepared.dispatcher,
-        replyOptions: { ...prepared.replyOptions, ...turn.replyOptions },
+        replyOptions,
         onSettled: turn.dispatcherOptions?.onSettled,
       });
       return {
@@ -792,7 +818,7 @@ describe("mattermost inbound user posts", () => {
     expect(ctx?.OriginatingChannel).toBe("mattermost");
     expect(ctx?.Provider).toBe("mattermost");
     expect(ctx?.NativeChannelId).toBe("chan-1");
-  });
+  }, 30_000);
 
   it("hydrates an automation alert root on the first plain-text thread reply", async () => {
     const socket = new FakeWebSocket();

@@ -440,7 +440,9 @@ describe("slash-http session-admission race retry and fallback", () => {
       string,
       { replyToId?: string },
     ];
-    expect(to).toBe("user:user-1");
+    // Reply through the concrete inbound DM channel; this avoids re-resolving
+    // or recreating the same direct channel by peer id.
+    expect(to).toBe("channel:chan-1");
     expect(options.replyToId).toBeUndefined();
   });
 

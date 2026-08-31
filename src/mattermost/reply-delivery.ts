@@ -20,6 +20,7 @@ import type {
   ReplyFollowupAdmissionBarrierTimeoutPolicy,
   ReplyPayload,
 } from "openclaw/plugin-sdk/reply-runtime";
+import { requiresMattermostMediaUpload, resolveMattermostPresentation } from "../normalize.js";
 import {
   resolveMattermostReplyDeliveryBarrierTimeoutMs,
   type CreateDmChannelRetryOptions,
@@ -36,7 +37,9 @@ type SendMattermostMessage = (
     accountId?: string;
     mediaUrl?: string;
     mediaLocalRoots?: readonly string[];
+    requireMediaUpload?: boolean;
     replyToId?: string;
+    buttons?: Array<unknown>;
     onDmChannelResolution?: (resolution: PromiseLike<unknown>) => void;
   },
 ) => Promise<MattermostSendResult>;
@@ -116,7 +119,7 @@ export async function deliverMattermostReplyPayload(params: {
   core: PluginRuntime;
   cfg: OpenClawConfig;
   payload: ReplyPayload;
-  to: string;
+  channelId: string;
   accountId: string;
   agentId?: string;
   replyToId?: string;
@@ -132,11 +135,9 @@ export async function deliverMattermostReplyPayload(params: {
       suppression: { reason: "no_visible_result" },
     };
   }
+  const presentation = resolveMattermostPresentation(params.payload);
   const reply = resolveSendableOutboundReplyParts(params.payload, {
-    text: params.core.channel.text.convertMarkdownTables(
-      params.payload.text ?? "",
-      params.tableMode,
-    ),
+    text: params.core.channel.text.convertMarkdownTables(presentation.text, params.tableMode),
   });
   const mediaLocalRoots = getAgentScopedMediaLocalRoots(params.cfg, params.agentId);
   const chunkMode = params.core.channel.text.resolveChunkMode(
@@ -146,6 +147,24 @@ export async function deliverMattermostReplyPayload(params: {
   );
   const results: MattermostSendResult[] = [];
   const acceptedContents: string[] = [];
+  const deliveryTarget = `channel:${params.channelId}`;
+  const sendAccepted = async (text: string, mediaUrl?: string) => {
+    const result = await params.sendMessage(deliveryTarget, text, {
+      cfg: params.cfg,
+      accountId: params.accountId,
+      ...(mediaUrl ? { mediaUrl, mediaLocalRoots } : {}),
+      ...(requiresMattermostMediaUpload(mediaUrl) ? { requireMediaUpload: true } : {}),
+      ...(results.length === 0 && reply.mediaUrls.length < 2 && presentation.buttons.length
+        ? { buttons: presentation.buttons }
+        : {}),
+      replyToId: params.replyToId,
+      ...(params.onDmChannelResolution
+        ? { onDmChannelResolution: params.onDmChannelResolution }
+        : {}),
+    });
+    results.push(result);
+    acceptedContents.push(result.content);
+  };
   let outcome: Exclude<MattermostReplyDeliveryOutcome, "reasoning_skipped">;
   try {
     outcome = await deliverTextOrMediaReply({
@@ -153,32 +172,8 @@ export async function deliverMattermostReplyPayload(params: {
       text: reply.text,
       chunkText: (value) =>
         params.core.channel.text.chunkMarkdownTextWithMode(value, params.textLimit, chunkMode),
-      sendText: async (chunk) => {
-        const result = await params.sendMessage(params.to, chunk, {
-          cfg: params.cfg,
-          accountId: params.accountId,
-          replyToId: params.replyToId,
-          ...(params.onDmChannelResolution
-            ? { onDmChannelResolution: params.onDmChannelResolution }
-            : {}),
-        });
-        results.push(result);
-        acceptedContents.push(result.content);
-      },
-      sendMedia: async ({ mediaUrl, caption }) => {
-        const result = await params.sendMessage(params.to, caption ?? "", {
-          cfg: params.cfg,
-          accountId: params.accountId,
-          mediaUrl,
-          mediaLocalRoots,
-          replyToId: params.replyToId,
-          ...(params.onDmChannelResolution
-            ? { onDmChannelResolution: params.onDmChannelResolution }
-            : {}),
-        });
-        results.push(result);
-        acceptedContents.push(result.content);
-      },
+      sendText: sendAccepted,
+      sendMedia: ({ mediaUrl, caption }) => sendAccepted(caption ?? "", mediaUrl),
     });
   } catch (error: unknown) {
     const failedPartial = isChannelPartialDeliveryError(error) ? error.deliveryResult : undefined;

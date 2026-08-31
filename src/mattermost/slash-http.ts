@@ -618,7 +618,11 @@ async function authorizeSlashInvocation(params: {
 export function createSlashCommandHttpHandler(params: SlashHttpHandlerParams) {
   const { account, runtime, registeredCommands, triggerMap, log, bodyTimeoutMs } = params;
 
-  return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+  return async (
+    req: IncomingMessage,
+    res: ServerResponse,
+    bufferedBody?: string,
+  ): Promise<void> => {
     if (req.method !== "POST") {
       res.statusCode = 405;
       res.setHeader("Allow", "POST");
@@ -628,7 +632,7 @@ export function createSlashCommandHttpHandler(params: SlashHttpHandlerParams) {
 
     let body: string;
     try {
-      body = await readBody(req, MAX_BODY_BYTES, bodyTimeoutMs);
+      body = bufferedBody ?? (await readBody(req, MAX_BODY_BYTES, bodyTimeoutMs));
     } catch (error) {
       if (isRequestBodyLimitError(error, "REQUEST_BODY_TIMEOUT")) {
         res.statusCode = 408;
@@ -850,7 +854,7 @@ async function handleSlashCommandAsync(params: {
   if (pickerEntry) {
     const data = await buildModelsProviderData(cfg, route.agentId);
     if (data.providers.length === 0) {
-      await sendMessageMattermost(to, "No models available.", {
+      await sendMessageMattermost(`channel:${channelId}`, "No models available.", {
         cfg,
         accountId: account.accountId,
         replyToId: thread.effectiveReplyToId,
@@ -886,7 +890,7 @@ async function handleSlashCommandAsync(params: {
               currentModel,
             });
 
-    await sendMessageMattermost(to, view.text, {
+    await sendMessageMattermost(`channel:${channelId}`, view.text, {
       cfg,
       accountId: account.accountId,
       buttons: view.buttons,
@@ -1041,7 +1045,7 @@ async function handleSlashCommandAsync(params: {
                 core,
                 cfg: attempt.cfg,
                 payload: deliveredPayload,
-                to,
+                channelId,
                 accountId: account.accountId,
                 agentId: attempt.route.agentId,
                 replyToId: attempt.thread.effectiveReplyToId,
@@ -1104,7 +1108,7 @@ async function handleSlashCommandAsync(params: {
       );
       try {
         await sendMessageMattermost(
-          to,
+          `channel:${channelId}`,
           "Still finishing a previous action in this conversation. Please wait a few seconds and run the command again.",
           {
             cfg: lastAttempt?.cfg ?? cfg,

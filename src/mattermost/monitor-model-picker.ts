@@ -95,7 +95,6 @@ export function createMattermostModelPickerInteractionHandler(
       defaultModel: params.data.resolvedDefault.model,
       currentProvider,
       currentModel,
-      allowedModelKeys: buildMattermostAllowedModelRefs(params.data),
       modelCatalog,
       canPersistStickyModelSelection: false,
       request: {
@@ -268,7 +267,7 @@ export function createMattermostModelPickerInteractionHandler(
             notice = `❌ Failed to set ${targetModelRef}. Try /oc_model ${targetModelRef} directly.`;
           }
         }
-        await sendMessageMattermost(eventPlan.to, notice, {
+        await sendMessageMattermost(`channel:${params.payload.channel_id}`, notice, {
           cfg,
           accountId: account.accountId,
           replyToId: resolveMattermostInteractionReplyRootId({

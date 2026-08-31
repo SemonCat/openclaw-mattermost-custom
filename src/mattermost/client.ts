@@ -49,7 +49,7 @@ export type MattermostUser = {
   nickname?: string | null;
   first_name?: string | null;
   last_name?: string | null;
-  update_at?: number;
+  update_at?: number | null;
 };
 
 export type MattermostChannel = {

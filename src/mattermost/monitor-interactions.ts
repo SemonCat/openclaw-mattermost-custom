@@ -102,7 +102,7 @@ export function registerMattermostInteractions(params: {
         if (!eventPlan) {
           return;
         }
-        const { channelDisplay, kind, route, thread, to } = eventPlan;
+        const { channelDisplay, channelId, kind, route, thread, to } = eventPlan;
         const bodyText = `[Button click: user @${button.userName} selected "${button.actionName}"]`;
         const ctxPayload = eventPlan.finalizeContext({
           Body: bodyText,
@@ -135,7 +135,7 @@ export function registerMattermostInteractions(params: {
                 core,
                 cfg,
                 payload,
-                to,
+                channelId,
                 accountId: account.accountId,
                 agentId: route.agentId,
                 replyToId: resolveMattermostInteractionReplyRootId({

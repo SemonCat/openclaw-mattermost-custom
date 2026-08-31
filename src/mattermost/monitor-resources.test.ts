@@ -45,6 +45,19 @@ describe("mattermost monitor resources", () => {
     ).toBe("[mattermost attachment unavailable]");
   });
 
+  it("keeps sanitized server filenames visible when downloads fail", () => {
+    expect(
+      formatMattermostInboundMediaText({
+        body: "files",
+        nativeMedia: [{}, {}],
+        materializedMedia: [
+          { fileName: "report.pdf" },
+          { fileName: "../unsafe.txt" },
+        ],
+      }),
+    ).toBe('files\n\n[mattermost 2 attachments unavailable] "report.pdf, unsafe.txt"');
+  });
+
   it("keeps captions and partial-failure notices without minting media placeholders", () => {
     expect(
       formatMattermostInboundMediaText({
@@ -93,6 +106,7 @@ describe("mattermost monitor resources", () => {
     const saveRemoteMedia = vi.fn(async () => ({
       path: "/tmp/file.png",
       contentType: "image/png",
+      fileName: "server-name.png",
     }));
 
     const resources = createMattermostMonitorResources({
@@ -113,6 +127,7 @@ describe("mattermost monitor resources", () => {
       {
         path: "/tmp/file.png",
         contentType: "image/png",
+        fileName: "server-name.png",
         kind: "image",
       },
     ]);
@@ -166,7 +181,7 @@ describe("mattermost monitor resources", () => {
       .mockRejectedValueOnce(new Error("download failed"));
     const request = vi.fn(async (requestPath: string) => {
       expect(requestPath).toBe("/files/file-audio/info");
-      return { mime_type: "audio/mpeg" };
+      return { mime_type: "audio/mpeg", name: "voice note.mp3" };
     });
     const resources = createMattermostMonitorResources({
       accountId: "default",
@@ -184,7 +199,7 @@ describe("mattermost monitor resources", () => {
 
     await expect(resources.resolveMattermostMedia(["file-image", "file-audio"])).resolves.toEqual([
       { path: "/tmp/file.png", contentType: "image/png", kind: "image" },
-      { contentType: "audio/mpeg", kind: "audio" },
+      { contentType: "audio/mpeg", fileName: "voice note.mp3", kind: "audio" },
     ]);
     expect(request).toHaveBeenCalledTimes(1);
   });

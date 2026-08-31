@@ -646,12 +646,16 @@ describe("mattermostPlugin", () => {
   describe("messageActions", () => {
     let reactionActionSequence = 0;
 
-    const runReactAction = async (params: Record<string, unknown>, fetchMode: "add" | "remove") => {
+    const runReactAction = async (
+      params: Record<string, unknown>,
+      fetchMode: "add" | "remove",
+      expected?: { emojiName: string },
+    ) => {
       const cfg = createMattermostTestConfig(`message-action-${++reactionActionSequence}`);
       const fetchImpl = createMattermostReactionFetchMock({
         mode: fetchMode,
         postId: "POST1",
-        emojiName: "thumbsup",
+        emojiName: expected?.emojiName ?? "thumbsup",
       });
 
       return await withMockedGlobalFetch(fetchImpl, async () => {
@@ -1128,6 +1132,19 @@ describe("mattermostPlugin", () => {
 
       expect(result?.content).toEqual([{ type: "text", text: "Reacted with :thumbsup: on POST1" }]);
       expect(result?.details).toStrictEqual({});
+    });
+
+    it("maps raw Unicode reaction glyphs to Mattermost short names", async () => {
+      const result = await runReactAction({ messageId: "POST1", emoji: "👍🏽" }, "add", {
+        emojiName: "thumbsup_medium_skin_tone",
+      });
+
+      expect(result?.content).toEqual([
+        {
+          type: "text",
+          text: "Reacted with :thumbsup_medium_skin_tone: on POST1",
+        },
+      ]);
     });
 
     it.each([

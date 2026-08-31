@@ -1,6 +1,6 @@
 // Mattermost tests cover slash state plugin behavior.
-import type { IncomingMessage, ServerResponse } from "node:http";
-import { PassThrough } from "node:stream";
+import { IncomingMessage, type ServerResponse } from "node:http";
+import { Socket } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig, RuntimeEnv } from "../runtime-api.js";
 import type { ResolvedMattermostAccount } from "./accounts.js";
@@ -76,11 +76,13 @@ function replaceAccountHandler(accountId: string): void {
 }
 
 function createRequest(body: string): IncomingMessage {
-  const req = new PassThrough() as PassThrough & IncomingMessage;
+  const req = new IncomingMessage(new Socket());
   req.method = "POST";
   req.headers = { "content-type": "application/x-www-form-urlencoded" };
   process.nextTick(() => {
-    req.end(body);
+    req.push(Buffer.from(body));
+    req.complete = true;
+    req.push(null);
   });
   return req;
 }

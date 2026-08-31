@@ -147,6 +147,32 @@ describe("deliverMattermostReplyWithDraftPreview", () => {
     });
   });
 
+  it("uses normal delivery when a final includes presentation controls", async () => {
+    const draftStream = createDraftStreamMock();
+    const deliverFinal = createDeliverFinalMock();
+    const payload = {
+      text: "Choose one",
+      presentation: {
+        blocks: [
+          {
+            type: "buttons",
+            buttons: [{ label: "Sol", value: "openai/gpt-5.6-sol" }],
+          },
+        ],
+      },
+    } as never;
+
+    await deliverDraftPreview({
+      payload,
+      draftStream,
+      effectiveReplyToId: "thread-root-1",
+      deliverPayload: deliverFinal,
+    });
+
+    expect(updateMattermostPostSpy).not.toHaveBeenCalled();
+    expect(deliverFinal).toHaveBeenCalledExactlyOnceWith(payload);
+  });
+
   it("reports a final already published in a sealed preview generation", async () => {
     const draftStream = createDraftStreamMock(null);
     const deliverFinal = createDeliverFinalMock();

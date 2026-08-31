@@ -24,6 +24,7 @@ export {
   createDedupeCache,
   DEFAULT_ACCOUNT_ID,
   DEFAULT_GROUP_HISTORY_LIMIT,
+  type ContextVisibilityMode,
   type DmPolicy,
   formatInboundFromLabel,
   getAgentScopedMediaLocalRoots,

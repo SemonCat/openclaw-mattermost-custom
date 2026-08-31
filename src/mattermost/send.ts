@@ -1,3 +1,4 @@
+import { resolveChannelMediaMaxBytes } from "openclaw/plugin-sdk/account-helpers";
 import { createChannelPartialDeliveryError } from "openclaw/plugin-sdk/channel-inbound";
 // Mattermost plugin module implements send behavior.
 import {
@@ -337,6 +338,7 @@ type MattermostSendContext = {
   baseUrl: string;
   channelId: string;
   allowPrivateNetwork?: boolean;
+  mediaMaxBytes?: number;
 };
 
 async function resolveMattermostSendContext(
@@ -409,6 +411,11 @@ async function resolveMattermostSendContext(
     baseUrl,
     channelId,
     allowPrivateNetwork,
+    mediaMaxBytes: resolveChannelMediaMaxBytes({
+      cfg,
+      accountId: account.accountId,
+      resolveChannelLimitMb: () => account.config.mediaMaxMb,
+    }),
   };
 }
 
@@ -419,7 +426,7 @@ export async function sendMessageMattermost(
 ): Promise<MattermostSendResult> {
   const core = getCore();
   const logger = core.logging.getChildLogger({ module: "mattermost" });
-  const { cfg, accountId, token, baseUrl, channelId, allowPrivateNetwork } =
+  const { cfg, accountId, token, baseUrl, channelId, allowPrivateNetwork, mediaMaxBytes } =
     await resolveMattermostSendContext(to, opts);
 
   const client = createMattermostClient({ baseUrl, botToken: token, allowPrivateNetwork });
@@ -447,6 +454,7 @@ export async function sendMessageMattermost(
   if (mediaUrl) {
     try {
       const media = await loadOutboundMediaFromUrl(mediaUrl, {
+        maxBytes: mediaMaxBytes,
         mediaLocalRoots: opts.mediaLocalRoots,
         mediaReadFile: opts.mediaReadFile,
         workspaceDir: opts.workspaceDir,
@@ -460,7 +468,7 @@ export async function sendMessageMattermost(
       fileIds = [fileInfo.id];
     } catch (err) {
       uploadError = err instanceof Error ? err : new Error(String(err));
-      if (opts.requireMediaUpload) {
+      if (opts.requireMediaUpload || mediaMaxBytes !== undefined) {
         throw new Error(`Mattermost media upload failed: ${uploadError.message}`, {
           cause: err,
         });

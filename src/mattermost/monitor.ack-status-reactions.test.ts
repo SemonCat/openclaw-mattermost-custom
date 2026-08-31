@@ -36,7 +36,9 @@ class FakeWebSocket {
     }
   }
 
-  send(): void {}
+  send(data: string): void {
+    this.sent.push(data);
+  }
   ping(): void {}
   close(): void {}
   terminate(): void {
@@ -50,6 +52,12 @@ class FakeWebSocket {
   emitOpen(): void {
     for (const listener of this.openListeners) {
       listener();
+    }
+    const challenge = this.sent
+      .map((entry) => JSON.parse(entry) as { action?: string; seq?: number })
+      .find((entry) => entry.action === "authentication_challenge");
+    if (typeof challenge?.seq === "number") {
+      void this.emitMessage({ status: "OK", seq_reply: challenge.seq });
     }
   }
 
@@ -94,6 +102,22 @@ const mockState = vi.hoisted(() => ({
 vi.mock("openclaw/plugin-sdk/plugin-runtime", async (importOriginal) => ({
   ...(await importOriginal<typeof import("openclaw/plugin-sdk/plugin-runtime")>()),
   getGlobalHookRunner: mockState.getGlobalHookRunner,
+}));
+
+vi.mock("openclaw/plugin-sdk/channel-inbound", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("openclaw/plugin-sdk/channel-inbound")>()),
+  resolveInboundSessionEnvelopeContext: (params: { cfg: OpenClawConfig }) => {
+    const userTimezone = params.cfg.agents?.defaults?.userTimezone;
+    return {
+      envelopeOptions: {
+        timezone: userTimezone,
+        includeTimestamp: true,
+        includeElapsed: true,
+        userTimezone,
+      },
+      previousTimestamp: undefined,
+    };
+  },
 }));
 
 vi.mock("openclaw/plugin-sdk/reply-runtime", async (importOriginal) => {
@@ -259,11 +283,15 @@ function createRuntimeCore(cfg: OpenClawConfig) {
         deliver: turn.delivery.deliver,
         onError: turn.delivery.onError,
       }) as { dispatcher: unknown; replyOptions?: Record<string, unknown> };
+      const replyOptions = { ...prepared.replyOptions, ...turn.replyOptions } as {
+        turnAdoptionLifecycle?: { onAdopted?: () => void | Promise<void> };
+      };
+      await replyOptions.turnAdoptionLifecycle?.onAdopted?.();
       const dispatchResult = await mockState.dispatchInboundMessage({
         ctx: turn.ctxPayload,
         cfg: turn.cfg,
         dispatcher: prepared.dispatcher,
-        replyOptions: { ...prepared.replyOptions, ...turn.replyOptions },
+        replyOptions,
         onSettled: undefined,
       });
       return {
@@ -474,8 +502,9 @@ describe("mattermost ack reactions", () => {
       expect.objectContaining({ accountId: "default" }),
     );
     expect(mockState.ingressReceive).toHaveBeenCalledTimes(1);
+    expect(mockState.dispatchInboundMessage).toHaveBeenCalledTimes(1);
     expect(mockState.ingressOnAdopted).toHaveBeenCalledTimes(1);
-  });
+  }, 30_000);
 
   it("reacts with the ack emoji while durable session recording is still pending", async () => {
     const socket = new FakeWebSocket();

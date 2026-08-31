@@ -131,7 +131,7 @@ describe("deliverMattermostReplyPayload", () => {
       core,
       cfg,
       payload: { text: "hidden", isReasoning: true },
-      to: "channel:town-square",
+      channelId: "town-square",
       accountId: "default",
       agentId: "agent-1",
       replyToId: "root-post",
@@ -161,7 +161,7 @@ describe("deliverMattermostReplyPayload", () => {
       core,
       cfg,
       payload: { text: "non-trivial input that the converter strips" },
-      to: "channel:town-square",
+      channelId: "town-square",
       accountId: "default",
       agentId: "agent-1",
       replyToId: "root-post",
@@ -187,7 +187,7 @@ describe("deliverMattermostReplyPayload", () => {
       core,
       cfg,
       payload: { text: "  \n Reasoning:\n_hidden_" },
-      to: "channel:town-square",
+      channelId: "town-square",
       accountId: "default",
       agentId: "agent-1",
       replyToId: "root-post",
@@ -208,7 +208,7 @@ describe("deliverMattermostReplyPayload", () => {
       core,
       cfg,
       payload: { text: "> Reasoning:\n> _hidden_" },
-      to: "channel:town-square",
+      channelId: "town-square",
       accountId: "default",
       agentId: "agent-1",
       replyToId: "root-post",
@@ -229,7 +229,7 @@ describe("deliverMattermostReplyPayload", () => {
       core,
       cfg,
       payload: { text: "Intro line\nReasoning: appears in content but is not a prefix" },
-      to: "channel:town-square",
+      channelId: "town-square",
       accountId: "default",
       agentId: "agent-1",
       replyToId: "root-post",
@@ -269,7 +269,7 @@ describe("deliverMattermostReplyPayload", () => {
         core,
         cfg,
         payload: { text: "caption", mediaUrl },
-        to: "channel:town-square",
+        channelId: "town-square",
         accountId: "default",
         agentId,
         replyToId: "root-post",
@@ -286,6 +286,7 @@ describe("deliverMattermostReplyPayload", () => {
           cfg,
           accountId: "default",
           mediaUrl,
+          requireMediaUpload: true,
           replyToId: "root-post",
           mediaLocalRoots: expect.arrayContaining([
             path.join(stateDir, "media"),
@@ -301,6 +302,50 @@ describe("deliverMattermostReplyPayload", () => {
     }
   });
 
+  it("renders presentation text and sends buttons on the first provider post", async () => {
+    const sendMessage = createSendMessageMock();
+
+    await deliverMattermostReplyPayload({
+      core: createReplyDeliveryCore(),
+      cfg: {},
+      payload: {
+        presentation: {
+          blocks: [
+            { type: "text", text: "Choose one" },
+            {
+              type: "buttons",
+              buttons: [
+                { label: "Sol", value: "openai/gpt-5.6-sol", style: "primary" },
+              ],
+            },
+          ],
+        },
+      },
+      channelId: "town-square",
+      accountId: "default",
+      replyToId: "root-post",
+      textLimit: 4000,
+      tableMode: "off",
+      sendMessage,
+    });
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      "channel:town-square",
+      expect.stringContaining("Choose one"),
+      expect.objectContaining({
+        buttons: [
+          [
+            expect.objectContaining({
+              text: "Sol",
+              callback_data: "openai/gpt-5.6-sol",
+              style: "primary",
+            }),
+          ],
+        ],
+      }),
+    );
+  });
+
   it("forwards replyToId for text-only chunked replies", async () => {
     const sendMessage = createSendMessageMock();
     const cfg = {} satisfies OpenClawConfig;
@@ -311,7 +356,7 @@ describe("deliverMattermostReplyPayload", () => {
       core,
       cfg,
       payload: { text: "hello" },
-      to: "channel:town-square",
+      channelId: "town-square",
       accountId: "default",
       agentId: "agent-1",
       replyToId: "root-post",
@@ -349,7 +394,7 @@ describe("deliverMattermostReplyPayload", () => {
       core,
       cfg,
       payload: { text: "alpha beta" },
-      to: "channel:town-square",
+      channelId: "town-square",
       accountId: "default",
       replyToId: "root-post",
       textLimit: 6,
@@ -386,7 +431,7 @@ describe("deliverMattermostReplyPayload", () => {
       core: createReplyDeliveryCore(),
       cfg: {},
       payload: { text: "requested text" },
-      to: "channel:town-square",
+      channelId: "town-square",
       accountId: "default",
       textLimit: 4000,
       tableMode: "off",
@@ -416,7 +461,7 @@ describe("deliverMattermostReplyPayload", () => {
         core,
         cfg,
         payload: { text: "alpha beta" },
-        to: "channel:town-square",
+        channelId: "town-square",
         accountId: "default",
         replyToId: "root-post",
         textLimit: 6,

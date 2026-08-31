@@ -1,6 +1,34 @@
 // Mattermost test support covers monitor helpers plugin behavior.
 import { describe, expect, it } from "vitest";
-import { normalizeMention, shouldDropEmptyMattermostBody } from "./monitor-helpers.js";
+import {
+  matchesMattermostBotMention,
+  normalizeMention,
+  shouldDropEmptyMattermostBody,
+} from "./monitor-helpers.js";
+
+describe("matchesMattermostBotMention", () => {
+  it.each([
+    "@echobot hello",
+    "hey @echobot check this",
+    "(@echobot)",
+    "@echobot.",
+    "thanks @echobot: run it",
+    "@EchoBot hello",
+  ])("matches a real bot mention: %j", (text) => {
+    expect(matchesMattermostBotMention(text, "echobot")).toBe(true);
+  });
+
+  it.each([
+    "@echobotdia hello",
+    "@echobot.dia hello",
+    "@echobot-ops please review",
+    "@echobot_2 ping",
+    "@echobot:remote hello",
+    "mail me at bob@echobot later",
+  ])("does not match another account or embedded handle: %j", (text) => {
+    expect(matchesMattermostBotMention(text, "echobot")).toBe(false);
+  });
+});
 
 describe("normalizeMention", () => {
   it("returns trimmed text when no mention provided", () => {
@@ -79,6 +107,21 @@ describe("normalizeMention", () => {
     const input = "@echobot\n    code line 1\n    code line 2";
     const result = normalizeMention(input, "echobot");
     expect(result).toBe("    code line 1\n    code line 2");
+  });
+
+  it.each([
+    "@echobot.dia hello",
+    "@echobot-ops please review",
+    "@echobotdia hello",
+    "@echobot:remote hello",
+    "mail me at bob@echobot later",
+  ])("leaves other users' handles intact: %j", (input) => {
+    expect(normalizeMention(input, "echobot")).toBe(input);
+  });
+
+  it("preserves alignment on lines without the mention", () => {
+    const input = "@echobot see table\n| a | b |\n| aaa    | bbb |";
+    expect(normalizeMention(input, "echobot")).toBe("see table\n| a | b |\n| aaa    | bbb |");
   });
 });
 

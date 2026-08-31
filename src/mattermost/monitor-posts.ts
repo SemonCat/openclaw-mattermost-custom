@@ -10,7 +10,6 @@ import {
 } from "openclaw/plugin-sdk/context-visibility-runtime";
 import { resolvePinnedMainDmOwnerFromAllowlist } from "openclaw/plugin-sdk/security-runtime";
 import {
-  normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
   normalizeTrimmedStringList,
   uniqueStrings,
@@ -31,6 +30,7 @@ import {
 import { buildMattermostEventPlan } from "./monitor-event-plan.js";
 import {
   formatInboundFromLabel,
+  matchesMattermostBotMention,
   normalizeMention,
   shouldDropEmptyMattermostBody,
 } from "./monitor-helpers.js";
@@ -55,15 +55,25 @@ import {
 import { sendMessageMattermost } from "./send.js";
 import { hasMattermostThreadParticipation } from "./thread-participation.js";
 
+export function resolveMattermostHistoryLimit(params: {
+  accountHistoryLimit?: number;
+  globalHistoryLimit?: number;
+}): number {
+  return Math.max(
+    0,
+    params.accountHistoryLimit ?? params.globalHistoryLimit ?? DEFAULT_GROUP_HISTORY_LIMIT,
+  );
+}
+
 export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
   const { account, botUserId, botUsername, core, groupPolicy, pairing, resources } = monitor;
   const { resolveMattermostMedia, resolveUserInfo } = resources;
   const channelHistories = new Map<string, HistoryEntry[]>();
   const reactionLifecycleStore = createMattermostReactionLifecycleStore();
-  const historyLimit = Math.max(
-    0,
-    monitor.cfg.messages?.groupChat?.historyLimit ?? DEFAULT_GROUP_HISTORY_LIMIT,
-  );
+  const historyLimit = resolveMattermostHistoryLimit({
+    accountHistoryLimit: account.config.historyLimit,
+    globalHistoryLimit: monitor.cfg.messages?.groupChat?.historyLimit,
+  });
 
   return async (
     post: MattermostPost,
@@ -194,7 +204,7 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
           if (created) {
             try {
               await sendMessageMattermost(
-                `user:${senderId}`,
+                `channel:${channelId}`,
                 core.channel.pairing.buildPairingReply({
                   channel: "mattermost",
                   idLine: `Your Mattermost user id: ${senderId}`,
@@ -268,11 +278,7 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
     const mentionRegexes = core.channel.mentions.buildMentionRegexes(cfg, route.agentId);
     const wasMentioned =
       kind !== "direct" &&
-      ((botUsername
-        ? normalizeLowercaseStringOrEmpty(rawText).includes(
-            `@${normalizeLowercaseStringOrEmpty(botUsername)}`,
-          )
-        : false) ||
+      (matchesMattermostBotMention(rawText, botUsername) ||
         core.channel.mentions.matchesMentionPatterns(rawText, mentionRegexes));
     const oncharEnabled = account.chatmode === "onchar" && kind !== "direct";
     const oncharPrefixes = oncharEnabled ? resolveOncharPrefixes(account.oncharPrefixes) : [];

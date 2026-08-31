@@ -304,8 +304,12 @@ export function createMattermostChannelModelCommand(
         return { text: "`/channel_model` only works in Mattermost channels, not direct messages." };
       }
 
-      const cfg = api.runtime.config.current() as OpenClawConfig;
-      const data = await dependencies.buildModelsProviderData(cfg, ctx.agentId);
+      const cfg = (ctx.config ?? api.runtime.config.current()) as OpenClawConfig;
+      const agentId = ctx.agentId;
+      if (!agentId) {
+        return { text: "Unable to resolve the active agent for this Mattermost session." };
+      }
+      const data = await dependencies.buildModelsProviderData(cfg, agentId);
       const agentDefault = `${data.resolvedDefault.provider}/${data.resolvedDefault.model}`;
       const currentOverride = currentMattermostChannelModelOverride(cfg, channelId);
       const args = ctx.args?.trim() ?? "";
@@ -328,7 +332,7 @@ export function createMattermostChannelModelCommand(
         : resolveChannelModelReference({
             raw: args,
             cfg,
-            agentId: ctx.agentId,
+            agentId,
             defaultProvider: data.resolvedDefault.provider,
           });
       if (!resetToDefault && !parsed) {
@@ -357,22 +361,31 @@ export function createMattermostChannelModelCommand(
       }
 
       const selectedModel = parsed?.ref ?? agentDefault;
-      const account = dependencies.resolveMattermostAccount({ cfg, accountId: ctx.accountId });
+      let resolvedAccount: ReturnType<ChannelModelCommandDependencies["resolveMattermostAccount"]>;
+      try {
+        resolvedAccount = dependencies.resolveMattermostAccount({ cfg, accountId: ctx.accountId });
+      } catch {
+        return {
+          text: "Mattermost account credentials could not be resolved; no changes were made.",
+        };
+      }
+      const account = resolvedAccount;
       if (!account.enabled || !account.baseUrl || !account.botToken) {
         return { text: "Mattermost account credentials are unavailable; no changes were made." };
       }
+      const { accountId, baseUrl, botToken, config: accountConfig } = account;
       const nextOverride = parsed?.ref;
       const transition = await runMattermostChannelModelTransition(
         {
-          accountId: account.accountId,
+          accountId,
           channelId,
           targetModel: selectedModel,
         },
         async () => {
           const client = dependencies.createMattermostClient({
-            baseUrl: account.baseUrl,
-            botToken: account.botToken,
-            allowPrivateNetwork: isPrivateNetworkOptInEnabled(account.config),
+            baseUrl,
+            botToken,
+            allowPrivateNetwork: isPrivateNetworkOptInEnabled(accountConfig),
           });
 
           let channel;
@@ -425,7 +438,7 @@ export function createMattermostChannelModelCommand(
           try {
             sessionOverrideResult = await dependencies.clearParentSessionModelOverride({
               cfg: appliedCfg,
-              agentId: ctx.agentId,
+              agentId,
               channelId,
               effectiveModel: selectedModel,
             });

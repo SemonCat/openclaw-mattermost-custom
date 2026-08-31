@@ -21,14 +21,16 @@ export {
   listSkillCommandsForAgents,
 } from "openclaw/plugin-sdk/command-auth-native";
 export type { CommandArgDefinition } from "openclaw/plugin-sdk/command-auth-native";
-export { buildModelsProviderData } from "openclaw/plugin-sdk/models-provider-runtime";
+export {
+  buildPreparedModelsProviderData as buildModelsProviderData,
+} from "openclaw/plugin-sdk/models-provider-runtime";
 export { isDangerousNameMatchingEnabled } from "openclaw/plugin-sdk/dangerous-name-runtime";
 export {
   resolveAllowlistProviderRuntimeGroupPolicy,
   resolveDefaultGroupPolicy,
   warnMissingProviderGroupPolicyFallbackOnce,
 } from "openclaw/plugin-sdk/runtime-group-policy";
-export { resolveChannelMediaMaxBytes } from "openclaw/plugin-sdk/media-runtime";
+export { resolveChannelMediaMaxBytes } from "openclaw/plugin-sdk/account-helpers";
 export { loadOutboundMediaFromUrl } from "openclaw/plugin-sdk/outbound-media";
 // Legacy map-helper exports stay for older plugin consumers. New message-turn
 // code should use createChannelHistoryWindow.

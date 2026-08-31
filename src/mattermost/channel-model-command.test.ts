@@ -22,7 +22,6 @@ function createContext(overrides: Partial<PluginCommandContext> = {}): PluginCom
     agentId: "main",
     args: "",
     commandBody: "/channel_model",
-    config: {},
     to: "channel:channel-1",
     requestConversationBinding: vi.fn(),
     detachConversationBinding: vi.fn(),
@@ -190,6 +189,49 @@ describe("/channel_model", () => {
       "🤖 **Default model:** `openai/gpt-5.6-sol`\nTeam notes",
     );
     expect(result.text).toContain("Channel default model set");
+  });
+
+  it("uses the invocation config when the runtime snapshot cannot resolve channel secrets", async () => {
+    const harness = createHarness();
+    const invocationConfig = structuredClone(harness.cfg);
+    harness.dependencies.resolveMattermostAccount = vi.fn(({ cfg }) => {
+      if (cfg !== invocationConfig) {
+        throw new Error('unresolved SecretRef "file:mattermost-bot:value"');
+      }
+      return {
+        accountId: "default",
+        enabled: true,
+        baseUrl: "https://mattermost.example.com",
+        botToken: "secret",
+        config: {},
+      };
+    }) as ChannelModelCommandDependencies["resolveMattermostAccount"];
+    harness.command = createMattermostChannelModelCommand(harness.api, harness.dependencies);
+
+    const result = await harness.command.handler(
+      createContext({ args: "openai/gpt-5.6-sol", config: invocationConfig }),
+    );
+
+    expect(result.text).toContain("Channel default model set");
+    expect(harness.dependencies.resolveMattermostAccount).toHaveBeenCalledWith({
+      cfg: invocationConfig,
+      accountId: undefined,
+    });
+  });
+
+  it("reports credential resolution failures without escaping the command handler", async () => {
+    const harness = createHarness();
+    harness.dependencies.resolveMattermostAccount = vi.fn(() => {
+      throw new Error('unresolved SecretRef "file:mattermost-bot:value"');
+    });
+    harness.command = createMattermostChannelModelCommand(harness.api, harness.dependencies);
+
+    await expect(
+      harness.command.handler(createContext({ args: "openai/gpt-5.6-sol" })),
+    ).resolves.toEqual({
+      text: "Mattermost account credentials could not be resolved; no changes were made.",
+    });
+    expect(harness.mutateConfigFile).not.toHaveBeenCalled();
   });
 
   it("resolves a configured model alias before saving the channel override", async () => {

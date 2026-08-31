@@ -435,7 +435,7 @@ export async function dispatchMattermostInboundTurn(
             core,
             cfg,
             payload: resolvedPayload,
-            to,
+            channelId,
             accountId: account.accountId,
             agentId: route.agentId,
             replyToId: resolveMattermostReplyRootId({
