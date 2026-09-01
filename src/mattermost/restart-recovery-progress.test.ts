@@ -39,10 +39,20 @@ describe("Mattermost restart recovery progress", () => {
       parseMattermostRestartRecoverySessionKey(
         "agent:main:mattermost:channel:chan-1:thread:root-1",
       ),
-    ).toEqual({ kind: "channel", channelId: "chan-1", threadId: "root-1" });
+    ).toEqual({
+      agentId: "main",
+      kind: "channel",
+      channelId: "chan-1",
+      threadId: "root-1",
+    });
     expect(
       parseMattermostRestartRecoverySessionKey("agent:support:mattermost:group:group-1"),
-    ).toEqual({ kind: "group", channelId: "group-1", threadId: undefined });
+    ).toEqual({
+      agentId: "support",
+      kind: "group",
+      channelId: "group-1",
+      threadId: undefined,
+    });
     expect(
       parseMattermostRestartRecoverySessionKey(
         "agent:main:other:channel:chan-1:thread:root-1",
@@ -103,9 +113,14 @@ describe("Mattermost restart recovery progress", () => {
 
     expect(harness.createRunUi).toHaveBeenCalledWith({
       runId: "recovery-run",
-      route: { kind: "channel", channelId: "chan-1", threadId: "root-1" },
+      route: {
+        agentId: "main",
+        kind: "channel",
+        channelId: "chan-1",
+        threadId: "root-1",
+      },
     });
-    expect(harness.runs.get("recovery-run")?.event).toHaveBeenCalledTimes(2);
+    expect(harness.runs.get("recovery-run")?.event).toHaveBeenCalledTimes(3);
   });
 
   it("deduplicates starts and ignores late events after terminal", async () => {
@@ -128,7 +143,35 @@ describe("Mattermost restart recovery progress", () => {
     });
     await vi.waitFor(() => expect(harness.runs.get("recovery-run")?.stop).toHaveBeenCalledOnce());
     expect(harness.createRunUi).toHaveBeenCalledOnce();
-    expect(harness.runs.get("recovery-run")?.event).not.toHaveBeenCalled();
+    expect(harness.runs.get("recovery-run")?.event).toHaveBeenCalledOnce();
+    expect(harness.runs.get("recovery-run")?.event).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { phase: "error" } }),
+    );
+  });
+
+  it("delivers the terminal lifecycle to the recovered UI before cleanup", async () => {
+    const harness = createHarness();
+    harness.emit({
+      runId: "recovery-run",
+      sessionKey: "agent:main:mattermost:channel:chan-1:thread:root-1",
+      mainSessionRestartRecovery: true,
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    harness.emit({
+      runId: "recovery-run",
+      mainSessionRestartRecovery: true,
+      stream: "lifecycle",
+      data: { phase: "error", reason: "cancelled" },
+    });
+
+    await vi.waitFor(() => expect(harness.runs.get("recovery-run")?.stop).toHaveBeenCalledOnce());
+    expect(harness.runs.get("recovery-run")?.event).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { phase: "error", reason: "cancelled" } }),
+    );
+    expect(
+      harness.runs.get("recovery-run")?.event.mock.invocationCallOrder[0],
+    ).toBeLessThan(harness.runs.get("recovery-run")?.stop.mock.invocationCallOrder[0] ?? Infinity);
   });
 
   it("tears down active recovery UIs when the monitor stops", async () => {

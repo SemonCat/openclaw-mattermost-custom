@@ -1793,7 +1793,34 @@ describe("mattermost inbound user posts", () => {
     expect(mockState.createMattermostPost).toHaveBeenCalledOnce();
     expect(mockState.createMattermostPost).toHaveBeenCalledWith(
       {},
-      expect.objectContaining({ channelId: "chan-1", rootId: "thread-root-1" }),
+      expect.objectContaining({
+        channelId: "chan-1",
+        rootId: "thread-root-1",
+        props: {
+          openclaw_mattermost: {
+            version: 1,
+            kind: "task_progress",
+            accountId: "default",
+            agentId: "main",
+            channelId: "chan-1",
+            threadId: "thread-root-1",
+          },
+        },
+      }),
+    );
+    expect(mockState.createMattermostDraftStream).toHaveBeenCalledWith(
+      expect.objectContaining({
+        postProps: {
+          openclaw_mattermost: {
+            version: 1,
+            kind: "turn_result",
+            accountId: "default",
+            agentId: "main",
+            channelId: "chan-1",
+            threadId: "thread-root-1",
+          },
+        },
+      }),
     );
     expect(mockState.updateMattermostPost).toHaveBeenCalledTimes(2);
     expect(mockState.updateMattermostPost.mock.calls.at(-1)?.[2].message).toContain(

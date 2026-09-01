@@ -110,6 +110,7 @@ export function createMattermostTaskProgressCard(params: {
   client: MattermostClient;
   channelId: string;
   rootId?: string;
+  postProps?: Record<string, unknown>;
   log: (message: string) => void;
 }) {
   let activeRunId: string | undefined;
@@ -154,6 +155,7 @@ export function createMattermostTaskProgressCard(params: {
           channelId: params.channelId,
           message,
           rootId: params.rootId,
+          props: params.postProps,
         });
         taskPostId = post.id;
         publishedMessage = message;

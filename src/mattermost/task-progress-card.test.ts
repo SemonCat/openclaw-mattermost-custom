@@ -5,6 +5,7 @@ import {
   createMattermostTaskProgressCard,
   renderMattermostTaskProgressCard,
 } from "./task-progress-card.js";
+import { buildMattermostPostIdentityProps } from "./post-identity.js";
 
 function createTestClient(
   request: MattermostClient["request"],
@@ -66,6 +67,12 @@ describe("Mattermost durable task progress card", () => {
       client: createTestClient(request),
       channelId: "channel-1",
       rootId: "thread-root-1",
+      postProps: buildMattermostPostIdentityProps("task_progress", {
+        accountId: "default",
+        agentId: "main",
+        channelId: "channel-1",
+        threadId: "thread-root-1",
+      }),
       log: vi.fn(),
     });
 
@@ -112,6 +119,16 @@ describe("Mattermost durable task progress card", () => {
     expect(readBody(createCalls[0]?.[1])).toMatchObject({
       channel_id: "channel-1",
       root_id: "thread-root-1",
+      props: {
+        openclaw_mattermost: {
+          version: 1,
+          kind: "task_progress",
+          accountId: "default",
+          agentId: "main",
+          channelId: "channel-1",
+          threadId: "thread-root-1",
+        },
+      },
     });
     expect(updateCalls).toHaveLength(2);
     expect(String(readBody(updateCalls[0]?.[1]).message)).toContain("- [ ] **Test**");

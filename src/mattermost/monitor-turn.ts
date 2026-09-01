@@ -46,6 +46,7 @@ import {
 } from "./monitor-turn-reactions.js";
 import type { MattermostMonitorContext } from "./monitor-types.js";
 import { createMattermostProgressReceipt } from "./progress-receipt.js";
+import { buildMattermostPostIdentityProps } from "./post-identity.js";
 import { deliverMattermostReplyPayload, joinMattermostVisibleContent } from "./reply-delivery.js";
 import type { HistoryEntry, ReplyPayload } from "./runtime-api.js";
 import { createChannelMessageReplyPipeline } from "./runtime-api.js";
@@ -182,6 +183,12 @@ export async function dispatchMattermostInboundTurn(
     client,
     channelId,
     rootId: effectiveReplyToId,
+    postProps: buildMattermostPostIdentityProps("task_progress", {
+      accountId: account.accountId,
+      agentId: route.agentId,
+      channelId,
+      ...(effectiveReplyToId ? { threadId: effectiveReplyToId } : {}),
+    }),
     log: monitor.logVerboseMessage,
   });
   const draftStream = draftPreviewEnabled
@@ -189,6 +196,12 @@ export async function dispatchMattermostInboundTurn(
         client,
         channelId,
         rootId: effectiveReplyToId,
+        postProps: buildMattermostPostIdentityProps("turn_result", {
+          accountId: account.accountId,
+          agentId: route.agentId,
+          channelId,
+          ...(effectiveReplyToId ? { threadId: effectiveReplyToId } : {}),
+        }),
         beforeCreatePost: taskProgressCard.settleBeforeResultPost,
         throttleMs: 1200,
         chunkText: (value) =>

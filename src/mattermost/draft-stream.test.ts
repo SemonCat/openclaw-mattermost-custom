@@ -70,6 +70,22 @@ function parseRequestJson(init: RequestInit | undefined): Record<string, unknown
 }
 
 describe("createMattermostDraftStream", () => {
+  it("adopts a recovered post identity and edits it instead of creating a duplicate", async () => {
+    const { calls, stream } = createDraftStreamFixture({
+      initialPost: { id: "recovered-result", message: "Old progress" },
+      request: async (path, init) => {
+        calls.push({ path, init });
+      return { id: "recovered-result", message: "Updated progress" } as never;
+      },
+    });
+
+    stream.update("Updated progress");
+    await stream.flush();
+
+    expect(calls.map((entry) => entry.path)).toEqual(["/posts/recovered-result"]);
+    expect(stream.postId()).toBe("recovered-result");
+  });
+
   it("creates a preview post and updates it on later changes", async () => {
     const { calls, stream } = createDraftStreamFixture({ rootId: "root-1" });
 

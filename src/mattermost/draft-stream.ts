@@ -107,6 +107,8 @@ export function createMattermostDraftStream(params: {
   client: MattermostClient;
   channelId: string;
   rootId?: string;
+  initialPost?: { id: string; message?: string | null };
+  postProps?: Record<string, unknown>;
   maxChars?: number;
   throttleMs?: number;
   renderText?: (text: string) => string;
@@ -138,8 +140,10 @@ export function createMattermostDraftStream(params: {
     ready: Promise<void>;
   };
   let currentGeneration: DraftGeneration = {
-    lastSentText: "",
-    latestSourceText: "",
+    postId: params.initialPost?.id,
+    lastSentText: params.initialPost?.message ?? "",
+    lastProviderText: params.initialPost?.message ?? undefined,
+    latestSourceText: params.initialPost?.message ?? "",
     ready: Promise.resolve(),
   };
   const sealedAssistantTexts: Array<{ text: string; requiresBlockBoundary: boolean }> = [];
@@ -153,6 +157,7 @@ export function createMattermostDraftStream(params: {
       channelId: params.channelId,
       message,
       rootId: params.rootId,
+      props: params.postProps,
     });
   };
 
