@@ -91,6 +91,29 @@ runs retain a truthful failed or cancelled terminal state. Turns without a plan
 do not create an extra post. Card API failures are isolated from final-answer
 delivery and use bounded create fallback to avoid duplicate posts.
 
+### Task-card ordering and late-plan handoff
+
+Plan and result callbacks do not always arrive in visual order. Core can enter
+result delivery before the ordered plan callback runs, and commentary can create
+a visible result post before the first plan update reaches this plugin. The
+task-card lifecycle therefore cannot treat "result started" or "result post
+exists" as a reason to discard a late plan.
+
+When no result post exists yet, the plan write owns the first Mattermost create
+and the result waits behind it. When commentary already created the first result
+post, the draft stream performs an identity handoff:
+
+1. Flush the current commentary preview.
+2. Copy its visible text into a new `turn_result` post.
+3. Convert the older post into `task_progress` and keep editing it as the card.
+4. Continue later tool progress and final delivery on the new result identity.
+
+This preserves both content and chronological ordering without deleting or
+reposting the durable card. If the copy is not accepted, the original post stays
+the editable result identity and card creation fails without disrupting final
+delivery. If Mattermost accepts the copy but returns no usable identity, the
+stream stops that path rather than retrying and risking duplicate posts.
+
 OpenClaw 2026.8.1 restart-recovery runs also reconnect channel/group session
 events to the original Mattermost thread. Recovery keeps the typing indicator
 alive and restores tool progress in a temporary preview post; terminal recovery
