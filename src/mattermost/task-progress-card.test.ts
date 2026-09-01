@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type { MattermostClient } from "./client.js";
-import { createMattermostTaskProgressCard } from "./task-progress-card.js";
+import { createMattermostDraftStream } from "./draft-stream.js";
+import {
+  createMattermostTaskProgressCard,
+  renderMattermostTaskProgressCard,
+} from "./task-progress-card.js";
 
 function createTestClient(
   request: MattermostClient["request"],
@@ -38,6 +42,7 @@ describe("Mattermost durable task progress card", () => {
     });
 
     card.noteRunStart("run-1");
+    await card.settleBeforeResultPost();
     await card.finish({ outcome: "completed" });
 
     expect(request).not.toHaveBeenCalled();
@@ -109,10 +114,107 @@ describe("Mattermost durable task progress card", () => {
       root_id: "thread-root-1",
     });
     expect(updateCalls).toHaveLength(2);
-    expect(String(readBody(updateCalls[0]?.[1]).message)).toContain("▸ Test");
-    expect(String(readBody(updateCalls[1]?.[1]).message)).toContain("▸ Ship");
-    expect(String(readBody(updateCalls[1]?.[1]).message)).not.toContain("▸ Test");
+    expect(String(readBody(updateCalls[0]?.[1]).message)).toContain("- [ ] **Test**");
+    expect(String(readBody(updateCalls[1]?.[1]).message)).toContain("- [ ] **Ship**");
+    expect(String(readBody(updateCalls[1]?.[1]).message)).not.toContain("- [ ] **Test**");
     expect(card.postId()).toBe("task-card-1");
+  });
+
+  it("creates the card before a concurrently-started result preview", async () => {
+    const releaseCardCreate = deferred<void>();
+    const request = vi.fn<MattermostClient["request"]>(async (path, init) => {
+      if (path !== "/posts") {
+        return { id: "updated" } as never;
+      }
+      const body = readBody(init);
+      if (String(body.message).startsWith("#### Task progress")) {
+        await releaseCardCreate.promise;
+        return { id: "task-card" } as never;
+      }
+      return { id: "result-post" } as never;
+    });
+    const client = createTestClient(request);
+    const card = createMattermostTaskProgressCard({
+      client,
+      channelId: "channel-1",
+      log: vi.fn(),
+    });
+    const stream = createMattermostDraftStream({
+      client,
+      channelId: "channel-1",
+      throttleMs: 0,
+      beforeCreatePost: card.settleBeforeResultPost,
+    });
+
+    const planUpdate = card.updatePlan({
+      steps: [{ step: "Inspect", status: "in_progress" }],
+    });
+    stream.update("Running a tool");
+    const resultFlush = stream.flush();
+
+    await vi.waitFor(() => expect(request).toHaveBeenCalledOnce());
+    expect(
+      String(readBody(request.mock.calls[0]?.[1]).message).startsWith(
+        "#### Task progress · In progress",
+      ),
+    ).toBe(true);
+    releaseCardCreate.resolve();
+    await Promise.all([planUpdate, resultFlush]);
+
+    const creates = request.mock.calls.filter(([path]) => path === "/posts");
+    const createdMessages = creates.map(([, init]) => String(readBody(init).message));
+    expect(createdMessages[0]?.startsWith("#### Task progress · In progress")).toBe(true);
+    expect(createdMessages[1]).toBe("Running a tool");
+    expect(card.postId()).toBe("task-card");
+    expect(stream.postId()).toBe("result-post");
+  });
+
+  it.each([
+    { status: "in_progress" as const, label: "In progress" },
+    { status: "completed" as const, label: "Completed" },
+    { status: "failed" as const, label: "Failed" },
+    { status: "cancelled" as const, label: "Cancelled" },
+  ])("renders a compact $status card", ({ status, label }) => {
+    const rendered = renderMattermostTaskProgressCard({
+      status,
+      title: "Deploy",
+      explanation: "Plan updated",
+      steps: [
+        { step: "Inspect", status: "completed" },
+        { step: "Patch", status: "in_progress" },
+        { step: "Test", status: "pending" },
+      ],
+    });
+
+    expect(rendered).toBe(
+      [
+        `#### Task progress · ${label}`,
+        "Deploy",
+        "",
+        "- [x] Inspect",
+        "- [ ] **Patch**",
+        "- [ ] Test",
+      ].join("\n"),
+    );
+    expect(rendered).not.toContain("Status:");
+    expect(rendered).not.toContain("Plan updated");
+    expect(rendered).not.toMatch(/[✅❌⛔🔄]/u);
+  });
+
+  it("omits the redundant Plan updated explanation from published plans", async () => {
+    const request = vi.fn<MattermostClient["request"]>(async () => ({ id: "card" }) as never);
+    const card = createMattermostTaskProgressCard({
+      client: createTestClient(request),
+      channelId: "channel-1",
+      log: vi.fn(),
+    });
+
+    await card.updatePlan({
+      explanation: "Plan updated.",
+      steps: [{ step: "Work", status: "in_progress" }],
+    });
+
+    expect(String(readBody(request.mock.calls[0]?.[1]).message)).not.toContain("Plan updated");
   });
 
   it.each([
@@ -157,11 +259,13 @@ describe("Mattermost durable task progress card", () => {
       return String(readBody(request.mock.calls.at(-1)?.[1]).message);
     };
 
-    await expect(renderTerminal("completed")).resolves.toContain("✅ Completed");
-    await expect(renderTerminal("failed", { phase: "error" })).resolves.toContain("❌ Failed");
+    await expect(renderTerminal("completed")).resolves.toContain("Task progress · Completed");
+    await expect(renderTerminal("failed", { phase: "error" })).resolves.toContain(
+      "Task progress · Failed",
+    );
     await expect(
       renderTerminal("failed", { phase: "error", aborted: true }),
-    ).resolves.toContain("⛔ Cancelled");
+    ).resolves.toContain("Task progress · Cancelled");
   });
 
   it("contains create/update failures with bounded retry and diagnostics", async () => {
@@ -178,13 +282,14 @@ describe("Mattermost durable task progress card", () => {
     await expect(
       card.updatePlan({ steps: [{ step: "Work", status: "in_progress" }] }),
     ).resolves.toBe(false);
+    await card.settleBeforeResultPost();
     await expect(card.finish({ outcome: "completed" })).resolves.toBeUndefined();
     await expect(
       card.updatePlan({ steps: [{ step: "Still working", status: "in_progress" }] }),
     ).resolves.toBe(false);
 
-    expect(request).toHaveBeenCalledTimes(2);
-    expect(log).toHaveBeenCalledTimes(2);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledTimes(1);
     expect(log.mock.calls[0]?.[0]).toContain("task progress card create failed");
   });
 });

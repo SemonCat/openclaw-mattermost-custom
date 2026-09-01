@@ -1783,7 +1783,7 @@ describe("mattermost inbound user posts", () => {
     });
     await vi.waitFor(() => {
       expect(mockState.updateMattermostPost.mock.calls.at(-1)?.[2].message).toContain(
-        "✅ Completed",
+        "Task progress · Completed",
       );
     });
     abortController.abort();
@@ -1796,13 +1796,18 @@ describe("mattermost inbound user posts", () => {
       expect.objectContaining({ channelId: "chan-1", rootId: "thread-root-1" }),
     );
     expect(mockState.updateMattermostPost).toHaveBeenCalledTimes(2);
-    expect(mockState.updateMattermostPost.mock.calls.at(-1)?.[2].message).toContain("✅ Completed");
+    expect(mockState.updateMattermostPost.mock.calls.at(-1)?.[2].message).toContain(
+      "Task progress · Completed",
+    );
     expect(draftStream.update).toHaveBeenCalled();
     expect(String(draftStream.update.mock.calls.at(-1)?.[0])).toContain("Read");
     expect(mockState.sendMessageMattermost).toHaveBeenCalledWith(
       "channel:chan-1",
       "Final answer",
       expect.objectContaining({ replyToId: "thread-root-1" }),
+    );
+    expect(mockState.createMattermostPost.mock.invocationCallOrder[0]).toBeLessThan(
+      mockState.sendMessageMattermost.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
     );
   });
 
@@ -1886,7 +1891,7 @@ describe("mattermost inbound user posts", () => {
       id: "post-card-create-failure",
       message: "do this even if status fails",
     });
-    await vi.waitFor(() => expect(mockState.createMattermostPost).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(mockState.createMattermostPost).toHaveBeenCalledOnce());
     abortController.abort();
     socket.emitClose(1000);
     await monitor;
@@ -1896,7 +1901,7 @@ describe("mattermost inbound user posts", () => {
       "Final survives",
       expect.any(Object),
     );
-    expect(mockState.createMattermostPost).toHaveBeenCalledTimes(2);
+    expect(mockState.createMattermostPost).toHaveBeenCalledOnce();
     expect(mockState.updateMattermostPost).not.toHaveBeenCalled();
   });
 

@@ -111,6 +111,7 @@ export function createMattermostDraftStream(params: {
   throttleMs?: number;
   renderText?: (text: string) => string;
   chunkText?: (text: string) => string[];
+  beforeCreatePost?: () => void | Promise<void>;
   log?: (message: string) => void;
   warn?: (message: string) => void;
 }): MattermostDraftStream {
@@ -146,6 +147,14 @@ export function createMattermostDraftStream(params: {
   const trackPublishedAssistantPart = (part: MattermostDraftPublishedPart) => {
     publishedAssistantParts.set(part.messageId, part);
   };
+  const createStreamPost = async (message: string) => {
+    await params.beforeCreatePost?.();
+    return await createMattermostPost(params.client, {
+      channelId: params.channelId,
+      message,
+      rootId: params.rootId,
+    });
+  };
 
   const sendOrEditStreamMessage = async (text: string): Promise<boolean> => {
     if (streamState.stopped && !streamState.final) {
@@ -171,11 +180,7 @@ export function createMattermostDraftStream(params: {
         });
         target.lastProviderText = updated.message ?? normalized;
       } else {
-        const sent = await createMattermostPost(params.client, {
-          channelId: params.channelId,
-          message: normalized,
-          rootId: params.rootId,
-        });
+        const sent = await createStreamPost(normalized);
         target.postId = sent.id;
         target.lastProviderText = sent.message ?? normalized;
       }
@@ -297,11 +302,7 @@ export function createMattermostDraftStream(params: {
               }) ?? 0;
           }
         } else {
-          const firstPost = await createMattermostPost(params.client, {
-            channelId: params.channelId,
-            message: firstChunk,
-            rootId: params.rootId,
-          });
+          const firstPost = await createStreamPost(firstChunk);
           if (assistantText) {
             const publishedContent = firstPost.message ?? firstChunk;
             trackPublishedAssistantPart({
@@ -317,11 +318,7 @@ export function createMattermostDraftStream(params: {
           }
         }
         for (const chunk of chunks.slice(1)) {
-          const post = await createMattermostPost(params.client, {
-            channelId: params.channelId,
-            message: chunk,
-            rootId: params.rootId,
-          });
+          const post = await createStreamPost(chunk);
           if (assistantText) {
             const publishedContent = post.message ?? chunk;
             trackPublishedAssistantPart({ messageId: post.id, content: publishedContent });

@@ -1,9 +1,7 @@
 // Mattermost plugin module owns one durable, plan-backed task card per inbound turn.
 import { isChannelPartialDeliveryError } from "openclaw/plugin-sdk/channel-inbound";
-import {
-  formatPlanChecklistLines,
-  type AgentPlanStep,
-} from "openclaw/plugin-sdk/channel-outbound";
+import type { AgentPlanStep } from "openclaw/plugin-sdk/channel-outbound";
+import { sliceUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
 import {
   createMattermostPost,
   updateMattermostPost,
@@ -12,6 +10,8 @@ import {
 
 const MAX_CREATE_ATTEMPTS = 2;
 const MAX_DIAGNOSTIC_LOGS = 3;
+const MAX_PLAN_STEPS = 50;
+const MAX_STEP_CHARS = 240;
 
 export type MattermostTaskProgressPlan = {
   phase?: string;
@@ -44,7 +44,7 @@ function normalizeSingleLine(value?: string): string | undefined {
 
 function normalizeExplanation(value?: string): string | undefined {
   const normalized = value?.trim();
-  if (!normalized) {
+  if (!normalized || /^plan updated[.!]?$/i.test(normalized)) {
     return undefined;
   }
   return normalized.length > 1_500 ? `${normalized.slice(0, 1_497)}…` : normalized;
@@ -53,39 +53,53 @@ function normalizeExplanation(value?: string): string | undefined {
 function normalizeSteps(steps?: AgentPlanStep[]): AgentPlanStep[] {
   return (steps ?? [])
     .map((entry) => ({
-      step: entry.step.replace(/\s+/g, " ").trim(),
+      step: (() => {
+        const normalized = entry.step.replace(/\s+/g, " ").trim();
+        return normalized.length > MAX_STEP_CHARS
+          ? `${sliceUtf16Safe(normalized, 0, MAX_STEP_CHARS - 1).trimEnd()}…`
+          : normalized;
+      })(),
       status: entry.status,
     }))
-    .filter((entry) => entry.step);
+    .filter((entry) => entry.step)
+    .slice(0, MAX_PLAN_STEPS);
 }
 
 function renderStatus(status: MattermostTaskProgressStatus): string {
   switch (status) {
     case "completed":
-      return "✅ Completed";
+      return "Completed";
     case "failed":
-      return "❌ Failed";
+      return "Failed";
     case "cancelled":
-      return "⛔ Cancelled";
+      return "Cancelled";
     case "in_progress":
-      return "🔄 In progress";
+      return "In progress";
   }
+}
+
+function renderChecklistLine(step: AgentPlanStep): string {
+  if (step.status === "completed") {
+    return `- [x] ${step.step}`;
+  }
+  if (step.status === "in_progress") {
+    return `- [ ] **${step.step}**`;
+  }
+  return `- [ ] ${step.step}`;
 }
 
 export function renderMattermostTaskProgressCard(
   snapshot: Omit<MattermostTaskProgressSnapshot, "revision">,
 ): string {
-  const lines = ["### Task progress", `**Status:** ${renderStatus(snapshot.status)}`];
+  const lines = [`#### Task progress · ${renderStatus(snapshot.status)}`];
   if (snapshot.title) {
-    lines.push("", `**${snapshot.title}**`);
+    lines.push(snapshot.title);
   }
-  if (snapshot.explanation) {
-    lines.push("", snapshot.explanation);
+  const explanation = normalizeExplanation(snapshot.explanation);
+  if (explanation) {
+    lines.push(explanation);
   }
-  const checklist = formatPlanChecklistLines(snapshot.steps, {
-    maxLines: 50,
-    maxLineChars: 240,
-  });
+  const checklist = snapshot.steps.map(renderChecklistLine);
   if (checklist.length > 0) {
     lines.push("", ...checklist);
   }
@@ -108,6 +122,7 @@ export function createMattermostTaskProgressCard(params: {
   let nextRevision = 0;
   let publishedMessage: string | undefined;
   let publishedRevision = 0;
+  let resultPostStarted = false;
   let taskPostId: string | undefined;
   let writeTail = Promise.resolve(true);
 
@@ -202,6 +217,11 @@ export function createMattermostTaskProgressCard(params: {
       if (!title && !explanation && steps.length === 0) {
         return false;
       }
+      // A late card would necessarily sort below an already-created result post.
+      // Keep the invariant truthful by declining to create one after that identity exists.
+      if (resultPostStarted && !taskPostId) {
+        return false;
+      }
       latestSnapshot = {
         revision: ++nextRevision,
         title,
@@ -210,6 +230,23 @@ export function createMattermostTaskProgressCard(params: {
         status: "in_progress",
       };
       return await schedulePublish();
+    },
+    settleBeforeResultPost: (): Promise<void> | undefined => {
+      if (!latestSnapshot) {
+        // Keep no-plan turns on their existing synchronous delivery path.
+        resultPostStarted = true;
+        return undefined;
+      }
+      // Progress bridges preserve callback start order, not callback completion. Snapshot
+      // the tail only after the earlier plan callback has synchronously queued its write.
+      const pendingPlanWrites = writeTail;
+      return pendingPlanWrites.then(() => {
+        resultPostStarted = true;
+        if (!taskPostId) {
+          // A failed initial card must not retry after the result and appear below it.
+          createDisabled = true;
+        }
+      });
     },
     finish: async (result: {
       outcome?: "completed" | "failed";

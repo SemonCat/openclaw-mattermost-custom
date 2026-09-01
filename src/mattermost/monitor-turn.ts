@@ -178,11 +178,18 @@ export async function dispatchMattermostInboundTurn(
     draftPreviewEnabled && shouldUpdateMattermostDraftToolProgress(account);
   const suppressDefaultToolProgressMessages =
     draftPreviewEnabled && shouldSuppressMattermostDefaultToolProgressMessages(account);
+  const taskProgressCard = createMattermostTaskProgressCard({
+    client,
+    channelId,
+    rootId: effectiveReplyToId,
+    log: monitor.logVerboseMessage,
+  });
   const draftStream = draftPreviewEnabled
     ? createMattermostDraftStream({
         client,
         channelId,
         rootId: effectiveReplyToId,
+        beforeCreatePost: taskProgressCard.settleBeforeResultPost,
         throttleMs: 1200,
         chunkText: (value) =>
           core.channel.text.chunkMarkdownTextWithMode(
@@ -219,12 +226,6 @@ export async function dispatchMattermostInboundTurn(
     },
   });
   const progressReceipt = createMattermostProgressReceipt();
-  const taskProgressCard = createMattermostTaskProgressCard({
-    client,
-    channelId,
-    rootId: effectiveReplyToId,
-    log: monitor.logVerboseMessage,
-  });
   // Public, ungated agent-event bus (not the trusted-plugin-only `core.state.*`
   // APIs this plugin already avoids relying on for durability): correlates
   // cumulative output-token usage snapshots to this turn's run id.
@@ -401,6 +402,12 @@ export async function dispatchMattermostInboundTurn(
     observeMessageSent: true,
     deliver: async (payloadEntry: ReplyPayload, info) => {
       hasStartedWork = true;
+      // A plan callback may still be publishing because OpenClaw orders callback starts,
+      // not their completion. Result identities must wait for the card's first write.
+      const taskCardBarrier = taskProgressCard.settleBeforeResultPost();
+      if (taskCardBarrier) {
+        await taskCardBarrier;
+      }
       if (info.kind === "final") {
         await enterBlockPreviewActivity("text");
         // Final text uses only confirmed-visible generations, so join prior boundary work before deciding whether to edit in place.
@@ -650,15 +657,15 @@ export async function dispatchMattermostInboundTurn(
                   taskProgressCard.noteRunStart(runId);
                 },
                 onModelSelected,
-                onPlanUpdate: (planUpdate) => {
+                onPlanUpdate: async (planUpdate) => {
                   hasStartedWork = true;
-                  // The card is observational UI. Never hold the agent/final-answer
-                  // pipeline behind a Mattermost control-plane request.
-                  void taskProgressCard.updatePlan(planUpdate).catch((error: unknown) => {
+                  try {
+                    await taskProgressCard.updatePlan(planUpdate);
+                  } catch (error: unknown) {
                     monitor.logVerboseMessage(
                       `mattermost task progress card callback failed: ${String(error)}`,
                     );
-                  });
+                  }
                   return true;
                 },
                 onPartialReply: (payloadResult) =>
