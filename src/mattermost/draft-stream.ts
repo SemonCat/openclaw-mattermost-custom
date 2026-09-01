@@ -45,6 +45,7 @@ type MattermostDraftStream = {
   seal: () => Promise<void>;
   stop: () => Promise<void>;
   forceNewMessage: () => Promise<void>;
+  handoffPostIdentity: () => Promise<string | undefined>;
   settleBoundaries: () => Promise<void>;
   resolveFinalText: (text: string) => MattermostFinalTextResolution;
 };
@@ -373,6 +374,77 @@ export function createMattermostDraftStream(params: {
     return boundary;
   };
 
+  const handoffPostIdentity = async (): Promise<string | undefined> => {
+    assertNoAcceptedDeliveryFailure();
+    if (streamState.stopped || streamState.final) {
+      return undefined;
+    }
+    // Finish the currently queued preview write before changing its owner. Once the
+    // generation is swapped, later updates wait on the successor create and cannot edit
+    // the post being handed to the task-card owner.
+    await loop.flush();
+    await currentGeneration.ready;
+    assertNoAcceptedDeliveryFailure();
+    const handedOff = currentGeneration;
+    if (!handedOff.postId) {
+      return undefined;
+    }
+    const preservedText = handedOff.lastProviderText ?? handedOff.lastSentText;
+    if (!preservedText) {
+      return undefined;
+    }
+    const successor: DraftGeneration = {
+      lastSentText: "",
+      latestSourceText: handedOff.latestSourceText,
+      latestAssistantText: handedOff.latestAssistantText,
+      ready: Promise.resolve(),
+    };
+    const handoff = (async () => {
+      try {
+        // This post continues an identity that already exists, so it must not re-enter
+        // the first-result ordering hook while the task-card publish is awaiting us.
+        const sent = await createMattermostPost(params.client, {
+          channelId: params.channelId,
+          message: preservedText,
+          rootId: params.rootId,
+          props: params.postProps,
+        });
+        successor.postId = sent.id;
+        successor.lastSentText = preservedText;
+        successor.lastProviderText = sent.message ?? preservedText;
+        return handedOff.postId;
+      } catch (err) {
+        const acceptedDeliveryError = isChannelPartialDeliveryError(err)
+          ? toErrorObject(err, "Mattermost accepted delivery failed")
+          : undefined;
+        if (acceptedDeliveryError) {
+          streamState.stopped = true;
+          terminalAcceptedDeliveryError = acceptedDeliveryError;
+        } else {
+          // The copy was not accepted, so the original result identity remains safe to edit.
+          successor.postId = handedOff.postId;
+          successor.lastSentText = handedOff.lastSentText;
+          successor.lastProviderText = handedOff.lastProviderText;
+        }
+        params.warn?.(
+          `mattermost stream preview identity handoff failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        if (acceptedDeliveryError) {
+          throw acceptedDeliveryError;
+        }
+        return undefined;
+      }
+    })();
+    // The returned handoff promise reports accepted-delivery failures to its caller;
+    // generation waiters read the retained terminal error before doing more work.
+    successor.ready = handoff.then(
+      () => undefined,
+      () => undefined,
+    );
+    currentGeneration = successor;
+    return await handoff;
+  };
+
   const flush = async () => {
     assertNoAcceptedDeliveryFailure();
     await loop.flush();
@@ -459,6 +531,7 @@ export function createMattermostDraftStream(params: {
     seal,
     stop,
     forceNewMessage,
+    handoffPostIdentity,
     settleBoundaries,
     resolveFinalText,
   };

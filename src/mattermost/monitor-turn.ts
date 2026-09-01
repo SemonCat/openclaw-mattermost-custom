@@ -107,6 +107,7 @@ function createDisabledMattermostDraftStream(): ReturnType<typeof createMattermo
     seal: noopAsync,
     stop: noopAsync,
     forceNewMessage: noopAsync,
+    handoffPostIdentity: async () => undefined,
     settleBoundaries: noopAsync,
     resolveFinalText: (text) => ({ kind: "full", text, publishedParts: [] }),
   };
@@ -179,6 +180,7 @@ export async function dispatchMattermostInboundTurn(
     draftPreviewEnabled && shouldUpdateMattermostDraftToolProgress(account);
   const suppressDefaultToolProgressMessages =
     draftPreviewEnabled && shouldSuppressMattermostDefaultToolProgressMessages(account);
+  let claimResultPost: (() => Promise<string | undefined>) | undefined;
   const taskProgressCard = createMattermostTaskProgressCard({
     client,
     channelId,
@@ -189,6 +191,7 @@ export async function dispatchMattermostInboundTurn(
       channelId,
       ...(effectiveReplyToId ? { threadId: effectiveReplyToId } : {}),
     }),
+    claimResultPost: async () => await claimResultPost?.(),
     log: monitor.logVerboseMessage,
   });
   const draftStream = draftPreviewEnabled
@@ -214,6 +217,7 @@ export async function dispatchMattermostInboundTurn(
         warn: monitor.logVerboseMessage,
       })
     : createDisabledMattermostDraftStream();
+  claimResultPost = draftStream.handoffPostIdentity;
   const previewBoundaryController = createMattermostDraftPreviewBoundaryController({
     enabled: draftPreviewEnabled && account.streamingMode === "block",
     forceNewMessage: async () => {

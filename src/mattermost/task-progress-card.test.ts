@@ -231,6 +231,97 @@ describe("Mattermost durable task progress card", () => {
     expect(stream.postId()).toBe("result-post");
   });
 
+  it("turns an already-created commentary post into a late plan card without losing commentary", async () => {
+    let createCount = 0;
+    const request = vi.fn<MattermostClient["request"]>(async (path, init) => {
+      if (path === "/posts") {
+        createCount += 1;
+        return {
+          id: createCount === 1 ? "first-result-post" : "continuing-result-post",
+          message: String(readBody(init).message),
+        } as never;
+      }
+      return {
+        id: path.slice("/posts/".length),
+        message: String(readBody(init).message),
+      } as never;
+    });
+    const client = createTestClient(request);
+    let claimResultPost: (() => Promise<string | undefined>) | undefined;
+    const card = createMattermostTaskProgressCard({
+      client,
+      channelId: "channel-1",
+      postProps: buildMattermostPostIdentityProps("task_progress", {
+        accountId: "default",
+        agentId: "main",
+        channelId: "channel-1",
+      }),
+      claimResultPost: async () => await claimResultPost?.(),
+      log: vi.fn(),
+    });
+    const stream = createMattermostDraftStream({
+      client,
+      channelId: "channel-1",
+      postProps: buildMattermostPostIdentityProps("turn_result", {
+        accountId: "default",
+        agentId: "main",
+        channelId: "channel-1",
+      }),
+      throttleMs: 0,
+      beforeCreatePost: card.settleBeforeResultPostCreate,
+    });
+    claimResultPost = stream.handoffPostIdentity;
+
+    stream.update("Commentary before the plan");
+    await stream.flush();
+    expect(stream.postId()).toBe("first-result-post");
+
+    await expect(
+      card.updatePlan({ steps: [{ step: "Inspect", status: "in_progress" }] }),
+    ).resolves.toBe(true);
+    stream.update("Continuing tool progress");
+    await stream.flush();
+    await card.finish({ outcome: "completed" });
+
+    expect(card.postId()).toBe("first-result-post");
+    expect(stream.postId()).toBe("continuing-result-post");
+    const calls = request.mock.calls.map(([path, init]) => ({ path, body: readBody(init) }));
+    expect(calls).toEqual([
+      expect.objectContaining({
+        path: "/posts",
+        body: expect.objectContaining({ message: "Commentary before the plan" }),
+      }),
+      expect.objectContaining({
+        path: "/posts",
+        body: expect.objectContaining({
+          message: "Commentary before the plan",
+          props: expect.objectContaining({
+            openclaw_mattermost: expect.objectContaining({ kind: "turn_result" }),
+          }),
+        }),
+      }),
+      expect.objectContaining({
+        path: "/posts/first-result-post",
+        body: expect.objectContaining({
+          message: expect.stringContaining("Task progress · In progress"),
+          props: expect.objectContaining({
+            openclaw_mattermost: expect.objectContaining({ kind: "task_progress" }),
+          }),
+        }),
+      }),
+      expect.objectContaining({
+        path: "/posts/continuing-result-post",
+        body: expect.objectContaining({ message: "Continuing tool progress" }),
+      }),
+      expect.objectContaining({
+        path: "/posts/first-result-post",
+        body: expect.objectContaining({
+          message: expect.stringContaining("Task progress · Completed"),
+        }),
+      }),
+    ]);
+  });
+
   it.each([
     { status: "in_progress" as const, label: "In progress" },
     { status: "completed" as const, label: "Completed" },

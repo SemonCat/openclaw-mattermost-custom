@@ -226,6 +226,47 @@ describe("createMattermostDraftStream", () => {
     expect(requestMock).toHaveBeenCalledOnce();
   });
 
+  it("keeps the original result identity when a handoff copy fails", async () => {
+    const warn = vi.fn();
+    const { requestMock, stream } = createDraftStreamFixture({ warn });
+
+    stream.update("Visible commentary");
+    await stream.flush();
+    requestMock.mockRejectedValueOnce(new Error("copy failed"));
+
+    await expect(stream.handoffPostIdentity()).resolves.toBeUndefined();
+    stream.update("Continuing progress");
+    await stream.flush();
+
+    expect(requestMock.mock.calls.map(([path]) => path)).toEqual([
+      "/posts",
+      "/posts",
+      "/posts/post-1",
+    ]);
+    expect(parseRequestJson(requestMock.mock.calls[2]?.[1]).message).toBe("Continuing progress");
+    expect(stream.postId()).toBe("post-1");
+    expect(warn).toHaveBeenCalledWith(
+      "mattermost stream preview identity handoff failed: copy failed",
+    );
+  });
+
+  it("does not retry a provider-accepted handoff copy without an identity", async () => {
+    const warn = vi.fn();
+    const { requestMock, stream } = createDraftStreamFixture({ warn });
+
+    stream.update("Visible commentary");
+    await stream.flush();
+    requestMock.mockResolvedValueOnce({ message: "accepted copy" });
+
+    await expect(stream.handoffPostIdentity()).rejects.toThrow("did not include a post id");
+    stream.update("Must not create another copy");
+    await expect(stream.flush()).rejects.toThrow("did not include a post id");
+
+    expect(requestMock).toHaveBeenCalledTimes(2);
+    expect(requestMock.mock.calls.map(([path]) => path)).toEqual(["/posts", "/posts"]);
+    expect(warn).toHaveBeenCalledOnce();
+  });
+
   it("truncates on a code-point boundary so a straddling emoji is dropped whole", async () => {
     // maxChars=12 => cut point is maxChars-3=9. The emoji 😀 occupies UTF-16
     // indices 8-9, so a raw slice(0,9) would keep the lone high surrogate at

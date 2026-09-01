@@ -111,6 +111,7 @@ export function createMattermostTaskProgressCard(params: {
   channelId: string;
   rootId?: string;
   postProps?: Record<string, unknown>;
+  claimResultPost?: () => Promise<string | undefined>;
   log: (message: string) => void;
 }) {
   let activeRunId: string | undefined;
@@ -125,9 +126,10 @@ export function createMattermostTaskProgressCard(params: {
   let publishedRevision = 0;
   let resultPostStarted = false;
   let taskPostId: string | undefined;
+  let taskPostNeedsIdentityUpdate = false;
   let writeTail = Promise.resolve(true);
 
-  const logFailure = (operation: "create" | "update", error: unknown) => {
+  const logFailure = (operation: "create" | "handoff" | "update", error: unknown) => {
     if (diagnosticLogs >= MAX_DIAGNOSTIC_LOGS) {
       return;
     }
@@ -144,6 +146,24 @@ export function createMattermostTaskProgressCard(params: {
     if (taskPostId && message === publishedMessage) {
       publishedRevision = snapshot.revision;
       return true;
+    }
+    if (!taskPostId && createDisabled) {
+      return false;
+    }
+    if (!taskPostId && resultPostStarted) {
+      if (!params.claimResultPost) {
+        return false;
+      }
+      try {
+        taskPostId = await params.claimResultPost();
+        taskPostNeedsIdentityUpdate = Boolean(taskPostId);
+      } catch (error: unknown) {
+        logFailure("handoff", error);
+        return false;
+      }
+      if (!taskPostId) {
+        return false;
+      }
     }
     if (!taskPostId) {
       if (createDisabled || createAttempts >= MAX_CREATE_ATTEMPTS) {
@@ -172,7 +192,11 @@ export function createMattermostTaskProgressCard(params: {
       }
     }
     try {
-      await updateMattermostPost(params.client, taskPostId, { message });
+      await updateMattermostPost(params.client, taskPostId, {
+        message,
+        ...(taskPostNeedsIdentityUpdate ? { props: params.postProps } : {}),
+      });
+      taskPostNeedsIdentityUpdate = false;
       publishedMessage = message;
       publishedRevision = snapshot.revision;
       return true;
@@ -191,6 +215,11 @@ export function createMattermostTaskProgressCard(params: {
   const settleBeforeResultPost = (
     resultIdentityStarting: boolean,
   ): Promise<void> | undefined => {
+    if (resultIdentityStarting && resultPostStarted) {
+      // Only the first physical result identity participates in card ordering. Later
+      // generations may be needed by a handoff that is already awaiting this callback.
+      return undefined;
+    }
     if (!latestSnapshot) {
       // Entering core result delivery does not mean a Mattermost post exists yet. Keep
       // the late-plan window open until the draft stream actually starts that create.
@@ -240,11 +269,6 @@ export function createMattermostTaskProgressCard(params: {
       const explanation = normalizeExplanation(plan.explanation);
       const steps = normalizeSteps(plan.steps);
       if (!title && !explanation && steps.length === 0) {
-        return false;
-      }
-      // A late card would necessarily sort below an already-created result post.
-      // Keep the invariant truthful by declining to create one after that identity exists.
-      if (resultPostStarted && !taskPostId) {
         return false;
       }
       latestSnapshot = {
