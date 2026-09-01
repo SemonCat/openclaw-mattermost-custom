@@ -6,3 +6,8 @@ coverage
 .env
 .DS_Store
 *.tsbuildinfo
+
+# Local OpenClaw agent identity/workspace files
+IDENTITY.md
+SOUL.md
+USER.md
