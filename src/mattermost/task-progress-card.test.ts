@@ -160,7 +160,7 @@ describe("Mattermost durable task progress card", () => {
       client,
       channelId: "channel-1",
       throttleMs: 0,
-      beforeCreatePost: card.settleBeforeResultPost,
+      beforeCreatePost: card.settleBeforeResultPostCreate,
     });
 
     const planUpdate = card.updatePlan({
@@ -180,6 +180,51 @@ describe("Mattermost durable task progress card", () => {
 
     const creates = request.mock.calls.filter(([path]) => path === "/posts");
     const createdMessages = creates.map(([, init]) => String(readBody(init).message));
+    expect(createdMessages[0]?.startsWith("#### Task progress · In progress")).toBe(true);
+    expect(createdMessages[1]).toBe("Running a tool");
+    expect(card.postId()).toBe("task-card");
+    expect(stream.postId()).toBe("result-post");
+  });
+
+  it("creates a late plan card before a result whose delivery started first", async () => {
+    const request = vi.fn<MattermostClient["request"]>(async (path, init) => {
+      if (path !== "/posts") {
+        return { id: "updated" } as never;
+      }
+      const message = String(readBody(init).message);
+      return {
+        id: message.startsWith("#### Task progress") ? "task-card" : "result-post",
+      } as never;
+    });
+    const client = createTestClient(request);
+    const card = createMattermostTaskProgressCard({
+      client,
+      channelId: "channel-1",
+      log: vi.fn(),
+    });
+    const stream = createMattermostDraftStream({
+      client,
+      channelId: "channel-1",
+      throttleMs: 0,
+      beforeCreatePost: card.settleBeforeResultPostCreate,
+    });
+
+    // Core can enter result delivery before its ordered plan callback starts. This is
+    // not yet a Mattermost result identity, so the later callback must still own the
+    // first create and the actual preview create must wait behind it.
+    expect(card.settleBeforeResultPost()).toBeUndefined();
+    const planUpdate = card.updatePlan({
+      steps: [{ step: "Inspect", status: "in_progress" }],
+    });
+    stream.update("Running a tool");
+    const resultFlush = stream.flush();
+
+    await expect(planUpdate).resolves.toBe(true);
+    await resultFlush;
+
+    const createdMessages = request.mock.calls
+      .filter(([path]) => path === "/posts")
+      .map(([, init]) => String(readBody(init).message));
     expect(createdMessages[0]?.startsWith("#### Task progress · In progress")).toBe(true);
     expect(createdMessages[1]).toBe("Running a tool");
     expect(card.postId()).toBe("task-card");

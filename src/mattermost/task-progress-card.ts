@@ -188,6 +188,29 @@ export function createMattermostTaskProgressCard(params: {
     return operation;
   };
 
+  const settleBeforeResultPost = (
+    resultIdentityStarting: boolean,
+  ): Promise<void> | undefined => {
+    if (!latestSnapshot) {
+      // Entering core result delivery does not mean a Mattermost post exists yet. Keep
+      // the late-plan window open until the draft stream actually starts that create.
+      if (resultIdentityStarting) {
+        resultPostStarted = true;
+      }
+      return undefined;
+    }
+    // Progress bridges preserve callback start order, not callback completion. Snapshot
+    // the tail only after the earlier plan callback has synchronously queued its write.
+    const pendingPlanWrites = writeTail;
+    return pendingPlanWrites.then(() => {
+      resultPostStarted = true;
+      if (!taskPostId) {
+        // A failed initial card must not retry after the result and appear below it.
+        createDisabled = true;
+      }
+    });
+  };
+
   return {
     postId: () => taskPostId,
     noteRunStart: (runId: string) => {
@@ -233,23 +256,10 @@ export function createMattermostTaskProgressCard(params: {
       };
       return await schedulePublish();
     },
-    settleBeforeResultPost: (): Promise<void> | undefined => {
-      if (!latestSnapshot) {
-        // Keep no-plan turns on their existing synchronous delivery path.
-        resultPostStarted = true;
-        return undefined;
-      }
-      // Progress bridges preserve callback start order, not callback completion. Snapshot
-      // the tail only after the earlier plan callback has synchronously queued its write.
-      const pendingPlanWrites = writeTail;
-      return pendingPlanWrites.then(() => {
-        resultPostStarted = true;
-        if (!taskPostId) {
-          // A failed initial card must not retry after the result and appear below it.
-          createDisabled = true;
-        }
-      });
-    },
+    settleBeforeResultPost: (): Promise<void> | undefined =>
+      settleBeforeResultPost(false),
+    settleBeforeResultPostCreate: (): Promise<void> | undefined =>
+      settleBeforeResultPost(true),
     finish: async (result: {
       outcome?: "completed" | "failed";
       deliveryFailed?: boolean;

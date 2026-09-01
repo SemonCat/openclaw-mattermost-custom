@@ -202,7 +202,7 @@ export async function dispatchMattermostInboundTurn(
           channelId,
           ...(effectiveReplyToId ? { threadId: effectiveReplyToId } : {}),
         }),
-        beforeCreatePost: taskProgressCard.settleBeforeResultPost,
+        beforeCreatePost: taskProgressCard.settleBeforeResultPostCreate,
         throttleMs: 1200,
         chunkText: (value) =>
           core.channel.text.chunkMarkdownTextWithMode(
@@ -416,7 +416,7 @@ export async function dispatchMattermostInboundTurn(
     deliver: async (payloadEntry: ReplyPayload, info) => {
       hasStartedWork = true;
       // A plan callback may still be publishing because OpenClaw orders callback starts,
-      // not their completion. Result identities must wait for the card's first write.
+      // not their completion. Join any task-card write already queued for this delivery.
       const taskCardBarrier = taskProgressCard.settleBeforeResultPost();
       if (taskCardBarrier) {
         await taskCardBarrier;
