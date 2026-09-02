@@ -832,7 +832,19 @@ const mattermostOutbound: ChannelOutboundAdapter = {
   },
   ...createAttachedChannelResultAdapter({
     channel: "mattermost",
-    sendText: async ({ cfg, to, text, accountId, replyToId, threadId, onDeliveryResult }) =>
+    sendText: async ({
+      cfg,
+      to,
+      text,
+      accountId,
+      replyToId,
+      threadId,
+      deliveryQueueId,
+      deliveryPartIndex,
+      deliveryPartCount,
+      onPlatformSendDispatch,
+      onDeliveryResult,
+    }) =>
       toMattermostOutboundResult(
         await (
           await loadMattermostChannelRuntime()
@@ -840,6 +852,10 @@ const mattermostOutbound: ChannelOutboundAdapter = {
           cfg,
           accountId: accountId ?? undefined,
           replyToId: replyToId ?? (threadId != null ? String(threadId) : undefined),
+          ...(deliveryQueueId
+            ? { deliveryQueueId, deliveryPartIndex, deliveryPartCount }
+            : {}),
+          ...(onPlatformSendDispatch ? { onPlatformSendDispatch } : {}),
           onDeliveryResult: createMattermostDeliveryProgressReporter(onDeliveryResult),
         }),
       ),
@@ -874,7 +890,7 @@ const mattermostOutbound: ChannelOutboundAdapter = {
   }),
 };
 
-const mattermostMessageAdapter = createChannelMessageAdapterFromOutbound({
+const mattermostMessageAdapterBase = createChannelMessageAdapterFromOutbound({
   id: "mattermost",
   outbound: mattermostOutbound,
   live: {
@@ -892,6 +908,19 @@ const mattermostMessageAdapter = createChannelMessageAdapterFromOutbound({
     },
   },
 });
+
+const mattermostMessageAdapter = {
+  ...mattermostMessageAdapterBase,
+  durableFinal: {
+    capabilities: {
+      ...mattermostMessageAdapterBase.durableFinal?.capabilities,
+      reconcileUnknownSend: true,
+    },
+    reconcileUnknownSendKinds: { text: true },
+    reconcileUnknownSend: async (ctx) =>
+      await (await loadMattermostChannelRuntime()).reconcileMattermostUnknownSend(ctx),
+  },
+} satisfies typeof mattermostMessageAdapterBase;
 
 export const mattermostPlugin: ChannelPlugin<ResolvedMattermostAccount> = createChatChannelPlugin({
   base: {

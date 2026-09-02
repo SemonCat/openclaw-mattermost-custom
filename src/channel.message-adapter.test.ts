@@ -9,6 +9,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 const sendMessageMattermostMock = vi.hoisted(() => vi.fn());
 
 vi.mock("./mattermost/send.js", () => ({
+  reconcileMattermostUnknownSend: vi.fn(),
   sendMessageMattermost: sendMessageMattermostMock,
 }));
 
@@ -133,6 +134,10 @@ describe("mattermost channel message adapter", () => {
         messageSendingHooks: () => {
           expect(requireTextSender(adapter)).toBeTypeOf("function");
         },
+        reconcileUnknownSend: () => {
+          expect(adapter.durableFinal?.reconcileUnknownSendKinds).toEqual({ text: true });
+          expect(adapter.durableFinal?.reconcileUnknownSend).toBeTypeOf("function");
+        },
       },
     });
   });
@@ -154,6 +159,33 @@ describe("mattermost channel message adapter", () => {
     });
     expect(result.receipt.platformMessageIds).toEqual(["post-1"]);
     expect(result.receipt.parts[0]?.kind).toBe("text");
+  });
+
+  it("forwards durable text identity and dispatch hooks to Mattermost", async () => {
+    const sendText = requireTextSender(requireMattermostMessageAdapter());
+    const onPlatformSendDispatch = vi.fn(async () => {});
+
+    await sendText({
+      cfg: {},
+      to: "channel:team-1",
+      text: "durable",
+      accountId: "default",
+      deliveryQueueId: "queue-1",
+      deliveryPartIndex: 1,
+      deliveryPartCount: 2,
+      onPlatformSendDispatch,
+    });
+
+    expect(sendMessageMattermostMock).toHaveBeenLastCalledWith(
+      "channel:team-1",
+      "durable",
+      expect.objectContaining({
+        deliveryQueueId: "queue-1",
+        deliveryPartIndex: 1,
+        deliveryPartCount: 2,
+        onPlatformSendDispatch,
+      }),
+    );
   });
 
   it("sends media through Mattermost", async () => {

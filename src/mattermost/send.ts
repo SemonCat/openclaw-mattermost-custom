@@ -1,9 +1,12 @@
+import { createHash, createHmac } from "node:crypto";
 import { resolveChannelMediaMaxBytes } from "openclaw/plugin-sdk/account-helpers";
 import { createChannelPartialDeliveryError } from "openclaw/plugin-sdk/channel-inbound";
 // Mattermost plugin module implements send behavior.
 import {
   createMessageReceiptFromOutboundResults,
   listMessageReceiptPlatformIds,
+  type ChannelMessageUnknownSendContext,
+  type ChannelMessageUnknownSendReconciliationResult,
   type MessageReceipt,
   type MessageReceiptPartKind,
 } from "openclaw/plugin-sdk/channel-outbound";
@@ -24,6 +27,7 @@ import {
   createMattermostDirectChannelWithRetry,
   createMattermostPost,
   fetchMattermostChannelByName,
+  fetchMattermostChannelPostsSince,
   fetchMattermostMe,
   fetchMattermostUserByUsername,
   fetchMattermostUserTeams,
@@ -31,6 +35,7 @@ import {
   parseMattermostApiStatus,
   uploadMattermostFile,
   type MattermostUser,
+  type MattermostPost,
   type CreateDmChannelRetryOptions,
 } from "./client.js";
 import {
@@ -66,6 +71,14 @@ type MattermostSendOpts = {
   onDmChannelResolution?: (resolution: PromiseLike<unknown>) => void;
   /** Report the provider-finalized send before later fallible bookkeeping. */
   onDeliveryResult?: (result: MattermostSendResult) => Promise<void> | void;
+  /** Opaque host-owned durable intent id used only to derive provider-side markers. */
+  deliveryQueueId?: string;
+  /** Stable platform-send position within one durable text payload. */
+  deliveryPartIndex?: number;
+  /** Exact number of platform sends expected for one durable text payload. */
+  deliveryPartCount?: number;
+  /** Refresh host-owned durable timing immediately before provider-visible I/O. */
+  onPlatformSendDispatch?: () => Promise<void>;
 };
 
 export type MattermostSendResult = {
@@ -77,6 +90,8 @@ export type MattermostSendResult = {
 
 const MATTERMOST_BOT_USER_CACHE_MAX_ENTRIES = 64;
 const MATTERMOST_TARGET_CACHE_MAX_ENTRIES = 1024;
+const MATTERMOST_DELIVERY_MARKER_PROP = "openclaw_delivery";
+const MATTERMOST_RECONCILE_LOOKBACK_MS = 5 * 60_000;
 const MATTERMOST_FORMAT_PROFILE = FormatCapabilityProfile.define({
   mechanism: "markdown",
   chunk: { limit: 16_383, unit: "chars" },
@@ -124,6 +139,113 @@ function createMattermostSendReceipt(params: {
       },
     ],
   });
+}
+
+type MattermostDeliveryMarker = {
+  id: string;
+  part_index: number;
+  part_count: number;
+  signature: string;
+};
+
+function createMattermostDeliveryId(queueId?: string): string | undefined {
+  const normalized = normalizeOptionalString(queueId);
+  return normalized
+    ? createHash("sha256").update(normalized).digest("base64url")
+    : undefined;
+}
+
+function createMattermostDeliverySignature(params: {
+  queueId: string;
+  channelId: string;
+  rootId?: string;
+  partIndex: number;
+  partCount: number;
+}): string {
+  return createHmac("sha256", params.queueId)
+    .update(
+      JSON.stringify([
+        "openclaw.mattermost.delivery.v1",
+        params.channelId,
+        params.rootId ?? "",
+        params.partIndex,
+        params.partCount,
+      ]),
+    )
+    .digest("base64url");
+}
+
+function resolveMattermostDeliveryPart(params: {
+  deliveryPartIndex?: number;
+  deliveryPartCount?: number;
+}): { partIndex: number; partCount: number } {
+  const partIndex = params.deliveryPartIndex ?? 0;
+  const partCount = params.deliveryPartCount ?? 1;
+  if (
+    !Number.isSafeInteger(partIndex) ||
+    partIndex < 0 ||
+    !Number.isSafeInteger(partCount) ||
+    partCount < 1 ||
+    partIndex >= partCount
+  ) {
+    throw new Error("Mattermost durable delivery part metadata is invalid");
+  }
+  return { partIndex, partCount };
+}
+
+function withMattermostDeliveryMarker(
+  props: Record<string, unknown> | undefined,
+  params: {
+    queueId?: string;
+    channelId: string;
+    rootId?: string;
+    deliveryPartIndex?: number;
+    deliveryPartCount?: number;
+  },
+): Record<string, unknown> | undefined {
+  const queueId = normalizeOptionalString(params.queueId);
+  const deliveryId = createMattermostDeliveryId(queueId);
+  if (!queueId || !deliveryId) {
+    return props;
+  }
+  const { partIndex, partCount } = resolveMattermostDeliveryPart(params);
+  const marker: MattermostDeliveryMarker = {
+    id: deliveryId,
+    part_index: partIndex,
+    part_count: partCount,
+    signature: createMattermostDeliverySignature({
+      queueId,
+      channelId: params.channelId,
+      rootId: params.rootId,
+      partIndex,
+      partCount,
+    }),
+  };
+  return { ...props, [MATTERMOST_DELIVERY_MARKER_PROP]: marker };
+}
+
+function readMattermostDeliveryMarker(post: MattermostPost): MattermostDeliveryMarker | null {
+  const raw = post.props?.[MATTERMOST_DELIVERY_MARKER_PROP];
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return null;
+  }
+  const marker = raw as Record<string, unknown>;
+  if (
+    typeof marker.id !== "string" ||
+    typeof marker.signature !== "string" ||
+    typeof marker.part_index !== "number" ||
+    typeof marker.part_count !== "number" ||
+    !Number.isSafeInteger(marker.part_index) ||
+    !Number.isSafeInteger(marker.part_count)
+  ) {
+    return null;
+  }
+  return {
+    id: marker.id,
+    signature: marker.signature,
+    part_index: marker.part_index,
+    part_count: marker.part_count,
+  };
 }
 
 function resolveMattermostReceiptKind(params: {
@@ -430,6 +552,14 @@ export async function sendMessageMattermost(
     await resolveMattermostSendContext(to, opts);
 
   const client = createMattermostClient({ baseUrl, botToken: token, allowPrivateNetwork });
+  let platformSendDispatched = false;
+  const dispatchPlatformSendOnce = async () => {
+    if (platformSendDispatched) {
+      return;
+    }
+    platformSendDispatched = true;
+    await opts.onPlatformSendDispatch?.();
+  };
   let props = opts.props;
   if (!props && Array.isArray(opts.buttons) && opts.buttons.length > 0) {
     setInteractionSecret(accountId, token);
@@ -447,6 +577,13 @@ export async function sendMessageMattermost(
       text: opts.attachmentText,
     });
   }
+  props = withMattermostDeliveryMarker(props, {
+    queueId: opts.deliveryQueueId,
+    channelId,
+    rootId: opts.replyToId,
+    deliveryPartIndex: opts.deliveryPartIndex,
+    deliveryPartCount: opts.deliveryPartCount,
+  });
   let message = normalizeOptionalString(text) ?? "";
   let fileIds: string[] | undefined;
   let uploadError: Error | undefined;
@@ -459,6 +596,7 @@ export async function sendMessageMattermost(
         mediaReadFile: opts.mediaReadFile,
         workspaceDir: opts.workspaceDir,
       });
+      await dispatchPlatformSendOnce();
       const fileInfo = await uploadMattermostFile(client, {
         channelId,
         buffer: media.buffer,
@@ -500,6 +638,7 @@ export async function sendMessageMattermost(
     throw new Error("Mattermost message is empty");
   }
 
+  await dispatchPlatformSendOnce();
   const post = await createMattermostPost(client, {
     channelId,
     message,
@@ -541,4 +680,148 @@ export async function sendMessageMattermost(
     });
   }
   return result;
+}
+
+function resolveMattermostUnknownSendRootId(
+  ctx: ChannelMessageUnknownSendContext,
+): string | undefined {
+  if (Object.hasOwn(ctx, "effectiveReplyToId")) {
+    return normalizeOptionalString(ctx.effectiveReplyToId);
+  }
+  const payloadReplyToId = ctx.payloads[0]?.replyToId;
+  if (payloadReplyToId != null) {
+    return normalizeOptionalString(payloadReplyToId);
+  }
+  if (ctx.replyToMode === "off") {
+    return undefined;
+  }
+  return normalizeOptionalString(ctx.replyToId) ?? normalizeOptionalString(ctx.threadId);
+}
+
+function createMattermostReconciledReceipt(params: {
+  posts: MattermostPost[];
+  channelId: string;
+  rootId?: string;
+}): MessageReceipt {
+  return createMessageReceiptFromOutboundResults({
+    kind: "text",
+    ...(params.rootId ? { replyToId: params.rootId } : {}),
+    results: params.posts.map((post) => ({
+      channel: "mattermost",
+      messageId: post.id,
+      channelId: params.channelId,
+    })),
+  });
+}
+
+export async function reconcileMattermostUnknownSend(
+  ctx: ChannelMessageUnknownSendContext,
+): Promise<ChannelMessageUnknownSendReconciliationResult> {
+  const queueId = normalizeOptionalString(ctx.queueId);
+  const deliveryId = createMattermostDeliveryId(queueId);
+  if (!queueId || !deliveryId) {
+    return {
+      status: "unresolved",
+      error: "Mattermost unknown-send reconciliation requires a durable delivery id",
+      retryable: false,
+    };
+  }
+  const { accountId, token, baseUrl, channelId, allowPrivateNetwork } =
+    await resolveMattermostSendContext(ctx.to, {
+      cfg: ctx.cfg,
+      accountId: ctx.accountId ?? undefined,
+    });
+  const client = createMattermostClient({ baseUrl, botToken: token, allowPrivateNetwork });
+  const botUser = await resolveBotUser(baseUrl, token, allowPrivateNetwork);
+  const rootId = resolveMattermostUnknownSendRootId(ctx);
+  const searchStartedAt = ctx.platformSendStartedAt ?? ctx.enqueuedAt;
+  const since = Math.max(1, Math.floor(searchStartedAt - MATTERMOST_RECONCILE_LOOKBACK_MS));
+  const posts = await fetchMattermostChannelPostsSince(client, channelId, since);
+  const matchesByIndex = new Map<number, MattermostPost>();
+  let expectedPartCount: number | undefined;
+  let duplicatePart = false;
+
+  for (const post of posts) {
+    if (
+      normalizeOptionalString(post.channel_id) !== channelId ||
+      normalizeOptionalString(post.user_id) !== botUser.id ||
+      normalizeOptionalString(post.root_id) !== rootId
+    ) {
+      continue;
+    }
+    const marker = readMattermostDeliveryMarker(post);
+    if (
+      !marker ||
+      marker.id !== deliveryId ||
+      marker.part_index < 0 ||
+      marker.part_count < 1 ||
+      marker.part_index >= marker.part_count
+    ) {
+      continue;
+    }
+    const expectedSignature = createMattermostDeliverySignature({
+      queueId,
+      channelId,
+      rootId,
+      partIndex: marker.part_index,
+      partCount: marker.part_count,
+    });
+    if (marker.signature !== expectedSignature) {
+      continue;
+    }
+    if (expectedPartCount !== undefined && expectedPartCount !== marker.part_count) {
+      return {
+        status: "unresolved",
+        error: "Mattermost durable delivery markers disagree on part count",
+        retryable: false,
+      };
+    }
+    expectedPartCount = marker.part_count;
+    if (matchesByIndex.has(marker.part_index)) {
+      duplicatePart = true;
+      continue;
+    }
+    matchesByIndex.set(marker.part_index, post);
+  }
+
+  if (duplicatePart) {
+    return {
+      status: "unresolved",
+      error: "Mattermost durable delivery contains duplicate provider parts",
+      retryable: false,
+    };
+  }
+  if (expectedPartCount !== undefined && matchesByIndex.size === expectedPartCount) {
+    const orderedPosts: MattermostPost[] = [];
+    for (let partIndex = 0; partIndex < expectedPartCount; partIndex += 1) {
+      const post = matchesByIndex.get(partIndex);
+      if (!post) {
+        return {
+          status: "unresolved",
+          error: "Mattermost durable delivery marker set is incomplete",
+          retryable: ctx.retryCount < 2,
+        };
+      }
+      orderedPosts.push(post);
+    }
+    const receipt = createMattermostReconciledReceipt({
+      posts: orderedPosts,
+      channelId,
+      rootId,
+    });
+    return {
+      status: "sent",
+      receipt,
+      messageId: receipt.primaryPlatformMessageId,
+    };
+  }
+
+  return {
+    status: "unresolved",
+    error:
+      matchesByIndex.size > 0
+        ? "Mattermost durable delivery marker set is incomplete"
+        : `Mattermost contains no exact durable delivery marker for account "${accountId}"`,
+    retryable: ctx.retryCount < 2,
+  };
 }

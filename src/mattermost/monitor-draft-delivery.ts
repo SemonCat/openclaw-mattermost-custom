@@ -16,7 +16,11 @@ import {
   isReasoningReplyPayload,
   resolveSendableOutboundReplyParts,
 } from "openclaw/plugin-sdk/reply-payload";
-import { updateMattermostPost, type MattermostClient, type MattermostPost } from "./client.js";
+import {
+  updateMattermostPostMessageWithReadback,
+  type MattermostClient,
+  type MattermostPost,
+} from "./client.js";
 import { createMattermostDraftStream } from "./draft-stream.js";
 import { canFinalizeMattermostPreviewInPlace } from "./monitor-context.js";
 import {
@@ -159,7 +163,14 @@ export async function deliverMattermostReplyWithDraftPreview(
           return { message: previewFinalText };
         },
         editFinal: async (previewPostId, edit) => {
-          finalizedPreviewPost = await updateMattermostPost(params.client, previewPostId, edit);
+          if (typeof edit.message !== "string") {
+            throw new Error("Mattermost preview final edit requires message text");
+          }
+          finalizedPreviewPost = await updateMattermostPostMessageWithReadback(
+            params.client,
+            previewPostId,
+            edit.message,
+          );
         },
         resolveFinalizedId: (previewPostId) => finalizedPreviewPost?.id ?? previewPostId,
         onPreviewFinalized: (_previewPostId, receipt) => {

@@ -7,7 +7,7 @@ import { sliceUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
 import {
   createMattermostPost,
   deleteMattermostPost,
-  updateMattermostPost,
+  updateMattermostPostMessageWithReadback,
   type MattermostClient,
 } from "./client.js";
 
@@ -181,9 +181,11 @@ export function createMattermostDraftStream(params: {
     }
     try {
       if (target.postId) {
-        const updated = await updateMattermostPost(params.client, target.postId, {
-          message: normalized,
-        });
+        const updated = await updateMattermostPostMessageWithReadback(
+          params.client,
+          target.postId,
+          normalized,
+        );
         target.lastProviderText = updated.message ?? normalized;
       } else {
         const sent = await createStreamPost(normalized);
@@ -290,9 +292,11 @@ export function createMattermostDraftStream(params: {
           }
           let providerFirstChunk = sealed.lastProviderText ?? firstChunk;
           if (firstChunk !== sealed.lastSentText) {
-            const updated = await updateMattermostPost(params.client, sealed.postId, {
-              message: firstChunk,
-            });
+            const updated = await updateMattermostPostMessageWithReadback(
+              params.client,
+              sealed.postId,
+              firstChunk,
+            );
             providerFirstChunk = updated.message ?? firstChunk;
           }
           if (assistantText) {

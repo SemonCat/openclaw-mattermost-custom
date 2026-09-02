@@ -12,6 +12,7 @@ const { sendMessageMattermostMock, mockFetchGuard } = vi.hoisted(() => ({
 }));
 
 vi.mock("./mattermost/send.js", () => ({
+  reconcileMattermostUnknownSend: vi.fn(),
   sendMessageMattermost: sendMessageMattermostMock,
 }));
 

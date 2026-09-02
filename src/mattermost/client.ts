@@ -71,6 +71,7 @@ export const MattermostPostSchema = z
     type: z.string().nullable().optional(),
     root_id: z.string().nullable().optional(),
     create_at: z.number().nullable().optional(),
+    update_at: z.number().nullable().optional(),
     props: z.record(z.string(), z.unknown()).nullable().optional(),
   })
   .passthrough();
@@ -442,6 +443,30 @@ export async function fetchMattermostChannelPosts(
     // posts; for `after` reads, `next_post_id` points to newer posts.
     hasMore: Boolean(after ? parsed.data.next_post_id : parsed.data.prev_post_id),
   };
+}
+
+/**
+ * Fetch posts modified since a provider timestamp for bounded delivery reconciliation.
+ * Mattermost caps this query at 1000 posts and does not guarantee a gap-free result, so
+ * callers may prove a matching delivery but must not infer `not_sent` from its absence.
+ */
+export async function fetchMattermostChannelPostsSince(
+  client: MattermostClient,
+  channelId: string,
+  since: number,
+): Promise<MattermostPost[]> {
+  if (!Number.isSafeInteger(since) || since <= 0) {
+    throw new Error("Mattermost posts-since timestamp must be a positive integer.");
+  }
+  const query = new URLSearchParams({ since: String(since) });
+  const response = await client.request<unknown>(
+    `/channels/${encodeURIComponent(channelId)}/posts?${query.toString()}`,
+  );
+  const parsed = MattermostPostListSchema.safeParse(response);
+  if (!parsed.success || parsed.data.order.some((postId) => !parsed.data.posts[postId])) {
+    throw new Error("Unexpected Mattermost posts-since response.");
+  }
+  return parsed.data.order.map((postId) => parsed.data.posts[postId] as MattermostPost);
 }
 
 export async function fetchMattermostChannelByName(
@@ -835,6 +860,30 @@ export async function updateMattermostPost(
     method: "PUT",
     body: JSON.stringify(payload),
   });
+}
+
+/**
+ * Confirm a message-only edit after an ambiguous provider error. A matching read-back
+ * proves that the requested edit committed and prevents a duplicate fallback post.
+ */
+export async function updateMattermostPostMessageWithReadback(
+  client: MattermostClient,
+  postId: string,
+  message: string,
+): Promise<MattermostPost> {
+  try {
+    return await updateMattermostPost(client, postId, { message });
+  } catch (error: unknown) {
+    try {
+      const post = await fetchMattermostPost(client, postId);
+      if (post.message === message) {
+        return post;
+      }
+    } catch {
+      // Preserve the original edit error; read-back is only reconciliation evidence.
+    }
+    throw error;
+  }
 }
 
 export async function deleteMattermostPost(

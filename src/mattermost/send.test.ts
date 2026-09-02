@@ -5,6 +5,7 @@ import { convertMarkdownTables } from "openclaw/plugin-sdk/text-chunking";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 let sendMessageMattermost: typeof import("./send.js").sendMessageMattermost;
+let reconcileMattermostUnknownSend: typeof import("./send.js").reconcileMattermostUnknownSend;
 let parseMattermostTarget: typeof import("./target-resolution.js").parseMattermostTarget;
 
 type SendMessageMattermostOptions = NonNullable<
@@ -34,6 +35,7 @@ const mockState = vi.hoisted(() => ({
   createMattermostDirectChannelWithRetry: vi.fn(),
   createMattermostPost: vi.fn(),
   fetchMattermostChannelByName: vi.fn(),
+  fetchMattermostChannelPostsSince: vi.fn(),
   fetchMattermostMe: vi.fn(),
   fetchMattermostUser: vi.fn(),
   fetchMattermostUserTeams: vi.fn(),
@@ -49,7 +51,7 @@ const mockState = vi.hoisted(() => ({
 type MattermostPostParams = {
   channelId?: string;
   message?: string;
-  props?: {
+  props?: Record<string, unknown> & {
     attachments?: Array<{
       actions?: Array<{ id?: string; name?: string }>;
     }>;
@@ -197,6 +199,7 @@ vi.mock("./client.js", async () => ({
   createMattermostDirectChannelWithRetry: mockState.createMattermostDirectChannelWithRetry,
   createMattermostPost: mockState.createMattermostPost,
   fetchMattermostChannelByName: mockState.fetchMattermostChannelByName,
+  fetchMattermostChannelPostsSince: mockState.fetchMattermostChannelPostsSince,
   fetchMattermostMe: mockState.fetchMattermostMe,
   fetchMattermostUser: mockState.fetchMattermostUser,
   fetchMattermostUserTeams: mockState.fetchMattermostUserTeams,
@@ -244,6 +247,7 @@ describe("sendMessageMattermost", () => {
     mockState.createMattermostDirectChannelWithRetry.mockReset();
     mockState.createMattermostPost.mockReset();
     mockState.fetchMattermostChannelByName.mockReset();
+    mockState.fetchMattermostChannelPostsSince.mockReset();
     mockState.fetchMattermostMe.mockReset();
     mockState.fetchMattermostUser.mockReset();
     mockState.fetchMattermostUserTeams.mockReset();
@@ -257,7 +261,7 @@ describe("sendMessageMattermost", () => {
     mockState.fetchMattermostUserTeams.mockResolvedValue([{ id: "team-1" }]);
     mockState.fetchMattermostChannelByName.mockResolvedValue({ id: "town-square" });
     mockState.uploadMattermostFile.mockResolvedValue({ id: "file-1" });
-    ({ sendMessageMattermost } = await import("./send.js"));
+    ({ reconcileMattermostUnknownSend, sendMessageMattermost } = await import("./send.js"));
     ({ parseMattermostTarget } = await import("./target-resolution.js"));
   });
 
@@ -512,6 +516,117 @@ describe("sendMessageMattermost", () => {
     });
     expect(onDeliveryResult).toHaveBeenCalledTimes(1);
     expect(mockState.recordActivity).not.toHaveBeenCalled();
+  });
+
+  it("marks durable text sends before provider-visible post creation", async () => {
+    const events: string[] = [];
+    const onPlatformSendDispatch = vi.fn(async () => {
+      events.push("dispatch");
+    });
+    mockState.createMattermostPost.mockImplementationOnce(async () => {
+      events.push("create");
+      return { id: "post-durable" };
+    });
+
+    await sendMessageMattermost("channel:town-square", "durable", {
+      cfg: TEST_CFG,
+      replyToId: "root-1",
+      deliveryQueueId: "queue-secret-1",
+      deliveryPartIndex: 0,
+      deliveryPartCount: 1,
+      onPlatformSendDispatch,
+    });
+
+    expect(events).toEqual(["dispatch", "create"]);
+    const marker = createMattermostPostParams().props?.openclaw_delivery;
+    expect(marker).toMatchObject({
+      id: expect.any(String),
+      part_index: 0,
+      part_count: 1,
+      signature: expect.any(String),
+    });
+    expect(JSON.stringify(marker)).not.toContain("queue-secret-1");
+  });
+
+  it("reconciles an accepted durable text send by its signed provider marker", async () => {
+    await sendMessageMattermost("channel:town-square", "durable", {
+      cfg: TEST_CFG,
+      replyToId: "root-1",
+      deliveryQueueId: "queue-secret-2",
+    });
+    const props = createMattermostPostParams().props;
+    mockState.fetchMattermostChannelPostsSince.mockResolvedValueOnce([
+      {
+        id: "post-recovered",
+        user_id: "bot-user",
+        channel_id: "town-square",
+        root_id: "root-1",
+        message: "durable",
+        props,
+      },
+    ]);
+
+    const result = await reconcileMattermostUnknownSend({
+      cfg: TEST_CFG,
+      queueId: "queue-secret-2",
+      channel: "mattermost",
+      to: "channel:town-square",
+      enqueuedAt: Date.now() - 1000,
+      retryCount: 0,
+      effectiveReplyToId: "root-1",
+      payloads: [{ text: "durable" }],
+    });
+
+    expect(result).toMatchObject({
+      status: "sent",
+      receipt: {
+        platformMessageIds: ["post-recovered"],
+        parts: [{ platformMessageId: "post-recovered", kind: "text" }],
+      },
+    });
+    expect(mockState.fetchMattermostChannelPostsSince).toHaveBeenCalledWith(
+      {},
+      "town-square",
+      expect.any(Number),
+    );
+  });
+
+  it("does not accept a durable marker from another author or thread", async () => {
+    await sendMessageMattermost("channel:town-square", "durable", {
+      cfg: TEST_CFG,
+      replyToId: "root-1",
+      deliveryQueueId: "queue-secret-3",
+    });
+    const props = createMattermostPostParams().props;
+    mockState.fetchMattermostChannelPostsSince.mockResolvedValueOnce([
+      {
+        id: "post-forged-author",
+        user_id: "other-user",
+        channel_id: "town-square",
+        root_id: "root-1",
+        props,
+      },
+      {
+        id: "post-wrong-thread",
+        user_id: "bot-user",
+        channel_id: "town-square",
+        root_id: "root-2",
+        props,
+      },
+    ]);
+
+    await expect(
+      reconcileMattermostUnknownSend({
+        cfg: TEST_CFG,
+        queueId: "queue-secret-3",
+        channel: "mattermost",
+        to: "channel:town-square",
+        enqueuedAt: Date.now() - 1000,
+        retryCount: 2,
+        effectiveReplyToId: "root-1",
+        payloads: [{ text: "durable" }],
+      }),
+    ).resolves.toMatchObject({ status: "unresolved", retryable: false });
   });
 
   it("loads outbound media with trusted local roots before upload", async () => {

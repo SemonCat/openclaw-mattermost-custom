@@ -19,10 +19,12 @@ import {
   createMattermostPost,
   fetchMattermostChannel,
   fetchMattermostChannelPosts,
+  fetchMattermostChannelPostsSince,
   normalizeMattermostBaseUrl,
   patchMattermostChannelHeader,
   readMattermostError,
   updateMattermostPost,
+  updateMattermostPostMessageWithReadback,
 } from "./client.js";
 
 // ── Helper: mock fetch that captures requests ────────────────────────
@@ -886,6 +888,68 @@ describe("updateMattermostPost", () => {
     expect(body.id).toBe("post1");
     expect(body.message).toBeUndefined();
     expect(body.props).toEqual({ attachments: [] });
+  });
+});
+
+describe("updateMattermostPostMessageWithReadback", () => {
+  it("accepts an ambiguous edit error when provider read-back already matches", async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockRejectedValueOnce(new Error("socket closed after write"))
+      .mockResolvedValueOnce(
+        Response.json({ id: "post1", message: "Final answer" }, { status: 200 }),
+      );
+    const client = createMattermostClient({
+      baseUrl: "http://localhost:8065",
+      botToken: "tok",
+      fetchImpl,
+    });
+
+    await expect(
+      updateMattermostPostMessageWithReadback(client, "post1", "Final answer"),
+    ).resolves.toMatchObject({ id: "post1", message: "Final answer" });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(fetchImpl.mock.calls[0]?.[1]?.method).toBe("PUT");
+    expect(requestUrl(fetchImpl.mock.calls[1]?.[0] as string)).toContain("/posts/post1");
+  });
+
+  it("preserves the original edit error when read-back differs", async () => {
+    const editError = new Error("socket closed after write");
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockRejectedValueOnce(editError)
+      .mockResolvedValueOnce(Response.json({ id: "post1", message: "Old text" }, { status: 200 }));
+    const client = createMattermostClient({
+      baseUrl: "http://localhost:8065",
+      botToken: "tok",
+      fetchImpl,
+    });
+
+    await expect(
+      updateMattermostPostMessageWithReadback(client, "post1", "Final answer"),
+    ).rejects.toBe(editError);
+  });
+});
+
+describe("fetchMattermostChannelPostsSince", () => {
+  it("uses the bounded since query and preserves provider order", async () => {
+    const { client, calls } = createTestClient({
+      body: {
+        order: ["post-2", "post-1"],
+        posts: {
+          "post-1": { id: "post-1", message: "one" },
+          "post-2": { id: "post-2", message: "two" },
+        },
+      },
+    });
+
+    await expect(fetchMattermostChannelPostsSince(client, "channel/1", 1234)).resolves.toEqual([
+      expect.objectContaining({ id: "post-2" }),
+      expect.objectContaining({ id: "post-1" }),
+    ]);
+    expect(requireRequestCall(calls).url).toBe(
+      "http://localhost:8065/api/v4/channels/channel%2F1/posts?since=1234",
+    );
   });
 });
 

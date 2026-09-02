@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const sendMessageMattermostMock = vi.hoisted(() => vi.fn());
 
 vi.mock("./mattermost/send.js", () => ({
+  reconcileMattermostUnknownSend: vi.fn(),
   sendMessageMattermost: sendMessageMattermostMock,
 }));
 

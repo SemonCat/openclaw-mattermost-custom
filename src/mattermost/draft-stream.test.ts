@@ -86,6 +86,28 @@ describe("createMattermostDraftStream", () => {
     expect(stream.postId()).toBe("recovered-result");
   });
 
+  it("keeps the preview identity when a failed edit is confirmed by read-back", async () => {
+    const { calls, stream } = createDraftStreamFixture({
+      initialPost: { id: "preview-1", message: "Old progress" },
+      request: async (path, init) => {
+        calls.push({ path, init });
+        if (init?.method === "PUT") {
+          throw new Error("socket closed after write");
+        }
+        return { id: "preview-1", message: "Updated progress" } as never;
+      },
+    });
+
+    stream.update("Updated progress");
+    await stream.flush();
+
+    expect(calls.map((entry) => [entry.path, entry.init?.method])).toEqual([
+      ["/posts/preview-1", "PUT"],
+      ["/posts/preview-1", undefined],
+    ]);
+    expect(stream.postId()).toBe("preview-1");
+  });
+
   it("creates a preview post and updates it on later changes", async () => {
     const { calls, stream } = createDraftStreamFixture({ rootId: "root-1" });
 
@@ -317,9 +339,12 @@ describe("createMattermostDraftStream", () => {
     await stream.stop();
 
     expect(warn).toHaveBeenCalledWith("mattermost stream preview failed: patch failed");
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(3);
     expect(calls[0]?.path).toBe("/posts");
     expect(calls[1]?.path).toBe("/posts/post-1");
+    expect(calls[1]?.init?.method).toBe("PUT");
+    expect(calls[2]?.path).toBe("/posts/post-1");
+    expect(calls[2]?.init?.method).toBeUndefined();
   });
 });
 
