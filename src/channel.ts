@@ -183,7 +183,7 @@ function describeMattermostMessageTool({
   const hasActionCapableAccount = (key: "edit" | "delete" | "pins") =>
     enabledAccounts.some((account) => {
       const accountActions = account.config.actions as MattermostActionToggles | undefined;
-      return accountActions?.[key] ?? actionsConfig?.[key] ?? false;
+      return accountActions?.[key] ?? actionsConfig?.[key] ?? true;
     });
   if (hasActionCapableAccount("edit")) {
     actions.push("edit");
@@ -504,7 +504,7 @@ const mattermostMessageActions: ChannelMessageActionAdapter = {
       });
       const toggle: keyof MattermostActionToggles =
         action === "pin" || action === "unpin" ? "pins" : action;
-      if (!isMattermostActionEnabled({ account, channelActions, key: toggle, defaultValue: false })) {
+      if (!isMattermostActionEnabled({ account, channelActions, key: toggle, defaultValue: true })) {
         throw new Error(`Mattermost ${toggle} actions are disabled in config`);
       }
       const postId = readStringParam(params, "messageId") ?? readStringParam(params, "postId");
@@ -541,7 +541,7 @@ const mattermostMessageActions: ChannelMessageActionAdapter = {
         cfg,
         accountId,
       });
-      if (!isMattermostActionEnabled({ account, channelActions, key: "pins", defaultValue: false })) {
+      if (!isMattermostActionEnabled({ account, channelActions, key: "pins", defaultValue: true })) {
         throw new Error("Mattermost pins actions are disabled in config");
       }
       const authorizedTarget = normalizeOptionalString(params.to);

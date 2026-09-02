@@ -81,37 +81,36 @@ Compared with the official plugin, this build preserves:
 - Ack and lifecycle status reactions, including same-session steer correlation.
 - Unknown-send reconciliation for durable text delivery, using opaque signed
   post metadata rather than matching visible message text.
-- Opt-in message edit, delete, and pin actions, plus reaction reads.
+- Message edit, delete, and pin actions enabled by default, plus reaction reads.
 - Durable plan-backed task progress cards that remain after the final answer.
 - The Mattermost slash-trigger length cap fix.
 
-Mutable message-tool actions remain disabled unless explicitly enabled. This
-keeps upgrades from silently expanding what an agent may change:
+Mutable message-tool actions are enabled by default for this personal downstream
+plugin. Each gate can still be disabled globally or per account:
 
 ```json
 {
   "channels": {
     "mattermost": {
       "actions": {
-        "messages": true,
+        "messages": false,
         "reactions": true,
-        "edit": false,
-        "delete": false,
-        "pins": false
+        "edit": true,
+        "delete": true,
+        "pins": true
       }
     }
   }
 }
 ```
 
-`messages` enables channel reads, `reactions` enables add/remove/list, and the
-three mutation gates can also be overridden per account.
+`messages` remains opt-in for channel reads, `reactions` enables add/remove/list,
+and the three mutation gates can be overridden per account.
 
-Interactive buttons keep the legacy attachment renderer by default. Set
-`channels.mattermost.interactions.blocks: true` to use native Mattermost Blocks
-on servers where the `MmBlocksEnabled` feature is available. An explicit HTTP
-400 rejection falls back once to legacy attachments; transport failures are not
-retried because the first post may already have been accepted.
+Interactive buttons use native Mattermost Blocks by default. Set
+`channels.mattermost.interactions.blocks: false` to force legacy attachments.
+An explicit HTTP 400 rejection falls back once to legacy attachments; transport
+failures are not retried because the first post may already have been accepted.
 
 When an agent emits a structured plan update, the plugin lazily creates one
 Mattermost task card in the same channel or thread and edits that post for the

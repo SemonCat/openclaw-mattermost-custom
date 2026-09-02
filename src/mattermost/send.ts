@@ -565,6 +565,7 @@ export async function sendMessageMattermost(
   if (!props && Array.isArray(opts.buttons) && opts.buttons.length > 0) {
     setInteractionSecret(accountId, token);
     const interactions = resolveMattermostAccount({ cfg, accountId }).config?.interactions;
+    const useBlocks = interactions?.blocks ?? true;
     const callbackUrl = resolveInteractionCallbackUrl(accountId, {
       gateway: cfg.gateway,
       interactions,
@@ -578,9 +579,9 @@ export async function sendMessageMattermost(
     };
     props = buildButtonProps({
       ...buttonParams,
-      format: interactions?.blocks ? "blocks" : "legacy",
+      format: useBlocks ? "blocks" : "legacy",
     });
-    if (interactions?.blocks) {
+    if (useBlocks) {
       legacyButtonFallbackProps = buildButtonProps({ ...buttonParams, format: "legacy" });
     }
   }

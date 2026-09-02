@@ -122,9 +122,12 @@ describe("MattermostConfigSchema", () => {
     expect(result.success).toBe(true);
   });
 
-  it("accepts opt-in native Mattermost Blocks rendering", () => {
+  it("accepts explicitly enabled or disabled native Mattermost Blocks rendering", () => {
     expect(
       MattermostConfigSchema.safeParse({ interactions: { blocks: true } }).success,
+    ).toBe(true);
+    expect(
+      MattermostConfigSchema.safeParse({ interactions: { blocks: false } }).success,
     ).toBe(true);
   });
 

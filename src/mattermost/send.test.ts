@@ -685,7 +685,7 @@ describe("sendMessageMattermost", () => {
     expect(mockState.createMattermostPost).not.toHaveBeenCalled();
   });
 
-  it("builds interactive button props when buttons are provided", async () => {
+  it("uses native Mattermost Blocks by default", async () => {
     mockState.resolveMattermostAccount.mockReturnValue({
       accountId: "default",
       botToken: "bot-token",
@@ -702,20 +702,20 @@ describe("sendMessageMattermost", () => {
     expect(postCall?.[0]).toEqual({});
     expect(postCall?.[1]?.channelId).toBe("town-square");
     expect(postCall?.[1]?.message).toBe("Pick a model");
-    const attachments = postCall?.[1]?.props?.attachments;
-    expect(Array.isArray(attachments)).toBe(true);
-    const actions = attachments?.[0]?.actions;
-    expect(Array.isArray(actions)).toBe(true);
-    expect(actions?.[0]?.id).toBe("mdlprov");
-    expect(actions?.[0]?.name).toBe("Browse providers");
+    const blocks = postCall?.[1]?.props?.mm_blocks;
+    expect(Array.isArray(blocks)).toBe(true);
+    expect(postCall?.[1]?.props?.mm_blocks_actions).toMatchObject({
+      mdlprov: { type: "external" },
+    });
+    expect(postCall?.[1]?.props?.attachments).toBeUndefined();
   });
 
-  it("uses native Mattermost Blocks only when explicitly enabled", async () => {
+  it("uses legacy Mattermost attachments when Blocks are explicitly disabled", async () => {
     mockState.resolveMattermostAccount.mockReturnValue({
       accountId: "default",
       botToken: "bot-token",
       baseUrl: "https://mattermost.example.com",
-      config: { interactions: { blocks: true } },
+      config: { interactions: { blocks: false } },
     });
 
     await sendMessageMattermost("channel:town-square", "Pick a model", {
@@ -724,22 +724,13 @@ describe("sendMessageMattermost", () => {
     });
 
     const props = createMattermostPostParams().props;
-    expect(props?.mm_blocks).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          type: "container",
-          content: [
-            expect.objectContaining({
-              type: "button",
-              text: "Browse providers",
-              action_id: "mdlprov",
-            }),
-          ],
-        }),
-      ]),
-    );
-    expect(props?.mm_blocks_actions).toMatchObject({ mdlprov: { type: "external" } });
-    expect(props?.attachments).toBeUndefined();
+    const attachments = props?.attachments;
+    expect(Array.isArray(attachments)).toBe(true);
+    const actions = attachments?.[0]?.actions;
+    expect(Array.isArray(actions)).toBe(true);
+    expect(actions?.[0]?.id).toBe("mdlprov");
+    expect(actions?.[0]?.name).toBe("Browse providers");
+    expect(props?.mm_blocks).toBeUndefined();
   });
 
   it("falls back to legacy buttons only after an explicit Blocks rejection", async () => {
