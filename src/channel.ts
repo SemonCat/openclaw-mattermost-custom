@@ -163,17 +163,16 @@ function describeMattermostMessageTool({
     actions.push("send");
   }
 
-  const actionsConfig = cfg.channels?.mattermost?.actions as
-    | { messages?: boolean; reactions?: boolean }
-    | undefined;
+  const actionsConfig = cfg.channels?.mattermost?.actions as MattermostActionToggles | undefined;
   const baseMessages = actionsConfig?.messages;
   const baseReactions = actionsConfig?.reactions;
   const hasReactionCapableAccount = enabledAccounts.some((account) => {
-    const accountActions = account.config.actions as { reactions?: boolean } | undefined;
+    const accountActions = account.config.actions as MattermostActionToggles | undefined;
     return accountActions?.reactions ?? baseReactions ?? true;
   });
   if (hasReactionCapableAccount) {
     actions.push("react");
+    actions.push("reactions");
   }
   const hasMessageCapableAccount = enabledAccounts.some(
     (account) => account.config.actions?.messages ?? baseMessages ?? false,
@@ -181,11 +180,60 @@ function describeMattermostMessageTool({
   if (hasMessageCapableAccount) {
     actions.push("read");
   }
+  const hasActionCapableAccount = (key: "edit" | "delete" | "pins") =>
+    enabledAccounts.some((account) => {
+      const accountActions = account.config.actions as MattermostActionToggles | undefined;
+      return accountActions?.[key] ?? actionsConfig?.[key] ?? false;
+    });
+  if (hasActionCapableAccount("edit")) {
+    actions.push("edit");
+  }
+  if (hasActionCapableAccount("delete")) {
+    actions.push("delete");
+  }
+  if (hasActionCapableAccount("pins")) {
+    actions.push("pin", "unpin", "list-pins");
+  }
 
   return {
     actions,
     capabilities: enabledAccounts.length > 0 ? ["presentation"] : [],
   };
+}
+
+type MattermostActionToggles = NonNullable<MattermostConfig["actions"]>;
+
+function resolveMattermostActionAccount(params: {
+  cfg: OpenClawConfig;
+  accountId?: string | null;
+}): {
+  resolvedAccountId: string;
+  account: ResolvedMattermostAccount;
+  channelActions?: MattermostActionToggles;
+} {
+  const resolvedAccountId = params.accountId ?? resolveDefaultMattermostAccountId(params.cfg);
+  const account = resolveMattermostAccount({ cfg: params.cfg, accountId: resolvedAccountId });
+  if (!account.enabled) {
+    throw new Error(`Mattermost account "${resolvedAccountId}" is disabled`);
+  }
+  return {
+    resolvedAccountId,
+    account,
+    channelActions: (params.cfg.channels?.mattermost as MattermostConfig | undefined)?.actions,
+  };
+}
+
+function isMattermostActionEnabled(params: {
+  account: ResolvedMattermostAccount;
+  channelActions?: MattermostActionToggles;
+  key: keyof MattermostActionToggles;
+  defaultValue: boolean;
+}): boolean {
+  return (
+    params.account.config.actions?.[params.key] ??
+    params.channelActions?.[params.key] ??
+    params.defaultValue
+  );
 }
 
 function hasConfiguredMattermostDirectoryAccount({
@@ -394,7 +442,17 @@ const mattermostMessageActions: ChannelMessageActionAdapter = {
     };
   },
   supportsAction: ({ action }) => {
-    return action === "send" || action === "react" || action === "read";
+    return [
+      "send",
+      "react",
+      "reactions",
+      "read",
+      "edit",
+      "delete",
+      "pin",
+      "unpin",
+      "list-pins",
+    ].includes(action);
   },
   handleAction: async ({
     action,
@@ -408,6 +466,105 @@ const mattermostMessageActions: ChannelMessageActionAdapter = {
     requesterAccountId,
     toolContext,
   }) => {
+    if (action === "reactions") {
+      const { resolvedAccountId, account, channelActions } = resolveMattermostActionAccount({
+        cfg,
+        accountId,
+      });
+      if (
+        !isMattermostActionEnabled({
+          account,
+          channelActions,
+          key: "reactions",
+          defaultValue: true,
+        })
+      ) {
+        throw new Error("Mattermost reactions actions are disabled in config");
+      }
+      const postId = readStringParam(params, "messageId") ?? readStringParam(params, "postId");
+      if (!postId) {
+        throw new Error("Mattermost reactions requires messageId (post id).");
+      }
+      const reactions = await (
+        await loadMattermostChannelRuntime()
+      ).listMattermostMessageReactionsAction({
+        cfg,
+        postId,
+        accountId: resolvedAccountId,
+        authorizedTarget: normalizeOptionalString(params.to),
+        conversationReadOrigin,
+      });
+      return jsonResult({ ok: true, postId, reactions });
+    }
+
+    if (action === "edit" || action === "delete" || action === "pin" || action === "unpin") {
+      const { resolvedAccountId, account, channelActions } = resolveMattermostActionAccount({
+        cfg,
+        accountId,
+      });
+      const toggle: keyof MattermostActionToggles =
+        action === "pin" || action === "unpin" ? "pins" : action;
+      if (!isMattermostActionEnabled({ account, channelActions, key: toggle, defaultValue: false })) {
+        throw new Error(`Mattermost ${toggle} actions are disabled in config`);
+      }
+      const postId = readStringParam(params, "messageId") ?? readStringParam(params, "postId");
+      if (!postId) {
+        throw new Error(`Mattermost ${action} requires messageId (post id).`);
+      }
+      const common = {
+        cfg,
+        postId,
+        accountId: resolvedAccountId,
+        authorizedTarget: normalizeOptionalString(params.to),
+        conversationReadOrigin,
+      };
+      const runtime = await loadMattermostChannelRuntime();
+      if (action === "edit") {
+        const message = readStringParam(params, "message") ?? readStringParam(params, "content");
+        if (!message) {
+          throw new Error("Mattermost edit requires message or content.");
+        }
+        const post = await runtime.editMattermostMessageAction({ ...common, message });
+        return jsonResult({ ok: true, post });
+      }
+      if (action === "delete") {
+        await runtime.deleteMattermostMessageAction(common);
+        return jsonResult({ ok: true, postId });
+      }
+      const pinned = action === "pin";
+      await runtime.setMattermostMessagePinnedAction({ ...common, pinned });
+      return jsonResult({ ok: true, postId, pinned });
+    }
+
+    if (action === "list-pins") {
+      const { resolvedAccountId, account, channelActions } = resolveMattermostActionAccount({
+        cfg,
+        accountId,
+      });
+      if (!isMattermostActionEnabled({ account, channelActions, key: "pins", defaultValue: false })) {
+        throw new Error("Mattermost pins actions are disabled in config");
+      }
+      const authorizedTarget = normalizeOptionalString(params.to);
+      const channelId =
+        readStringParam(params, "channelId") ??
+        (authorizedTarget?.startsWith("channel:")
+          ? authorizedTarget.slice("channel:".length)
+          : undefined);
+      if (!channelId) {
+        throw new Error("Mattermost list-pins requires channelId or a channel target.");
+      }
+      const posts = await (
+        await loadMattermostChannelRuntime()
+      ).listMattermostPinnedMessagesAction({
+        cfg,
+        channelId,
+        accountId: resolvedAccountId,
+        authorizedTarget,
+        conversationReadOrigin,
+      });
+      return jsonResult({ ok: true, channelId, posts });
+    }
+
     if (action === "read") {
       const resolvedAccountId = accountId ?? resolveDefaultMattermostAccountId(cfg);
       const mattermostConfig = cfg.channels?.mattermost as MattermostConfig | undefined;

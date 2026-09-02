@@ -166,6 +166,7 @@ const mockState = vi.hoisted(() => ({
   sendTypingIndicator: vi.fn(async () => {}),
   sendMessageMattermost: vi.fn(),
   updateMattermostPost: vi.fn(),
+  updateMattermostPostMessageWithReadback: vi.fn(),
 }));
 
 vi.mock("openclaw/plugin-sdk/plugin-runtime", async (importOriginal) => ({
@@ -229,6 +230,7 @@ vi.mock("./client.js", async () => {
     fetchMattermostPost: mockState.fetchMattermostPost,
     normalizeMattermostBaseUrl: (value: string | undefined) => value?.trim() ?? "",
     updateMattermostPost: mockState.updateMattermostPost,
+    updateMattermostPostMessageWithReadback: mockState.updateMattermostPostMessageWithReadback,
   };
 });
 
@@ -702,6 +704,7 @@ describe("mattermost inbound user posts", () => {
     mockState.resolveMattermostMedia.mockResolvedValue([]);
     mockState.resolveUserInfo.mockResolvedValue({ id: "user-1", username: "alice" });
     mockState.sendMessageMattermost.mockResolvedValue({});
+    mockState.updateMattermostPostMessageWithReadback.mockResolvedValue({ id: "patched" });
     mockState.dispatchInboundMessage.mockImplementation(async () => {
       mockState.abortController?.abort();
     });
@@ -2940,7 +2943,9 @@ describe("mattermost inbound user posts", () => {
     };
     const runtimeCore = createRuntimeCore(blockConfig);
     mockState.runtimeCore = runtimeCore;
-    mockState.updateMattermostPost.mockRejectedValueOnce(new Error("edit failed"));
+    mockState.updateMattermostPostMessageWithReadback.mockRejectedValueOnce(
+      new Error("edit failed"),
+    );
     const forceNewMessage = vi.fn(async () => {});
     const updateAssistantText = vi.fn();
     const resolveFinalText = vi.fn((text: string) =>
@@ -3002,9 +3007,11 @@ describe("mattermost inbound user posts", () => {
     expect(updateAssistantText).toHaveBeenNthCalledWith(1, "[bot] First block");
     expect(updateAssistantText).toHaveBeenNthCalledWith(2, "Second block");
     expect(resolveFinalText).toHaveBeenCalledWith("[bot] First block\n\nSecond block");
-    expect(mockState.updateMattermostPost).toHaveBeenCalledWith({}, "preview-current", {
-      message: "Second block",
-    });
+    expect(mockState.updateMattermostPostMessageWithReadback).toHaveBeenCalledWith(
+      {},
+      "preview-current",
+      "Second block",
+    );
     expect(mockState.sendMessageMattermost).toHaveBeenCalledWith(
       "channel:chan-1",
       "Second block",

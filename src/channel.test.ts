@@ -685,7 +685,11 @@ describe("mattermostPlugin", () => {
 
       const actions = getDescribedActions(cfg);
       expect(actions).toContain("react");
+      expect(actions).toContain("reactions");
       expect(actions).not.toContain("read");
+      expect(actions).not.toContain("edit");
+      expect(actions).not.toContain("delete");
+      expect(actions).not.toContain("pin");
       expect(actions).toContain("send");
       expect(mattermostPlugin.actions?.supportsAction?.({ action: "react" })).toBe(true);
       expect(mattermostPlugin.actions?.supportsAction?.({ action: "read" })).toBe(true);
@@ -841,6 +845,30 @@ describe("mattermostPlugin", () => {
       expect(actions).toContain("send");
     });
 
+    it("only advertises mutable post actions after their explicit opt-ins", () => {
+      const cfg: OpenClawConfig = {
+        channels: {
+          mattermost: {
+            enabled: true,
+            botToken: "test-token-placeholder",
+            baseUrl: "https://chat.example.com",
+            actions: { edit: true, delete: true, pins: true },
+          },
+        },
+      };
+
+      expect(getDescribedActions(cfg)).toEqual([
+        "send",
+        "react",
+        "reactions",
+        "edit",
+        "delete",
+        "pin",
+        "unpin",
+        "list-pins",
+      ]);
+    });
+
     it("respects per-account actions.messages in message discovery", () => {
       const cfg: OpenClawConfig = {
         channels: {
@@ -909,7 +937,7 @@ describe("mattermostPlugin", () => {
       };
 
       expect(getDescribedActions(cfg, "default")).toEqual(["send"]);
-      expect(getDescribedActions(cfg, "work")).toEqual(["send", "react"]);
+      expect(getDescribedActions(cfg, "work")).toEqual(["send", "react", "reactions"]);
     });
 
     it("blocks react when default account disables reactions and accountId is omitted", async () => {

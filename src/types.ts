@@ -84,6 +84,12 @@ export type MattermostAccountConfig = {
     messages?: boolean;
     /** Enable message reaction actions. Default: true. */
     reactions?: boolean;
+    /** Enable editing posts through the message tool. Default: false. */
+    edit?: boolean;
+    /** Enable deleting posts through the message tool. Default: false. */
+    delete?: boolean;
+    /** Enable pin, unpin, and pinned-post reads. Default: false. */
+    pins?: boolean;
   };
   /** Channel IDs allowed for delegated cross-channel reads and inbound routing. */
   groups?: Record<string, { requireMention?: boolean } | undefined>;
@@ -119,6 +125,8 @@ export type MattermostAccountConfig = {
      * over a non-loopback path. Keep this narrow to the Mattermost server or trusted ingress.
      */
     allowedSourceIps?: string[];
+    /** Prefer native Mattermost Blocks for interactive buttons. Default: false. */
+    blocks?: boolean;
   };
   /** Network policy overrides for self-hosted Mattermost on trusted private/internal hosts. */
   network?: MattermostNetworkConfig;

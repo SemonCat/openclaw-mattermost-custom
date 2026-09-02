@@ -6,6 +6,13 @@ export {
 export { monitorMattermostProvider } from "./mattermost/monitor.js";
 export { probeMattermost } from "./mattermost/probe.js";
 export { addMattermostReaction, removeMattermostReaction } from "./mattermost/reactions.js";
+export {
+  deleteMattermostMessageAction,
+  editMattermostMessageAction,
+  listMattermostMessageReactionsAction,
+  listMattermostPinnedMessagesAction,
+  setMattermostMessagePinnedAction,
+} from "./mattermost/message-actions.js";
 export { readMattermostMessages } from "./mattermost/read.js";
 export { reconcileMattermostUnknownSend, sendMessageMattermost } from "./mattermost/send.js";
 export { resolveMattermostOpaqueTarget } from "./mattermost/target-resolution.js";

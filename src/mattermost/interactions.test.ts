@@ -372,6 +372,41 @@ describe("buildButtonProps attachments", () => {
     expect(requireActions(result)).toHaveLength(2);
   });
 
+  it("renders native Mattermost Blocks with a matching signed action registry", () => {
+    const props = buildButtonProps({
+      callbackUrl: "https://gateway.example.com/mattermost/interactions/acct",
+      accountId: "acct",
+      channelId: "chan-1",
+      buttons: [{ id: "approve-build", name: "Approve", style: "primary" }],
+      text: "Review deployment",
+      format: "blocks",
+    });
+
+    expect(props?.mm_blocks).toEqual([
+      { type: "text", text: "Review deployment" },
+      {
+        type: "container",
+        flow: "horizontal",
+        gap: "small",
+        content: [
+          { type: "button", text: "Approve", style: "primary", action_id: "approvebuild" },
+        ],
+      },
+    ]);
+    expect(props?.mm_blocks_actions).toMatchObject({
+      approvebuild: {
+        type: "external",
+        url: "https://gateway.example.com/mattermost/interactions/acct",
+        context: {
+          action_id: "approvebuild",
+          __openclaw_channel_id: "chan-1",
+          _token: expect.stringMatching(/^[0-9a-f]{64}$/),
+        },
+      },
+    });
+    expect(props?.attachments).toBeUndefined();
+  });
+
   it("sets type to 'button' on every action", () => {
     const result = buildButtonAttachmentsForTest({
       callbackUrl: "http://localhost:18789/cb",
@@ -848,6 +883,38 @@ describe("createMattermostInteractionHandler", () => {
 
     expect(res.statusCode).toBe(403);
     expect(res.body).toContain("Unknown action");
+  });
+
+  it("accepts actions that are present in native Mattermost Blocks", async () => {
+    const { context, token } = createActionContext();
+    const handleInteraction = vi.fn(async () => ({}));
+    const handler = createMattermostInteractionHandler({
+      client: createMattermostClientMock(async () => ({
+        id: "post-1",
+        channel_id: "chan-1",
+        message: "Choose",
+        props: {
+          mm_blocks: [
+            {
+              type: "container",
+              content: [{ type: "button", action_id: "approve", text: "Approve" }],
+            },
+          ],
+        },
+      })),
+      botUserId: "bot",
+      accountId: "acct",
+      handleInteraction,
+    });
+
+    const res = await runHandler(handler, {
+      body: createInteractionBody({ context, token }),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(handleInteraction).toHaveBeenCalledWith(
+      expect.objectContaining({ actionId: "approve", actionName: "Approve" }),
+    );
   });
 
   it("accepts actions when the button name matches the action id", async () => {

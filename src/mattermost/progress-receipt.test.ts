@@ -5,7 +5,10 @@ import type { MattermostClient } from "./client.js";
 import { deliverMattermostReplyWithDraftPreview } from "./monitor-draft-delivery.js";
 import { createMattermostProgressReceipt } from "./progress-receipt.js";
 
-const updateMattermostPostSpy = vi.spyOn(clientModule, "updateMattermostPost");
+const updateMattermostPostSpy = vi.spyOn(
+  clientModule,
+  "updateMattermostPostMessageWithReadback",
+);
 
 function createMattermostClientMock(): MattermostClient {
   return {
@@ -318,10 +321,11 @@ describe("createMattermostProgressReceipt", () => {
       deliverPayload: deliverFinal,
     });
 
-    expect(updateMattermostPostSpy).toHaveBeenCalledWith(expect.anything(), "preview-post-1", {
-      message:
-        "All good\n⬆️ ? in · ⬇️ ? out · 🛠️ 1 tool call\n⏱️ 1s · 🧠 0.0s · 🔧 0.0s",
-    });
+    expect(updateMattermostPostSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      "preview-post-1",
+      "All good\n⬆️ ? in · ⬇️ ? out · 🛠️ 1 tool call\n⏱️ 1s · 🧠 0.0s · 🔧 0.0s",
+    );
     // The in-place edit finalized the preview post directly; no separate send needed.
     expect(deliverFinal).not.toHaveBeenCalled();
     expect(result.visibleReplySent).toBe(true);

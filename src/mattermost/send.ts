@@ -22,10 +22,10 @@ import {
 import { convertMarkdownTables, FormatCapabilityProfile } from "openclaw/plugin-sdk/text-chunking";
 import { getMattermostRuntime } from "../runtime.js";
 import { resolveMattermostAccount } from "./accounts.js";
+import { createMattermostPostWithButtonFallback } from "./button-delivery.js";
 import {
   createMattermostClient,
   createMattermostDirectChannelWithRetry,
-  createMattermostPost,
   fetchMattermostChannelByName,
   fetchMattermostChannelPostsSince,
   fetchMattermostMe,
@@ -34,9 +34,9 @@ import {
   normalizeMattermostBaseUrl,
   parseMattermostApiStatus,
   uploadMattermostFile,
-  type MattermostUser,
-  type MattermostPost,
   type CreateDmChannelRetryOptions,
+  type MattermostPost,
+  type MattermostUser,
 } from "./client.js";
 import {
   buildButtonProps,
@@ -561,23 +561,37 @@ export async function sendMessageMattermost(
     await opts.onPlatformSendDispatch?.();
   };
   let props = opts.props;
+  let legacyButtonFallbackProps: Record<string, unknown> | undefined;
   if (!props && Array.isArray(opts.buttons) && opts.buttons.length > 0) {
     setInteractionSecret(accountId, token);
-    props = buildButtonProps({
-      callbackUrl: resolveInteractionCallbackUrl(accountId, {
-        gateway: cfg.gateway,
-        interactions: resolveMattermostAccount({
-          cfg,
-          accountId,
-        }).config?.interactions,
-      }),
+    const interactions = resolveMattermostAccount({ cfg, accountId }).config?.interactions;
+    const callbackUrl = resolveInteractionCallbackUrl(accountId, {
+      gateway: cfg.gateway,
+      interactions,
+    });
+    const buttonParams = {
+      callbackUrl,
       accountId,
       channelId,
       buttons: opts.buttons,
       text: opts.attachmentText,
+    };
+    props = buildButtonProps({
+      ...buttonParams,
+      format: interactions?.blocks ? "blocks" : "legacy",
     });
+    if (interactions?.blocks) {
+      legacyButtonFallbackProps = buildButtonProps({ ...buttonParams, format: "legacy" });
+    }
   }
   props = withMattermostDeliveryMarker(props, {
+    queueId: opts.deliveryQueueId,
+    channelId,
+    rootId: opts.replyToId,
+    deliveryPartIndex: opts.deliveryPartIndex,
+    deliveryPartCount: opts.deliveryPartCount,
+  });
+  legacyButtonFallbackProps = withMattermostDeliveryMarker(legacyButtonFallbackProps, {
     queueId: opts.deliveryQueueId,
     channelId,
     rootId: opts.replyToId,
@@ -639,13 +653,20 @@ export async function sendMessageMattermost(
   }
 
   await dispatchPlatformSendOnce();
-  const post = await createMattermostPost(client, {
-    channelId,
-    message,
-    rootId: opts.replyToId,
-    fileIds,
-    props,
+  const created = await createMattermostPostWithButtonFallback({
+    client,
+    post: {
+      channelId,
+      message,
+      rootId: opts.replyToId,
+      fileIds,
+      props,
+    },
+    legacyProps: legacyButtonFallbackProps,
+    warn: (warning) => logger.warn?.(warning),
   });
+  const post = created.post;
+  props = created.props;
 
   const messageId = post.id;
   const receipt = createMattermostSendReceipt({

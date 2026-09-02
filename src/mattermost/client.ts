@@ -78,6 +78,17 @@ export const MattermostPostSchema = z
 
 export type MattermostPost = z.infer<typeof MattermostPostSchema>;
 
+const MattermostReactionSchema = z
+  .object({
+    user_id: z.string(),
+    post_id: z.string(),
+    emoji_name: z.string(),
+    create_at: z.number().nullable().optional(),
+  })
+  .passthrough();
+
+export type MattermostReaction = z.infer<typeof MattermostReactionSchema>;
+
 const MattermostPostListSchema = z
   .object({
     order: z.array(z.string()),
@@ -893,6 +904,45 @@ export async function deleteMattermostPost(
   await client.request<void>(`/posts/${postId}`, {
     method: "DELETE",
   });
+}
+
+export async function fetchMattermostPostReactions(
+  client: MattermostClient,
+  postId: string,
+): Promise<MattermostReaction[]> {
+  const response = await client.request<unknown>(
+    `/posts/${encodeURIComponent(postId)}/reactions`,
+  );
+  const parsed = z.array(MattermostReactionSchema).safeParse(response);
+  if (!parsed.success) {
+    throw new Error("Unexpected Mattermost post reactions response.");
+  }
+  return parsed.data;
+}
+
+export async function setMattermostPostPinned(
+  client: MattermostClient,
+  postId: string,
+  pinned: boolean,
+): Promise<void> {
+  await client.request<Record<string, unknown>>(
+    `/posts/${encodeURIComponent(postId)}/${pinned ? "pin" : "unpin"}`,
+    { method: "POST" },
+  );
+}
+
+export async function fetchMattermostPinnedPosts(
+  client: MattermostClient,
+  channelId: string,
+): Promise<MattermostPost[]> {
+  const response = await client.request<unknown>(
+    `/channels/${encodeURIComponent(channelId)}/pinned`,
+  );
+  const parsed = MattermostPostListSchema.safeParse(response);
+  if (!parsed.success || parsed.data.order.some((postId) => !parsed.data.posts[postId])) {
+    throw new Error("Unexpected Mattermost pinned posts response.");
+  }
+  return parsed.data.order.map((postId) => parsed.data.posts[postId] as MattermostPost);
 }
 
 export async function uploadMattermostFile(

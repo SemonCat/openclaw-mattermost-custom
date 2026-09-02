@@ -710,6 +710,83 @@ describe("sendMessageMattermost", () => {
     expect(actions?.[0]?.name).toBe("Browse providers");
   });
 
+  it("uses native Mattermost Blocks only when explicitly enabled", async () => {
+    mockState.resolveMattermostAccount.mockReturnValue({
+      accountId: "default",
+      botToken: "bot-token",
+      baseUrl: "https://mattermost.example.com",
+      config: { interactions: { blocks: true } },
+    });
+
+    await sendMessageMattermost("channel:town-square", "Pick a model", {
+      cfg: TEST_CFG,
+      buttons: [[{ callback_data: "mdlprov", text: "Browse providers" }]],
+    });
+
+    const props = createMattermostPostParams().props;
+    expect(props?.mm_blocks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "container",
+          content: [
+            expect.objectContaining({
+              type: "button",
+              text: "Browse providers",
+              action_id: "mdlprov",
+            }),
+          ],
+        }),
+      ]),
+    );
+    expect(props?.mm_blocks_actions).toMatchObject({ mdlprov: { type: "external" } });
+    expect(props?.attachments).toBeUndefined();
+  });
+
+  it("falls back to legacy buttons only after an explicit Blocks rejection", async () => {
+    mockState.resolveMattermostAccount.mockReturnValue({
+      accountId: "default",
+      botToken: "bot-token",
+      baseUrl: "https://mattermost.example.com",
+      config: { interactions: { blocks: true } },
+    });
+    mockState.createMattermostPost
+      .mockRejectedValueOnce(await createMattermostProviderFailure(400, "Bad Request", "blocks"))
+      .mockResolvedValueOnce({ id: "legacy-post", message: "Pick a model" });
+
+    await expect(
+      sendMessageMattermost("channel:town-square", "Pick a model", {
+        cfg: TEST_CFG,
+        buttons: [[{ callback_data: "mdlprov", text: "Browse providers" }]],
+      }),
+    ).resolves.toMatchObject({ messageId: "legacy-post" });
+
+    expect(mockState.createMattermostPost).toHaveBeenCalledTimes(2);
+    const firstProps = mockState.createMattermostPost.mock.calls[0]?.[1]?.props;
+    const secondProps = mockState.createMattermostPost.mock.calls[1]?.[1]?.props;
+    expect(firstProps?.mm_blocks).toBeDefined();
+    expect(firstProps?.attachments).toBeUndefined();
+    expect(secondProps?.mm_blocks).toBeUndefined();
+    expect(secondProps?.attachments).toBeDefined();
+  });
+
+  it("does not retry Blocks after an ambiguous provider failure", async () => {
+    mockState.resolveMattermostAccount.mockReturnValue({
+      accountId: "default",
+      botToken: "bot-token",
+      baseUrl: "https://mattermost.example.com",
+      config: { interactions: { blocks: true } },
+    });
+    mockState.createMattermostPost.mockRejectedValueOnce(new Error("socket closed after write"));
+
+    await expect(
+      sendMessageMattermost("channel:town-square", "Pick a model", {
+        cfg: TEST_CFG,
+        buttons: [[{ callback_data: "mdlprov", text: "Browse providers" }]],
+      }),
+    ).rejects.toThrow("socket closed after write");
+    expect(mockState.createMattermostPost).toHaveBeenCalledOnce();
+  });
+
   it("resolves a bare Mattermost user id as a DM target before upload", async () => {
     const userId = "dthcxgoxhifn3pwh65cut3ud3w";
     mockState.resolveMattermostAccount.mockReturnValue({

@@ -24,7 +24,7 @@ describe("mattermost actions contract", () => {
             },
           },
         } as OpenClawConfig,
-        expectedActions: ["send", "react"],
+        expectedActions: ["send", "react", "reactions"],
         expectedCapabilities: ["presentation"],
       },
       {
@@ -54,7 +54,7 @@ describe("mattermost actions contract", () => {
             },
           },
         } as OpenClawConfig,
-        expectedActions: ["send", "react"],
+        expectedActions: ["send", "react", "reactions"],
         expectedCapabilities: ["presentation"],
       },
       {

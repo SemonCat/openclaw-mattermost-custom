@@ -9,7 +9,10 @@ import * as clientModule from "./client.js";
 import type { MattermostClient } from "./client.js";
 import { deliverMattermostReplyWithDraftPreview } from "./monitor-draft-delivery.js";
 
-const updateMattermostPostSpy = vi.spyOn(clientModule, "updateMattermostPost");
+const updateMattermostPostSpy = vi.spyOn(
+  clientModule,
+  "updateMattermostPostMessageWithReadback",
+);
 
 function createMattermostClientMock(): MattermostClient {
   return {
@@ -134,9 +137,11 @@ describe("deliverMattermostReplyWithDraftPreview", () => {
 
     // Default streaming finalizes by editing the preview post, bypassing deliverPayload —
     // participation must still be recorded (regression: PR #95552 review P1).
-    expect(updateMattermostPostSpy).toHaveBeenCalledWith(expect.anything(), "preview-post-1", {
-      message: "All good",
-    });
+    expect(updateMattermostPostSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      "preview-post-1",
+      "All good",
+    );
     expect(deliverFinal).not.toHaveBeenCalled();
     expect(recordThreadParticipation).toHaveBeenCalledTimes(1);
     expect(result).toMatchObject({
@@ -399,9 +404,11 @@ describe("deliverMattermostReplyWithDraftPreview", () => {
       deliverPayload: deliverFinal,
     });
 
-    expect(updateMattermostPostSpy).toHaveBeenCalledWith(expect.anything(), "preview-post-1", {
-      message: "Spoken answer",
-    });
+    expect(updateMattermostPostSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      "preview-post-1",
+      "Spoken answer",
+    );
     expect(draftStream.discardPending).not.toHaveBeenCalled();
     expect(draftStream.clear).not.toHaveBeenCalled();
     expect(deliverFinal).toHaveBeenCalledWith({
@@ -630,7 +637,7 @@ describe("deliverMattermostReplyWithDraftPreview", () => {
     );
     expect(updateClient).toBe(client);
     expect(updatePostId).toBe("preview-post-1");
-    expect(updateParams).toStrictEqual({ message: "Final answer" });
+    expect(updateParams).toBe("Final answer");
     expect(draftStream.flush).toHaveBeenCalledTimes(1);
     expect(draftStream.seal).toHaveBeenCalledTimes(1);
     expect(draftStream.seal.mock.invocationCallOrder[0]).toBeLessThan(

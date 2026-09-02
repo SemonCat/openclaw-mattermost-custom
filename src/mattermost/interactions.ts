@@ -315,6 +315,7 @@ export function buildButtonProps(params: {
   channelId: string;
   buttons: Array<unknown>;
   text?: string;
+  format?: "legacy" | "blocks";
 }): Record<string, unknown> | undefined {
   const rawButtons = params.buttons.flatMap((item) =>
     Array.isArray(item) ? item : [item],
@@ -339,6 +340,40 @@ export function buildButtonProps(params: {
     return undefined;
   }
 
+  if (params.format === "blocks") {
+    const mmBlocksActions: Record<string, unknown> = {};
+    const controls = buttons.map((button) => {
+      const actionId = sanitizeActionId(button.id);
+      const context = { action_id: actionId, ...button.context };
+      mmBlocksActions[actionId] = {
+        type: "external",
+        url: params.callbackUrl,
+        context: {
+          ...context,
+          _token: generateInteractionToken(context, params.accountId),
+        },
+      };
+      return {
+        type: "button",
+        text: button.name,
+        style: button.style,
+        action_id: actionId,
+      };
+    });
+    return {
+      mm_blocks: [
+        ...(params.text ? [{ type: "text", text: params.text }] : []),
+        {
+          type: "container",
+          flow: "horizontal",
+          gap: "small",
+          content: controls,
+        },
+      ],
+      mm_blocks_actions: mmBlocksActions,
+    };
+  }
+
   return {
     attachments: buildButtonAttachments({
       callbackUrl: params.callbackUrl,
@@ -356,6 +391,31 @@ function readInteractionBody(req: IncomingMessage): Promise<string> {
     maxBytes: INTERACTION_MAX_BODY_BYTES,
     timeoutMs: INTERACTION_BODY_TIMEOUT_MS,
   });
+}
+
+function findMattermostBlockActionName(blocks: unknown, actionId: string): string | null {
+  if (!Array.isArray(blocks)) {
+    return null;
+  }
+  const pending = [...blocks];
+  let inspected = 0;
+  while (pending.length > 0 && inspected < 100) {
+    const raw = pending.shift();
+    inspected += 1;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      continue;
+    }
+    const block = raw as Record<string, unknown>;
+    if (block.action_id === actionId && typeof block.text === "string" && block.text.trim()) {
+      return block.text.trim();
+    }
+    for (const key of ["content", "header", "columns", "items"] as const) {
+      if (Array.isArray(block[key])) {
+        pending.push(...block[key]);
+      }
+    }
+  }
+  return null;
 }
 
 // ── HTTP handler ───────────────────────────────────────────────────────
@@ -527,6 +587,10 @@ export function createMattermostInteractionHandler(params: {
           break;
         }
       }
+      clickedButtonName ??= findMattermostBlockActionName(
+        originalPost?.props?.mm_blocks,
+        actionId,
+      );
       if (clickedButtonName === null) {
         log?.(`mattermost interaction: action ${actionId} not found in post ${payload.post_id}`);
         res.statusCode = 403;

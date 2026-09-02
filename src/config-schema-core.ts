@@ -188,6 +188,9 @@ const MattermostAccountSchemaBase = z
       .object({
         messages: z.boolean().optional(),
         reactions: z.boolean().optional(),
+        edit: z.boolean().optional(),
+        delete: z.boolean().optional(),
+        pins: z.boolean().optional(),
       })
       .optional(),
     commands: MattermostSlashCommandsSchema,
@@ -195,6 +198,7 @@ const MattermostAccountSchemaBase = z
       .object({
         callbackBaseUrl: z.string().optional(),
         allowedSourceIps: z.array(z.string()).optional(),
+        blocks: z.boolean().optional(),
       })
       .optional(),
     /** Per-group configuration (keyed by Mattermost channel ID or "*" for default). */
