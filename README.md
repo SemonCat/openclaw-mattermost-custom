@@ -82,6 +82,8 @@ Compared with the official plugin, this build preserves:
 - Unknown-send reconciliation for durable text delivery, using opaque signed
   post metadata rather than matching visible message text.
 - Message edit, delete, and pin actions enabled by default, plus reaction reads.
+- Owner-only `/move_thread #channel` verified copy-then-delete moves without the
+  licensed Mattermost move endpoint.
 - Durable plan-backed task progress cards that remain after the final answer.
 - The Mattermost slash-trigger length cap fix.
 
@@ -111,6 +113,37 @@ Interactive buttons use native Mattermost Blocks by default. Set
 `channels.mattermost.interactions.blocks: false` to force legacy attachments.
 An explicit HTTP 400 rejection falls back once to legacy attachments; transport
 failures are not retried because the first post may already have been accepted.
+
+### Unlicensed thread moves
+
+Run the following command from the reply box inside the source thread:
+
+```text
+/move_thread #target-channel
+```
+
+The owner-only command runs directly instead of starting an agent turn, so the
+source root can be deleted without also deleting an in-flight streaming/final
+reply. It replaces the licensed `POST /posts/{id}/move` endpoint with the same
+basic provider sequence Mattermost uses internally: re-upload attachments,
+create the destination root and replies in chronological order, then delete the
+source root (Mattermost deletes its replies with it).
+
+The downstream implementation adds a stricter commit gate. Every destination
+post must be readable with the expected channel, root, text, attachment ids,
+and operation marker, and the source thread must still match its original
+snapshot. A copy or verification failure keeps the source and removes the
+known destination copy. An ambiguous source-delete result is reported as
+unknown and keeps the verified destination copy; it is never deleted when that
+could cause data loss.
+
+Moves are bounded to 100 posts and 24 attachments, with each attachment using
+the configured Mattermost/agent media limit (8 MiB when unset). REST-created
+copies are authored by the configured bot because Mattermost overwrites
+`user_id` with the authenticated API user. Original author ids, timestamps,
+source post ids, and the operation id are retained in the
+`openclaw_mattermost_move` post property. Text and uploaded file contents are
+preserved; reactions, pins, and arbitrary source post properties are not copied.
 
 When an agent emits a structured plan update, the plugin lazily creates one
 Mattermost task card in the same channel or thread and edits that post for the

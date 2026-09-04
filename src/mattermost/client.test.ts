@@ -17,6 +17,7 @@ import {
   createMattermostClient,
   createMattermostDirectChannelWithRetry,
   createMattermostPost,
+  downloadMattermostFile,
   fetchMattermostChannel,
   fetchMattermostChannelPosts,
   fetchMattermostChannelPostsSince,
@@ -796,6 +797,25 @@ describe("createMattermostPost", () => {
     expect(body.file_ids).toEqual(["file1", "file2"]);
   });
 
+  it("includes pending_post_id for provider-side create deduplication", async () => {
+    const { mockFetch, calls } = createMockFetch({ body: { id: "post-pending" } });
+    const client = createMattermostClient({
+      baseUrl: "http://localhost:8065",
+      botToken: "tok",
+      fetchImpl: mockFetch,
+    });
+
+    await createMattermostPost(client, {
+      channelId: "ch123",
+      message: "Move copy",
+      pendingPostId: "openclaw-move:operation:source",
+    });
+
+    expect(parseRequestJson(requireRequestCall(calls).init)).toMatchObject({
+      pending_post_id: "openclaw-move:operation:source",
+    });
+  });
+
   it("includes props when provided (for interactive buttons)", async () => {
     const { mockFetch, calls } = createMockFetch({ body: { id: "post4" } });
     const client = createMattermostClient({
@@ -842,6 +862,58 @@ describe("createMattermostPost", () => {
 
     const body = parseRequestJson(requireRequestCall(calls).init);
     expect(body.props).toBeUndefined();
+  });
+});
+
+describe("downloadMattermostFile", () => {
+  it("downloads authenticated file bytes under the configured bound", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      const url = requestUrl(input);
+      calls.push({ url, init });
+      if (url.endsWith("/files/file-1/info")) {
+        return new Response(
+          JSON.stringify({ id: "file-1", name: "report.txt", mime_type: "text/plain", size: 4 }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.endsWith("/files/file-1")) {
+        return new Response("data", { headers: { "content-type": "text/plain" } });
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
+    const client = createMattermostClient({
+      baseUrl: "http://localhost:8065",
+      botToken: "tok",
+      fetchImpl,
+    });
+
+    await expect(
+      downloadMattermostFile(client, { fileId: "file-1", maxBytes: 8 }),
+    ).resolves.toMatchObject({
+      info: { id: "file-1", name: "report.txt" },
+      buffer: Buffer.from("data"),
+      contentType: "text/plain",
+    });
+    expect(new Headers(calls[1]?.init?.headers).get("Authorization")).toBe("Bearer tok");
+  });
+
+  it("rejects known oversized files before downloading their body", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      new Response(JSON.stringify({ id: "file-1", size: 9 }), {
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const client = createMattermostClient({
+      baseUrl: "http://localhost:8065",
+      botToken: "tok",
+      fetchImpl,
+    });
+
+    await expect(
+      downloadMattermostFile(client, { fileId: "file-1", maxBytes: 8 }),
+    ).rejects.toThrow("exceeds the 8-byte move limit");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });
 

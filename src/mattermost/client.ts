@@ -73,6 +73,8 @@ export const MattermostPostSchema = z
     create_at: z.number().nullable().optional(),
     update_at: z.number().nullable().optional(),
     props: z.record(z.string(), z.unknown()).nullable().optional(),
+    pending_post_id: z.string().nullable().optional(),
+    delete_at: z.number().nullable().optional(),
   })
   .passthrough();
 
@@ -809,6 +811,7 @@ export async function createMattermostPost(
     rootId?: string;
     fileIds?: string[];
     props?: Record<string, unknown>;
+    pendingPostId?: string;
   },
 ): Promise<MattermostPost> {
   const payload: Record<string, unknown> = {
@@ -823,6 +826,9 @@ export async function createMattermostPost(
   }
   if (params.props) {
     payload.props = params.props;
+  }
+  if (params.pendingPostId) {
+    payload.pending_post_id = params.pendingPostId;
   }
   const post = await client.request<MattermostPost>("/posts", {
     method: "POST",
@@ -918,6 +924,45 @@ export async function fetchMattermostPostReactions(
     throw new Error("Unexpected Mattermost post reactions response.");
   }
   return parsed.data;
+}
+
+export async function downloadMattermostFile(
+  client: MattermostClient,
+  params: { fileId: string; maxBytes: number },
+): Promise<{ info: MattermostFileInfo; buffer: Buffer; contentType?: string }> {
+  const fileId = normalizeOptionalString(params.fileId);
+  if (!fileId) {
+    throw new Error("Mattermost file download requires a file id.");
+  }
+  if (!Number.isSafeInteger(params.maxBytes) || params.maxBytes <= 0) {
+    throw new Error("Mattermost file download limit must be a positive integer.");
+  }
+  const info = await fetchMattermostFileInfo(client, fileId);
+  if (typeof info.size === "number" && info.size > params.maxBytes) {
+    throw new Error(
+      `Mattermost file ${fileId} exceeds the ${params.maxBytes}-byte move limit.`,
+    );
+  }
+  const res = await client.fetchImpl(buildMattermostApiUrl(client.baseUrl, `/files/${fileId}`), {
+    headers: { Authorization: `Bearer ${client.token}` },
+  });
+  if (!res.ok) {
+    const detail = await readMattermostError(res);
+    throw new Error(
+      `Mattermost API ${res.status} ${res.statusText}: ${detail || "unknown error"}`,
+    );
+  }
+  const buffer = await readResponseWithLimit(res, params.maxBytes, {
+    onOverflow: ({ maxBytes }) =>
+      new Error(`Mattermost file ${fileId} exceeds the ${maxBytes}-byte move limit.`),
+  });
+  return {
+    info,
+    buffer,
+    ...(info.mime_type?.trim() || res.headers.get("content-type")?.trim()
+      ? { contentType: info.mime_type?.trim() || res.headers.get("content-type")?.trim() }
+      : {}),
+  };
 }
 
 export async function setMattermostPostPinned(
