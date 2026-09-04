@@ -40,7 +40,17 @@ type StoredRow = {
 
 const CHANNEL_ID = "mattermost";
 const QUEUE_DIR = "mattermost-custom";
-const QUEUE_FILE = "ingress.sqlite";
+const DEFAULT_QUEUE_SCOPE = "ingress";
+
+function normalizeQueueScope(value?: string): string {
+  const scope = value?.trim() || DEFAULT_QUEUE_SCOPE;
+  if (!/^[a-z0-9-]+$/u.test(scope)) {
+    throw new Error(
+      "Mattermost ingress queue scope must contain only lowercase letters, digits, and hyphens",
+    );
+  }
+  return scope;
+}
 
 function positiveLimit(value: number | "all" | undefined, fallback = 100): number {
   return value === "all" ? Number.MAX_SAFE_INTEGER : Math.max(1, Math.floor(value ?? fallback));
@@ -69,13 +79,20 @@ export function createMattermostIngressQueue<
 >(options: {
   accountId: string;
   stateDir: string;
+  /** Isolate independently drained payload classes while preserving the legacy ingress path. */
+  scope?: string;
   now?: () => number;
 }): Queue<TPayload, TMetadata, TCompletedMetadata> {
   const accountId = options.accountId.trim() || "default";
-  const queueName = JSON.stringify(["mattermost-custom", accountId]);
+  const scope = normalizeQueueScope(options.scope);
+  const queueName = JSON.stringify([
+    "mattermost-custom",
+    ...(scope === DEFAULT_QUEUE_SCOPE ? [] : [scope]),
+    accountId,
+  ]);
   const now = options.now ?? Date.now;
   const queueDir = path.join(options.stateDir, QUEUE_DIR);
-  const databasePath = path.join(queueDir, QUEUE_FILE);
+  const databasePath = path.join(queueDir, `${scope}.sqlite`);
   mkdirSync(queueDir, { recursive: true, mode: 0o700 });
   const database = new DatabaseSync(databasePath);
   try {

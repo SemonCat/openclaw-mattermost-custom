@@ -8,6 +8,16 @@ export type MattermostReplyToMode = "off" | "first" | "all" | "batched";
 export type MattermostChatTypeKey = "direct" | "channel" | "group";
 
 export type MattermostChatMode = "oncall" | "onmessage" | "onchar";
+export type MattermostExecApprovalConfig = {
+  /** Enable native approval cards. Auto enables when stable approver ids are configured. */
+  enabled?: boolean | "auto";
+  /** Stable Mattermost user ids allowed to decide approval requests. */
+  approvers?: Array<string | number>;
+  agentFilter?: string[];
+  sessionFilter?: string[];
+  /** Origin thread, approver DMs, or both. Mattermost defaults to the origin channel. */
+  target?: "dm" | "channel" | "both";
+};
 type MattermostNetworkConfig = {
   /** Dangerous opt-in for self-hosted Mattermost on trusted private/internal hosts. */
   dangerouslyAllowPrivateNetwork?: boolean;
@@ -128,6 +138,8 @@ export type MattermostAccountConfig = {
     /** Prefer native Mattermost Blocks for interactive buttons. Default: true. */
     blocks?: boolean;
   };
+  /** Native exec/plugin/system-agent approval cards and routing. */
+  execApprovals?: MattermostExecApprovalConfig;
   /** Network policy overrides for self-hosted Mattermost on trusted private/internal hosts. */
   network?: MattermostNetworkConfig;
   /** Retry configuration for DM channel creation */

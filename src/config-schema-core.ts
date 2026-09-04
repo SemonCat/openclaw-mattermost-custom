@@ -85,6 +85,17 @@ const MattermostNetworkSchema = z
   .strict()
   .optional();
 
+const MattermostExecApprovalsSchema = z
+  .object({
+    enabled: z.union([z.boolean(), z.literal("auto")]).optional(),
+    approvers: z.array(z.union([z.string(), z.number()])).optional(),
+    agentFilter: z.array(z.string()).optional(),
+    sessionFilter: z.array(z.string()).optional(),
+    target: z.enum(["dm", "channel", "both"]).optional(),
+  })
+  .strict()
+  .optional();
+
 const MattermostPermalinkOriginSchema = z.string().refine(
   (value) => {
     try {
@@ -201,6 +212,7 @@ const MattermostAccountSchemaBase = z
         blocks: z.boolean().optional(),
       })
       .optional(),
+    execApprovals: MattermostExecApprovalsSchema,
     /** Per-group configuration (keyed by Mattermost channel ID or "*" for default). */
     groups: z.record(z.string(), MattermostGroupSchema.optional()).optional(),
     /** Same-instance permalink expansion before model dispatch. */

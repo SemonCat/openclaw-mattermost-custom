@@ -27,7 +27,7 @@ const SIGNED_CHANNEL_ID_CONTEXT_KEY = "__openclaw_channel_id";
  * Sent by Mattermost when a user clicks an action button.
  * See: https://developers.mattermost.com/integrate/plugins/interactive-messages/
  */
-type MattermostInteractionPayload = {
+export type MattermostInteractionPayload = {
   user_id: string;
   user_name?: string;
   channel_id: string;
@@ -47,7 +47,7 @@ export type MattermostInteractionResponse = {
   ephemeral_text?: string;
 };
 
-type MattermostInteractionAuthorizationResult =
+export type MattermostInteractionAuthorizationResult =
   | { ok: true }
   | { ok: false; statusCode?: number; response?: MattermostInteractionResponse };
 
@@ -59,6 +59,62 @@ export type MattermostInteractiveButtonInput = {
   label?: string;
   style?: "default" | "primary" | "danger";
   context?: Record<string, unknown>;
+};
+
+export type MattermostValidatedInteraction = {
+  payload: Omit<MattermostInteractionPayload, "context">;
+  userName: string;
+  actionId: string;
+  actionName: string;
+  originalMessage: string;
+  context: Record<string, unknown>;
+  /** Minimal provider identity needed by replay; post props and callback secrets are not persisted. */
+  post: Pick<MattermostPost, "id" | "channel_id" | "root_id" | "message">;
+};
+
+export type MattermostInteractionProcessor = (
+  interaction: MattermostValidatedInteraction,
+) => Promise<void>;
+
+type MattermostInteractionHandlerOptions = {
+  client: MattermostClient;
+  botUserId: string;
+  accountId: string;
+  allowedSourceIps?: string[];
+  trustedProxies?: string[];
+  allowRealIpFallback?: boolean;
+  resolveSessionKey?: (params: {
+    channelId: string;
+    userId: string;
+    post: MattermostPost;
+  }) => Promise<string>;
+  handleInteraction?: (opts: {
+    payload: MattermostInteractionPayload;
+    userName: string;
+    actionId: string;
+    actionName: string;
+    originalMessage: string;
+    context: Record<string, unknown>;
+    post: MattermostPost;
+  }) => Promise<MattermostInteractionResponse | null>;
+  authorizeButtonClick?: (opts: {
+    payload: MattermostInteractionPayload;
+    post: MattermostPost;
+  }) => Promise<MattermostInteractionAuthorizationResult>;
+  dispatchButtonClick?: (opts: {
+    channelId: string;
+    userId: string;
+    userName: string;
+    actionId: string;
+    actionName: string;
+    postId: string;
+    post: MattermostPost;
+  }) => Promise<void>;
+  /** Persist after validation and authorization. HTTP 200 is sent only after this resolves. */
+  admitInteraction?: (
+    interaction: MattermostValidatedInteraction,
+  ) => Promise<void | (() => void)>;
+  log?: (message: string) => void;
 };
 
 // ── Callback URL registry ──────────────────────────────────────────────
@@ -414,44 +470,136 @@ function findMattermostBlockActionName(blocks: unknown, actionId: string): strin
   return null;
 }
 
+async function deliverInteractionResponse(params: {
+  client: MattermostClient;
+  interaction: MattermostValidatedInteraction;
+  response: MattermostInteractionResponse;
+}): Promise<void> {
+  if (params.response.update) {
+    await updateMattermostPost(params.client, params.interaction.payload.post_id, {
+      message: params.response.update.message,
+      props: params.response.update.props,
+    });
+  }
+  if (params.response.ephemeral_text) {
+    await params.client.request("/posts/ephemeral", {
+      method: "POST",
+      body: JSON.stringify({
+        user_id: params.interaction.payload.user_id,
+        post: {
+          channel_id: params.interaction.payload.channel_id,
+          message: params.response.ephemeral_text,
+          ...(params.interaction.post.root_id
+            ? { root_id: params.interaction.post.root_id }
+            : {}),
+        },
+      }),
+    });
+  }
+}
+
+/** Process a previously validated callback. Safe to invoke from the durable interaction drain. */
+export function createMattermostInteractionProcessor(
+  params: MattermostInteractionHandlerOptions,
+): MattermostInteractionProcessor {
+  const { accountId, client, log } = params;
+  const core = getMattermostRuntime();
+  return async (interaction) => {
+    const payload: MattermostInteractionPayload = {
+      ...interaction.payload,
+      context: interaction.context,
+    };
+    const post = interaction.post as MattermostPost;
+    if (params.authorizeButtonClick) {
+      const authorization = await params.authorizeButtonClick({ payload, post });
+      if (!authorization.ok) {
+        await deliverInteractionResponse({
+          client,
+          interaction,
+          response:
+            authorization.response ?? {
+              ephemeral_text: "You are not allowed to use this action here.",
+            },
+        });
+        return;
+      }
+    }
+
+    if (params.handleInteraction) {
+      const response = await params.handleInteraction({
+        payload,
+        userName: interaction.userName,
+        actionId: interaction.actionId,
+        actionName: interaction.actionName,
+        originalMessage: interaction.originalMessage,
+        context: interaction.context,
+        post,
+      });
+      if (response !== null) {
+        await deliverInteractionResponse({ client, interaction, response });
+        return;
+      }
+    }
+
+    try {
+      const eventLabel =
+        `Mattermost button click: action="${interaction.actionId}" ` +
+        `by ${interaction.userName} in channel ${payload.channel_id}`;
+      const sessionKey = params.resolveSessionKey
+        ? await params.resolveSessionKey({
+            channelId: payload.channel_id,
+            userId: payload.user_id,
+            post,
+          })
+        : `agent:main:mattermost:${accountId}:${payload.channel_id}`;
+      core.system.enqueueSystemEvent(eventLabel, {
+        sessionKey,
+        contextKey: `mattermost:interaction:${payload.post_id}:${interaction.actionId}`,
+      });
+    } catch (error) {
+      log?.(`mattermost interaction: system event dispatch failed: ${String(error)}`);
+    }
+
+    try {
+      await updateMattermostPost(client, payload.post_id, {
+        message: interaction.originalMessage,
+        props: {
+          attachments: [
+            {
+              text: `✓ **${interaction.actionName}** selected by @${interaction.userName}`,
+            },
+          ],
+        },
+      });
+    } catch (error) {
+      log?.(`mattermost interaction: failed to update post ${payload.post_id}: ${String(error)}`);
+    }
+
+    if (params.dispatchButtonClick) {
+      try {
+        await params.dispatchButtonClick({
+          channelId: payload.channel_id,
+          userId: payload.user_id,
+          userName: interaction.userName,
+          actionId: interaction.actionId,
+          actionName: interaction.actionName,
+          postId: payload.post_id,
+          post,
+        });
+      } catch (error) {
+        // Preserve the released callback contract: agent dispatch failure is logged,
+        // not retried after provider-visible completion side effects have run.
+        log?.(`mattermost interaction: dispatchButtonClick failed: ${String(error)}`);
+      }
+    }
+  };
+}
+
 // ── HTTP handler ───────────────────────────────────────────────────────
 
-export function createMattermostInteractionHandler(params: {
-  client: MattermostClient;
-  botUserId: string;
-  accountId: string;
-  allowedSourceIps?: string[];
-  trustedProxies?: string[];
-  allowRealIpFallback?: boolean;
-  resolveSessionKey?: (params: {
-    channelId: string;
-    userId: string;
-    post: MattermostPost;
-  }) => Promise<string>;
-  handleInteraction?: (opts: {
-    payload: MattermostInteractionPayload;
-    userName: string;
-    actionId: string;
-    actionName: string;
-    originalMessage: string;
-    context: Record<string, unknown>;
-    post: MattermostPost;
-  }) => Promise<MattermostInteractionResponse | null>;
-  authorizeButtonClick?: (opts: {
-    payload: MattermostInteractionPayload;
-    post: MattermostPost;
-  }) => Promise<MattermostInteractionAuthorizationResult>;
-  dispatchButtonClick?: (opts: {
-    channelId: string;
-    userId: string;
-    userName: string;
-    actionId: string;
-    actionName: string;
-    postId: string;
-    post: MattermostPost;
-  }) => Promise<void>;
-  log?: (message: string) => void;
-}): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
+export function createMattermostInteractionHandler(
+  params: MattermostInteractionHandlerOptions,
+): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
   const { client, accountId, log } = params;
   const core = getMattermostRuntime();
 
@@ -660,6 +808,42 @@ export function createMattermostInteractionHandler(params: {
         res.end(JSON.stringify({ error: "Interaction authorization failed" }));
         return;
       }
+    }
+
+    if (params.admitInteraction) {
+      const { context: _context, ...payloadWithoutContext } = payload;
+      const interaction: MattermostValidatedInteraction = {
+        payload: payloadWithoutContext,
+        userName,
+        actionId,
+        actionName: clickedButtonName,
+        originalMessage,
+        context: contextWithoutToken,
+        post: {
+          id: originalPost.id,
+          channel_id: originalPost.channel_id,
+          root_id: originalPost.root_id,
+          message: originalPost.message,
+        },
+      };
+      let releaseAfterAck: void | (() => void);
+      try {
+        releaseAfterAck = await params.admitInteraction(interaction);
+      } catch (error) {
+        log?.(`mattermost interaction: durable admission failed: ${String(error)}`);
+        res.statusCode = 503;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ error: "Interaction admission failed" }));
+        return;
+      }
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json");
+      try {
+        res.end("{}");
+      } finally {
+        releaseAfterAck?.();
+      }
+      return;
     }
 
     if (params.handleInteraction) {

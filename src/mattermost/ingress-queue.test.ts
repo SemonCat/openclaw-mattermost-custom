@@ -84,4 +84,25 @@ describe("plugin-owned Mattermost ingress queue", () => {
 
     expect(claimed?.laneKey).toBe("channel:channel-1:thread:root-1");
   });
+
+  it("isolates interaction callback identities from websocket ingress", async () => {
+    const root = await stateDir();
+    const ingress = createMattermostIngressQueue<{ value: string }>({
+      accountId: "default",
+      stateDir: root,
+    });
+    const interactions = createMattermostIngressQueue<{ value: string }>({
+      accountId: "default",
+      stateDir: root,
+      scope: "interactions",
+    });
+    expect(await ingress.enqueue("same-id", { value: "post" })).toMatchObject({
+      kind: "accepted",
+      duplicate: false,
+    });
+    expect(await interactions.enqueue("same-id", { value: "button" })).toMatchObject({
+      kind: "accepted",
+      duplicate: false,
+    });
+  });
 });

@@ -54,7 +54,7 @@ const {
   resolveAccountConfig: mergeMattermostAccountConfig,
 } = createAccountListHelpers<MattermostAccountConfig>("mattermost", {
   omitKeys: ["defaultAccount"],
-  nestedObjectKeys: ["commands"],
+  nestedObjectKeys: ["commands", "execApprovals"],
   hasImplicitDefaultAccount: (cfg) => {
     const mattermost = cfg.channels?.mattermost;
     return Boolean(

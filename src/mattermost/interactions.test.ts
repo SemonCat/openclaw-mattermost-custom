@@ -844,9 +844,11 @@ describe("createMattermostInteractionHandler", () => {
       expect(handleInteraction).not.toHaveBeenCalled();
     } finally {
       server.closeAllConnections();
-      await new Promise<void>((resolve, reject) => {
-        server.close((error) => (error ? reject(error) : resolve()));
-      });
+      if (server.listening) {
+        await new Promise<void>((resolve, reject) => {
+          server.close((error) => (error ? reject(error) : resolve()));
+        });
+      }
     }
   });
 
@@ -1086,5 +1088,56 @@ describe("createMattermostInteractionHandler", () => {
       post: originalPost,
     });
     expect(dispatchButtonClick).not.toHaveBeenCalled();
+  });
+
+  it("acknowledges only after a validated interaction is durably admitted", async () => {
+    const { context, token } = createActionContext();
+    const releaseAfterAck = vi.fn();
+    const admitInteraction = vi.fn(async () => releaseAfterAck);
+    const handleInteraction = vi.fn();
+    const dispatchButtonClick = vi.fn();
+    const handler = createMattermostInteractionHandler({
+      client: createMattermostClientMock(async () => createActionPost()),
+      botUserId: "bot",
+      accountId: "acct",
+      admitInteraction,
+      handleInteraction,
+      dispatchButtonClick,
+    });
+    const response = await runHandler(handler, {
+      body: createInteractionBody({ context, token, userName: "alice" }),
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toBe("{}");
+    expect(admitInteraction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actionId: "approve",
+        actionName: "Approve",
+        context,
+        post: expect.objectContaining({ id: "post-1", channel_id: "chan-1" }),
+      }),
+    );
+    expect(handleInteraction).not.toHaveBeenCalled();
+    expect(dispatchButtonClick).not.toHaveBeenCalled();
+    expect(releaseAfterAck).toHaveBeenCalledOnce();
+  });
+
+  it("returns 503 without ACK when durable interaction admission fails", async () => {
+    const { context, token } = createActionContext();
+    const handler = createMattermostInteractionHandler({
+      client: createMattermostClientMock(async () => createActionPost()),
+      botUserId: "bot",
+      accountId: "acct",
+      admitInteraction: async () => {
+        throw new Error("sqlite unavailable");
+      },
+    });
+    const response = await runHandler(handler, {
+      body: createInteractionBody({ context, token }),
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.body).toBe(JSON.stringify({ error: "Interaction admission failed" }));
   });
 });

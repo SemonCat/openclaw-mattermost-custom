@@ -131,6 +131,24 @@ describe("MattermostConfigSchema", () => {
     ).toBe(true);
   });
 
+  it("accepts account-scoped native approval routing and rejects unknown fields", () => {
+    expect(
+      MattermostConfigSchema.safeParse({
+        execApprovals: {
+          enabled: "auto",
+          approvers: ["abcdefghijklmnopqrstuvwxyz"],
+          target: "channel",
+          agentFilter: ["main"],
+          sessionFilter: ["mattermost"],
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      MattermostConfigSchema.safeParse({ execApprovals: { enabled: true, surprise: true } })
+        .success,
+    ).toBe(false);
+  });
+
   it("accepts bounded permalink hydration settings and rejects unsafe limits", () => {
     expect(
       MattermostConfigSchema.safeParse({

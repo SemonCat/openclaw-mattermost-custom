@@ -222,6 +222,27 @@ function expectSingleMattermostSend(to: string, text: string): Record<string, un
 }
 
 describe("mattermostPlugin", () => {
+  it("exposes the native approval runtime and stable-id authorization", () => {
+    const approval = mattermostPlugin.approvalCapability;
+    expect(approval?.nativeRuntime).toBeDefined();
+    expect(
+      approval?.authorizeActorAction?.({
+        cfg: {
+          channels: {
+            mattermost: {
+              botToken: "token",
+              baseUrl: "https://mattermost.example.com",
+              execApprovals: { approvers: ["abcdefghijklmnopqrstuvwxyz"] },
+            },
+          },
+        },
+        senderId: "abcdefghijklmnopqrstuvwxyz",
+        action: "approve",
+        approvalKind: "exec",
+      }),
+    ).toEqual({ authorized: true });
+  });
+
   beforeEach(() => {
     sendMessageMattermostMock.mockReset();
     sendMessageMattermostMock.mockResolvedValue({

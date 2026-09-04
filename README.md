@@ -85,6 +85,8 @@ Compared with the official plugin, this build preserves:
 - Owner-only `/move_thread #channel` verified copy-then-delete moves without the
   licensed Mattermost move endpoint.
 - Durable plan-backed task progress cards that remain after the final answer.
+- Native exec, plugin, and system-agent approval cards with canonical Gateway resolution.
+- Durable interactive callback admission and replay across Gateway restarts.
 - The Mattermost slash-trigger length cap fix.
 
 Mutable message-tool actions are enabled by default for this personal downstream
@@ -113,6 +115,38 @@ Interactive buttons use native Mattermost Blocks by default. Set
 `channels.mattermost.interactions.blocks: false` to force legacy attachments.
 An explicit HTTP 400 rejection falls back once to legacy attachments; transport
 failures are not retried because the first post may already have been accepted.
+
+Native approval cards enable automatically when a stable 26-character
+Mattermost user id is available in `execApprovals.approvers`, `allowFrom`, or
+`commands.ownerAllowFrom`. They default to the originating Mattermost
+conversation; routing can be changed per account:
+
+```json
+{
+  "channels": {
+    "mattermost": {
+      "execApprovals": {
+        "enabled": "auto",
+        "approvers": ["abcdefghijklmnopqrstuvwxyz"],
+        "target": "channel"
+      }
+    }
+  }
+}
+```
+
+Approval decisions use typed, HMAC-signed callback context and the canonical
+Gateway approval service, so first-answer-wins state remains authoritative.
+Mutable usernames are deliberately ignored for privileged approval decisions.
+Pending cards are edited in place when resolved, expired, or cancelled.
+
+Validated button callbacks are stored before Mattermost receives HTTP 200.
+They use a separate `interactions.sqlite` queue under the plugin state directory,
+with stable action identity for deduplication and per-post lanes for ordering.
+Transient drain failures retry within the normal bounded ingress policy, and
+uncompleted callbacks replay after restart. HMAC tokens and full post props are
+never written to the callback queue. A storage failure returns HTTP 503 so
+Mattermost can retry instead of losing an acknowledged action.
 
 ### Unlicensed thread moves
 

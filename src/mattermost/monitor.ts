@@ -1,5 +1,7 @@
 // Mattermost plugin module orchestrates monitor setup, ingress, and teardown.
 import { isLoopbackHost } from "openclaw/plugin-sdk/gateway-runtime";
+import { CHANNEL_APPROVAL_NATIVE_RUNTIME_CONTEXT_CAPABILITY } from "openclaw/plugin-sdk/approval-handler-adapter-runtime";
+import { registerChannelRuntimeContext } from "openclaw/plugin-sdk/channel-runtime-context";
 import { fanInChannelIngressLifecycles } from "openclaw/plugin-sdk/channel-ingress-runtime";
 import { isPrivateNetworkOptInEnabled } from "openclaw/plugin-sdk/ssrf-runtime";
 import {
@@ -8,6 +10,7 @@ import {
 } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { getMattermostRuntime } from "../runtime.js";
 import { resolveMattermostAccount, resolveMattermostReplyToMode } from "./accounts.js";
+import { isMattermostExecApprovalHandlerConfigured } from "./exec-approvals.js";
 import {
   createMattermostClient,
   fetchMattermostMe,
@@ -61,6 +64,7 @@ type MonitorMattermostOpts = {
   abortSignal?: AbortSignal;
   statusSink?: (patch: Partial<ChannelAccountSnapshot>) => void;
   webSocketFactory?: MattermostWebSocketFactory;
+  channelRuntime?: Parameters<typeof registerChannelRuntimeContext>[0]["channelRuntime"];
 };
 
 function publishMattermostRecoveringStatus(
@@ -110,6 +114,16 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
     botToken,
     allowPrivateNetwork: isPrivateNetworkOptInEnabled(account.config),
   });
+  if (isMattermostExecApprovalHandlerConfigured({ cfg, accountId: account.accountId })) {
+    registerChannelRuntimeContext({
+      channelRuntime: opts.channelRuntime,
+      channelId: "mattermost",
+      accountId: account.accountId,
+      capability: CHANNEL_APPROVAL_NATIVE_RUNTIME_CONTEXT_CAPABILITY,
+      context: { client },
+      abortSignal: opts.abortSignal,
+    });
+  }
 
   // Wait for the Mattermost API to accept our bot token before proceeding.
   // When a bot account is disabled and re-enabled, the session is invalidated
@@ -217,12 +231,13 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
     logVerboseMessage,
     statusSink: opts.statusSink,
   };
-  const unregisterInteractions = registerMattermostInteractions({
+  const interactions = registerMattermostInteractions({
     monitor,
     interactionPath,
     allowedSourceIps:
       allowedInteractionSourceIps.length > 0 ? allowedInteractionSourceIps : ["127.0.0.1", "::1"],
     handleModelPickerInteraction: createMattermostModelPickerInteractionHandler(monitor),
+    abortSignal: opts.abortSignal,
   });
   const restartRecoveryProgress = attachMattermostRestartRecoveryProgress(monitor);
   let slashRegistrationTask: Promise<void> | null = null;
@@ -387,7 +402,8 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
   } finally {
     await ingress.stop();
     await restartRecoveryProgress.stop();
-    unregisterInteractions();
+    await interactions.stop();
+    interactions.unregister();
     deactivateSlashCommands(account.accountId);
   }
 }

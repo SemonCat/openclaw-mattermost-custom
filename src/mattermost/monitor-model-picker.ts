@@ -3,7 +3,6 @@ import { randomUUID } from "node:crypto";
 import type { ModelsProviderData } from "openclaw/plugin-sdk/command-auth-native";
 import { applySessionModelSelection } from "openclaw/plugin-sdk/model-session-runtime";
 import { getSessionEntry, resolveStorePath } from "openclaw/plugin-sdk/session-store-runtime";
-import { runDetachedWebhookWork } from "openclaw/plugin-sdk/webhook-request-guards";
 import type { MattermostPost } from "./client.js";
 import type { MattermostInteractionResponse } from "./interactions.js";
 import {
@@ -246,61 +245,58 @@ export function createMattermostModelPickerInteractionHandler(
       model: pickerState.model,
     });
 
-    // Acknowledge before direct persistence so control actions never queue behind reply admission.
-    void runDetachedWebhookWork(async () => {
-      try {
-        const data = await buildModelsProviderData(cfg, eventPlan.route.agentId);
-        let notice: string;
-        if (!buildMattermostAllowedModelRefs(data).has(targetModelRef)) {
-          notice = `❌ That model is no longer available: ${targetModelRef}`;
-        } else {
-          try {
-            notice = await applyModelPickerSelection({
-              cfg,
-              data,
-              eventPlan,
-              provider: pickerState.provider,
-              model: pickerState.model,
-            });
-          } catch (error) {
-            runtime.error?.(`mattermost model picker selection failed: ${String(error)}`);
-            notice = `❌ Failed to set ${targetModelRef}. Try /oc_model ${targetModelRef} directly.`;
-          }
+    // The durable callback drain runs only after HTTP ACK, so keep this work attached to
+    // the queue claim. Marking the row complete before persistence would reopen the
+    // restart-loss window that durable admission is intended to close.
+    try {
+      const data = await buildModelsProviderData(cfg, eventPlan.route.agentId);
+      let notice: string;
+      if (!buildMattermostAllowedModelRefs(data).has(targetModelRef)) {
+        notice = `❌ That model is no longer available: ${targetModelRef}`;
+      } else {
+        try {
+          notice = await applyModelPickerSelection({
+            cfg,
+            data,
+            eventPlan,
+            provider: pickerState.provider,
+            model: pickerState.model,
+          });
+        } catch (error) {
+          runtime.error?.(`mattermost model picker selection failed: ${String(error)}`);
+          notice = `❌ Failed to set ${targetModelRef}. Try /oc_model ${targetModelRef} directly.`;
         }
-        await sendMessageMattermost(`channel:${params.payload.channel_id}`, notice, {
-          cfg,
-          accountId: account.accountId,
-          replyToId: resolveMattermostInteractionReplyRootId({
-            kind: eventPlan.kind,
-            threadRootId: eventPlan.thread.effectiveReplyToId,
-            replyToId: messageSid,
-            interactionMessageSid: messageSid,
-            sourcePostId: params.post.id || params.payload.post_id,
-          }),
-        });
-        if (data.providers.length === 0) {
-          await updatePickerPost("No models available.");
-          return;
-        }
-        const currentModel = resolveMattermostModelPickerCurrentModel({
-          cfg,
-          route: modelSessionRoute,
-          data,
-          readConsistency: "latest",
-        });
-        const view = renderMattermostModelsPickerView({
-          ownerUserId: pickerState.ownerUserId,
-          data,
-          provider: pickerState.provider,
-          page: pickerState.page,
-          currentModel,
-        });
-        await updatePickerPost(view.text, view.buttons);
-      } finally {
-        activeModelSelections.delete(eventPlan.thread.sessionKey);
       }
-    }).catch(async (err: unknown) => {
-      activeModelSelections.delete(eventPlan.thread.sessionKey);
+      await sendMessageMattermost(`channel:${params.payload.channel_id}`, notice, {
+        cfg,
+        accountId: account.accountId,
+        replyToId: resolveMattermostInteractionReplyRootId({
+          kind: eventPlan.kind,
+          threadRootId: eventPlan.thread.effectiveReplyToId,
+          replyToId: messageSid,
+          interactionMessageSid: messageSid,
+          sourcePostId: params.post.id || params.payload.post_id,
+        }),
+      });
+      if (data.providers.length === 0) {
+        await updatePickerPost("No models available.");
+        return {};
+      }
+      const currentModel = resolveMattermostModelPickerCurrentModel({
+        cfg,
+        route: modelSessionRoute,
+        data,
+        readConsistency: "latest",
+      });
+      const view = renderMattermostModelsPickerView({
+        ownerUserId: pickerState.ownerUserId,
+        data,
+        provider: pickerState.provider,
+        page: pickerState.page,
+        currentModel,
+      });
+      await updatePickerPost(view.text, view.buttons);
+    } catch (err: unknown) {
       runtime.error?.(`mattermost model picker select failed: ${String(err)}`);
       try {
         await updatePickerPost(
@@ -309,7 +305,9 @@ export function createMattermostModelPickerInteractionHandler(
       } catch (updateError) {
         runtime.error?.(`mattermost model picker failure update failed: ${String(updateError)}`);
       }
-    });
+    } finally {
+      activeModelSelections.delete(eventPlan.thread.sessionKey);
+    }
 
     return {};
   };

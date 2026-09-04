@@ -288,6 +288,20 @@ vi.mock("./monitor-ingress.js", async (importOriginal) => {
   };
 });
 
+vi.mock("./interaction-ingress.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./interaction-ingress.js")>();
+  return {
+    ...actual,
+    createMattermostInteractionIngressMonitor: (options: {
+      dispatch: (interaction: never) => Promise<void>;
+    }) => ({
+      admit: options.dispatch,
+      stop: async () => {},
+      waitForIdle: async () => {},
+    }),
+  };
+});
+
 vi.mock("./monitor-slash.js", () => ({
   registerMattermostMonitorSlashCommands: mockState.registerMattermostMonitorSlashCommands,
 }));

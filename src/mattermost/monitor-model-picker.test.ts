@@ -10,12 +10,7 @@ const mocks = vi.hoisted(() => ({
   getSessionEntry: vi.fn(),
   parseContext: vi.fn(),
   pinExplicitDefaultModel: vi.fn(),
-  runDetachedWebhookWork: vi.fn(),
   sendMessage: vi.fn(),
-}));
-
-vi.mock("openclaw/plugin-sdk/webhook-request-guards", () => ({
-  runDetachedWebhookWork: mocks.runDetachedWebhookWork,
 }));
 
 vi.mock("openclaw/plugin-sdk/model-session-runtime", () => ({
@@ -64,6 +59,13 @@ vi.mock("./send.js", () => ({
 import { createMattermostModelPickerInteractionHandler } from "./monitor-model-picker.js";
 import type { MattermostMonitorContext } from "./monitor-types.js";
 
+const modelsData = {
+  byProvider: new Map([["openai", new Set(["gpt-5.4"])]]),
+  providers: ["openai"],
+  resolvedDefault: { provider: "openai", model: "gpt-5.4" },
+  modelNames: new Map([["openai/gpt-5.4", "GPT-5.4"]]),
+};
+
 describe("Mattermost model-picker interaction dispatch", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -97,12 +99,7 @@ describe("Mattermost model-picker interaction dispatch", () => {
       channelDisplay: "Lifecycle",
       roomLabel: "#lifecycle",
     });
-    mocks.buildModelsProviderData.mockResolvedValue({
-      byProvider: new Map([["openai", new Set(["gpt-5.4"])]]),
-      providers: ["openai"],
-      resolvedDefault: { provider: "openai", model: "gpt-5.4" },
-      modelNames: new Map([["openai/gpt-5.4", "GPT-5.4"]]),
-    });
+    mocks.buildModelsProviderData.mockResolvedValue(modelsData);
     mocks.sendMessage.mockResolvedValue({
       id: "confirmation-1",
       content: "model updated",
@@ -119,12 +116,14 @@ describe("Mattermost model-picker interaction dispatch", () => {
     mocks.dispatch.mockImplementation(() => new Promise(() => undefined));
   });
 
-  it("applies directly outside reply admission and coalesces concurrent clicks", async () => {
-    let detachedRun: (() => Promise<void>) | undefined;
-    mocks.runDetachedWebhookWork.mockImplementation((run: () => Promise<void>) => {
-      detachedRun = run;
-      return Promise.resolve();
-    });
+  it("keeps selection attached to the durable claim and coalesces concurrent clicks", async () => {
+    let releaseModelsData: (() => void) | undefined;
+    mocks.buildModelsProviderData.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseModelsData = () => resolve(modelsData);
+        }),
+    );
     const updateModelPickerPost = vi.fn(async () => ({}));
     const startupCfg = { agents: { defaults: { model: { primary: "openai/startup" } } } };
     const runtimeCfg = { agents: { defaults: { model: { primary: "openai/current" } } } };
@@ -151,7 +150,7 @@ describe("Mattermost model-picker interaction dispatch", () => {
     } as unknown as MattermostMonitorContext;
     const handler = createMattermostModelPickerInteractionHandler(monitor);
 
-    const response = await handler({
+    const selection = handler({
       payload: {
         channel_id: "channel-1",
         post_id: "picker-post-1",
@@ -163,16 +162,13 @@ describe("Mattermost model-picker interaction dispatch", () => {
       post: { id: "picker-post-1", channel_id: "channel-1", message: "picker" },
     });
 
-    expect(response).toEqual({});
+    await vi.waitFor(() => expect(mocks.buildModelsProviderData).toHaveBeenCalledOnce());
     expect(mocks.authorize).toHaveBeenCalledWith(expect.objectContaining({ cfg: runtimeCfg }));
     expect(mocks.buildEventPlan).toHaveBeenCalledWith(
       expect.objectContaining({ cfg: runtimeCfg }),
       expect.objectContaining({ channelId: "channel-1" }),
     );
-    expect(mocks.runDetachedWebhookWork).toHaveBeenCalledOnce();
     expect(mocks.dispatch).not.toHaveBeenCalled();
-    expect(mocks.buildModelsProviderData).not.toHaveBeenCalled();
-    expect(detachedRun).toBeTypeOf("function");
 
     await expect(
       handler({
@@ -187,10 +183,8 @@ describe("Mattermost model-picker interaction dispatch", () => {
         post: { id: "picker-post-1", channel_id: "channel-1", message: "picker" },
       }),
     ).resolves.toEqual({ ephemeral_text: "A model change is already in progress for this chat." });
-    expect(mocks.runDetachedWebhookWork).toHaveBeenCalledOnce();
-    expect(mocks.buildModelsProviderData).not.toHaveBeenCalled();
-
-    await detachedRun?.();
+    releaseModelsData?.();
+    await expect(selection).resolves.toEqual({});
 
     expect(mocks.buildModelsProviderData).toHaveBeenCalledOnce();
     expect(mocks.buildModelsProviderData).toHaveBeenCalledWith(runtimeCfg, "main");
@@ -250,7 +244,6 @@ describe("Mattermost model-picker interaction dispatch", () => {
         post: { id: "picker-post-1", channel_id: "channel-1", message: "picker" },
       }),
     ).resolves.toEqual({});
-    await detachedRun?.();
 
     expect(mocks.sendMessage).toHaveBeenLastCalledWith(
       "channel:channel-1",

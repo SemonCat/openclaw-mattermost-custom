@@ -40,7 +40,7 @@ import {
 } from "openclaw/plugin-sdk/status-helpers";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { sanitizeAssistantVisibleText } from "openclaw/plugin-sdk/text-chunking";
-import { mattermostApprovalAuth } from "./approval-auth.js";
+import { mattermostApprovalCapability } from "./approval-native.js";
 import {
   chunkTextForOutbound,
   createAccountStatusSink,
@@ -1047,7 +1047,7 @@ export const mattermostPlugin: ChannelPlugin<ResolvedMattermostAccount> = create
       isConfigured: isMattermostConfigured,
       describeAccount: describeMattermostAccount,
     },
-    approvalCapability: mattermostApprovalAuth,
+    approvalCapability: mattermostApprovalCapability,
     doctor: mattermostDoctor,
     groups: {
       resolveRequireMention: resolveMattermostGroupRequireMention,
@@ -1167,6 +1167,7 @@ export const mattermostPlugin: ChannelPlugin<ResolvedMattermostAccount> = create
           config: ctx.cfg,
           runtime: ctx.runtime,
           abortSignal: ctx.abortSignal,
+          channelRuntime: ctx.channelRuntime,
           statusSink,
         });
       },

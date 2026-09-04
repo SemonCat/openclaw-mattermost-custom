@@ -23,4 +23,16 @@ export const mattermostChannelConfigUiHints = {
     },
     progress: {},
   }),
+  "execApprovals.enabled": {
+    label: "Native approval cards",
+    help: '"auto" enables Mattermost approval cards when at least one stable approver id is configured.',
+  },
+  "execApprovals.approvers": {
+    label: "Approval users",
+    help: "Stable 26-character Mattermost user ids allowed to approve or deny requests.",
+  },
+  "execApprovals.target": {
+    label: "Approval delivery",
+    help: 'Deliver approval cards to the originating channel/thread, approver DMs, or both. Default: "channel".',
+  },
 } satisfies Record<string, ChannelConfigUiHint>;
