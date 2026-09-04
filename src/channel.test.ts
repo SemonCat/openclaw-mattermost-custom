@@ -1,5 +1,6 @@
 // Mattermost tests cover channel plugin behavior.
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { renderMessagePresentationFallbackText } from "openclaw/plugin-sdk/interactive-runtime";
 import type { OpenClawConfig } from "../runtime-api.js";
 import { createChannelMessageReplyPipeline } from "../runtime-api.js";
 
@@ -141,6 +142,68 @@ function createMattermostActionContext(
     cfg: createMattermostTestConfig(),
     ...overrides,
   };
+}
+
+async function runMattermostMessageAction(context: MattermostActionContext) {
+  if (context.action !== "send") {
+    const handleAction = mattermostPlugin.actions?.handleAction;
+    if (!handleAction) {
+      throw new Error("mattermost actions.handleAction missing");
+    }
+    return await handleAction(context);
+  }
+
+  const prepareSendPayload = mattermostPlugin.actions?.prepareSendPayload;
+  const sendPayload = requireMattermostSendPayload();
+  const to =
+    typeof context.params.to === "string"
+      ? context.params.to.trim()
+      : typeof context.params.target === "string"
+        ? context.params.target.trim()
+        : "";
+  if (!to || !prepareSendPayload) {
+    throw new Error("Mattermost prepared outbound send surface missing");
+  }
+  const text = typeof context.params.message === "string" ? context.params.message : "";
+  const presentation = context.params.presentation as
+    | Parameters<MattermostRenderPresentation>[0]["presentation"]
+    | undefined;
+  let payload = await prepareSendPayload({
+    ctx: context,
+    to,
+    payload: { text, ...(presentation ? { presentation } : {}) },
+  });
+  if (!payload) {
+    throw new Error("Mattermost send preparation declined");
+  }
+  if (presentation) {
+    const rendered = await requireMattermostRenderPresentation()({
+      payload,
+      presentation,
+      ctx: { cfg: context.cfg, to, text, payload },
+    });
+    const fallback = renderMessagePresentationFallbackText({ presentation });
+    payload = rendered ?? {
+      ...payload,
+      text: [text.trim(), fallback].filter(Boolean).join("\n\n"),
+    };
+  }
+  const normalizeId = (value: unknown) =>
+    typeof value === "string" && value.trim() ? value.trim() : undefined;
+  return await sendPayload({
+    cfg: context.cfg,
+    to,
+    text,
+    payload,
+    accountId: context.accountId,
+    replyToId:
+      normalizeId(context.params.replyToId) ??
+      normalizeId(context.params.threadId) ??
+      normalizeId(context.params.replyTo),
+    mediaAccess: context.mediaAccess,
+    mediaLocalRoots: context.mediaLocalRoots,
+    mediaReadFile: context.mediaReadFile,
+  });
 }
 
 function expectSingleMattermostSend(to: string, text: string): Record<string, unknown> {
@@ -419,6 +482,22 @@ describe("mattermostPlugin", () => {
         replyToId: "other-root",
         threadId: "other-root",
       });
+      expect(
+        resolveReplyTransport({
+          cfg: {},
+          replyToId: "current-child",
+          replyToIsExplicit: true,
+          replyToCurrent: true,
+          threadId: "ambient-root",
+          replyDelivery: {
+            chatType: "channel",
+            replyToMode: "all",
+          },
+        }),
+      ).toEqual({
+        replyToId: "ambient-root",
+        threadId: "ambient-root",
+      });
       for (const replyToMode of ["first", "all", "batched"] as const) {
         expect(
           resolveReplyTransport({
@@ -695,7 +774,7 @@ describe("mattermostPlugin", () => {
       expect(actions).toContain("send");
       expect(mattermostPlugin.actions?.supportsAction?.({ action: "react" })).toBe(true);
       expect(mattermostPlugin.actions?.supportsAction?.({ action: "read" })).toBe(true);
-      expect(mattermostPlugin.actions?.supportsAction?.({ action: "send" })).toBe(true);
+      expect(mattermostPlugin.actions?.supportsAction?.({ action: "send" })).toBe(false);
     });
 
     it("hides react when mattermost is not configured", () => {
@@ -1298,7 +1377,7 @@ describe("mattermostPlugin", () => {
     it("maps replyTo to replyToId for send actions", async () => {
       const cfg = createMattermostTestConfig();
 
-      await mattermostPlugin.actions?.handleAction?.(
+      await runMattermostMessageAction(
         createMattermostActionContext({
           action: "send",
           params: {
@@ -1319,7 +1398,7 @@ describe("mattermostPlugin", () => {
     it("uses threadId as the Mattermost root when generic replyTo names a child post", async () => {
       const cfg = createMattermostTestConfig();
 
-      await mattermostPlugin.actions?.handleAction?.(
+      await runMattermostMessageAction(
         createMattermostActionContext({
           action: "send",
           params: {
@@ -1340,7 +1419,7 @@ describe("mattermostPlugin", () => {
     it("keeps explicit replyToId precedence when threadId is also provided", async () => {
       const cfg = createMattermostTestConfig();
 
-      await mattermostPlugin.actions?.handleAction?.(
+      await runMattermostMessageAction(
         createMattermostActionContext({
           action: "send",
           params: {
@@ -1363,7 +1442,7 @@ describe("mattermostPlugin", () => {
       const cfg = createMattermostTestConfig();
       const mediaReadFile = vi.fn(async () => Buffer.from("report"));
 
-      await mattermostPlugin.actions?.handleAction?.(
+      await runMattermostMessageAction(
         createMattermostActionContext({
           action: "send",
           params: {
@@ -1389,7 +1468,7 @@ describe("mattermostPlugin", () => {
       const cfg = createMattermostTestConfig();
       const mediaReadFile = vi.fn(async () => Buffer.from("report"));
 
-      await mattermostPlugin.actions?.handleAction?.(
+      await runMattermostMessageAction(
         createMattermostActionContext({
           action: "send",
           params: {
@@ -1418,7 +1497,7 @@ describe("mattermostPlugin", () => {
     it("routes structured attachment send actions through Mattermost media upload options", async () => {
       const cfg = createMattermostTestConfig();
 
-      await mattermostPlugin.actions?.handleAction?.(
+      await runMattermostMessageAction(
         createMattermostActionContext({
           action: "send",
           params: {
@@ -1441,7 +1520,7 @@ describe("mattermostPlugin", () => {
     it("routes media_urls send actions through Mattermost media upload options", async () => {
       const cfg = createMattermostTestConfig();
 
-      await mattermostPlugin.actions?.handleAction?.(
+      await runMattermostMessageAction(
         createMattermostActionContext({
           action: "send",
           params: {
@@ -1464,7 +1543,7 @@ describe("mattermostPlugin", () => {
     it("preserves HTTP media send fallback behavior", async () => {
       const cfg = createMattermostTestConfig();
 
-      await mattermostPlugin.actions?.handleAction?.(
+      await runMattermostMessageAction(
         createMattermostActionContext({
           action: "send",
           params: {
@@ -1486,7 +1565,7 @@ describe("mattermostPlugin", () => {
       const cfg = createMattermostTestConfig();
 
       await expect(
-        mattermostPlugin.actions?.handleAction?.(
+        runMattermostMessageAction(
           createMattermostActionContext({
             action: "send",
             params: {
@@ -1509,7 +1588,7 @@ describe("mattermostPlugin", () => {
         const cfg = createMattermostTestConfig();
 
         await expect(
-          mattermostPlugin.actions?.handleAction?.(
+          runMattermostMessageAction(
             createMattermostActionContext({
               action: "send",
               params: {
@@ -1536,7 +1615,7 @@ describe("mattermostPlugin", () => {
     ])("ignores blank $location attachment payload fields", async ({ params }) => {
       const cfg = createMattermostTestConfig();
 
-      await mattermostPlugin.actions?.handleAction?.(
+      await runMattermostMessageAction(
         createMattermostActionContext({
           action: "send",
           params: {
@@ -1557,7 +1636,7 @@ describe("mattermostPlugin", () => {
       const cfg = createMattermostTestConfig();
 
       await expect(
-        mattermostPlugin.actions?.handleAction?.(
+        runMattermostMessageAction(
           createMattermostActionContext({
             action: "send",
             params: {
@@ -1580,7 +1659,7 @@ describe("mattermostPlugin", () => {
     it("maps legacy presentation buttons without using interactive conversion", async () => {
       const cfg = createMattermostTestConfig();
 
-      await mattermostPlugin.actions?.handleAction?.(
+      await runMattermostMessageAction(
         createMattermostActionContext({
           action: "send",
           params: {
@@ -1627,7 +1706,7 @@ describe("mattermostPlugin", () => {
     it("does not render callback action buttons that Mattermost cannot round-trip", async () => {
       const cfg = createMattermostTestConfig();
 
-      await mattermostPlugin.actions?.handleAction?.(
+      await runMattermostMessageAction(
         createMattermostActionContext({
           action: "send",
           params: {
@@ -1654,7 +1733,7 @@ describe("mattermostPlugin", () => {
     it("does not render command action buttons that Mattermost cannot execute", async () => {
       const cfg = createMattermostTestConfig();
 
-      await mattermostPlugin.actions?.handleAction?.(
+      await runMattermostMessageAction(
         createMattermostActionContext({
           action: "send",
           params: {
@@ -1681,7 +1760,7 @@ describe("mattermostPlugin", () => {
     it("keeps unsupported select commands actionable without exposing callback values", async () => {
       const cfg = createMattermostTestConfig();
 
-      await mattermostPlugin.actions?.handleAction?.(
+      await runMattermostMessageAction(
         createMattermostActionContext({
           action: "send",
           params: {
@@ -1721,7 +1800,7 @@ describe("mattermostPlugin", () => {
     it("falls back to trimmed replyTo when replyToId is blank", async () => {
       const cfg = createMattermostTestConfig();
 
-      await mattermostPlugin.actions?.handleAction?.(
+      await runMattermostMessageAction(
         createMattermostActionContext({
           action: "send",
           params: {

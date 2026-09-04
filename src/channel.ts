@@ -443,7 +443,6 @@ const mattermostMessageActions: ChannelMessageActionAdapter = {
   },
   supportsAction: ({ action }) => {
     return [
-      "send",
       "react",
       "reactions",
       "read",
@@ -459,9 +458,6 @@ const mattermostMessageActions: ChannelMessageActionAdapter = {
     params,
     cfg,
     accountId,
-    mediaAccess,
-    mediaLocalRoots,
-    mediaReadFile,
     conversationReadOrigin,
     requesterAccountId,
     toolContext,
@@ -686,69 +682,7 @@ const mattermostMessageActions: ChannelMessageActionAdapter = {
       };
     }
 
-    if (action !== "send") {
-      throw new Error(`Unsupported Mattermost action: ${action}`);
-    }
-
-    // Send action with optional interactive buttons
-    const to =
-      typeof params.to === "string"
-        ? params.to.trim()
-        : typeof params.target === "string"
-          ? params.target.trim()
-          : "";
-    if (!to) {
-      throw new Error("Mattermost send requires a target (to).");
-    }
-
-    const { text: message, buttons } = resolveMattermostPresentation({
-      text: typeof params.message === "string" ? params.message : undefined,
-      presentation: params.presentation,
-    });
-    // Mattermost post root_id is the thread root. A generic replyTo can name
-    // the current child post, so prefer threadId unless the caller supplied the
-    // Mattermost-specific replyToId root directly.
-    const replyToId =
-      normalizeOptionalString(params.replyToId) ??
-      normalizeOptionalString(params.threadId) ??
-      normalizeOptionalString(params.replyTo);
-    const resolvedAccountId = accountId || undefined;
-
-    const mediaUrl = resolveMattermostSendAttachmentMedia(params);
-    const result = await (
-      await loadMattermostChannelRuntime()
-    ).sendMessageMattermost(to, message, {
-      cfg,
-      accountId: resolvedAccountId,
-      replyToId,
-      buttons: buttons.length > 0 ? buttons : undefined,
-      attachmentText: typeof params.attachmentText === "string" ? params.attachmentText : undefined,
-      mediaUrl,
-      mediaLocalRoots: mediaLocalRoots ?? mediaAccess?.localRoots,
-      mediaReadFile: mediaReadFile ?? mediaAccess?.readFile,
-      ...(mediaAccess?.workspaceDir ? { workspaceDir: mediaAccess.workspaceDir } : {}),
-      requireMediaUpload: requiresMattermostMediaUpload(mediaUrl) ? true : undefined,
-    });
-
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: JSON.stringify({
-            ok: true,
-            channel: "mattermost",
-            messageId: result.messageId,
-            channelId: result.channelId,
-          }),
-        },
-      ],
-      details: {
-        toolSend: {
-          to: `channel:${result.channelId}`,
-          ...(replyToId ? { threadId: replyToId } : {}),
-        },
-      },
-    };
+    throw new Error(`Unsupported Mattermost action: ${action}`);
   },
 };
 
@@ -1268,7 +1202,13 @@ export const mattermostPlugin: ChannelPlugin<ResolvedMattermostAccount> = create
       resolveMattermostAutoThreadId({ to, replyToId, toolContext }),
     matchesToolContextTarget: ({ target, toolContext }) =>
       matchesMattermostToolContextTarget({ target, toolContext }),
-    resolveReplyTransport: ({ threadId, replyToId, replyToIsExplicit, replyDelivery }) => {
+    resolveReplyTransport: ({
+      threadId,
+      replyToId,
+      replyToIsExplicit,
+      replyToCurrent,
+      replyDelivery,
+    }) => {
       const ambientThreadId = threadId != null ? String(threadId) : undefined;
       // Direct chats stay flat when their effective mode is off. Opted-in DMs
       // preserve the thread root for routed replies and message-tool follow-ups.
@@ -1277,7 +1217,9 @@ export const mattermostPlugin: ChannelPlugin<ResolvedMattermostAccount> = create
       const resolvedThreadId = isFlatDirect
         ? undefined
         : replyDelivery
-          ? replyToIsExplicit
+          ? replyToCurrent
+            ? (ambientThreadId ?? replyToId ?? undefined)
+            : replyToIsExplicit
             ? (replyToId ?? ambientThreadId)
             : (ambientThreadId ?? replyToId ?? undefined)
           : (ambientThreadId ?? replyToId);

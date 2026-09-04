@@ -1,6 +1,7 @@
 import { sleepWithAbort } from "openclaw/plugin-sdk/runtime-env";
 // Mattermost plugin module implements slash commands behavior.
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { isWildcardBindHost } from "./callback-host.js";
 import type { MattermostClient } from "./client.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -656,19 +657,6 @@ export function resolveCallbackUrl(params: {
   if (params.config.callbackUrl) {
     return params.config.callbackUrl;
   }
-
-  const isWildcardBindHost = (rawHost: string): boolean => {
-    const trimmed = rawHost.trim();
-    if (!trimmed) {
-      return false;
-    }
-    const host = trimmed.startsWith("[") && trimmed.endsWith("]") ? trimmed.slice(1, -1) : trimmed;
-
-    // NOTE: Wildcard listen hosts are valid bind addresses but are not routable callback
-    // destinations. Don't emit callback URLs like http://0.0.0.0:3015/... or http://[::]:3015/...
-    // when an operator sets gateway.customBindHost.
-    return host === "0.0.0.0" || host === "::" || host === "0:0:0:0:0:0:0:0" || host === "::0";
-  };
 
   let host =
     params.gatewayHost && !isWildcardBindHost(params.gatewayHost)

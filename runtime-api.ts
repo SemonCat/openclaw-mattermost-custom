@@ -69,10 +69,11 @@ export {
 export { normalizeAccountId, resolveThreadSessionKeys } from "openclaw/plugin-sdk/routing";
 export { resolveAllowlistMatchSimple } from "openclaw/plugin-sdk/allow-from";
 export { registerPluginHttpRoute } from "openclaw/plugin-sdk/webhook-targets";
+export { isRequestBodyLimitError } from "openclaw/plugin-sdk/webhook-ingress";
 export {
-  isRequestBodyLimitError,
   readRequestBodyWithLimit,
-} from "openclaw/plugin-sdk/webhook-ingress";
+  sendHttpRequestRejection,
+} from "openclaw/plugin-sdk/webhook-request-guards";
 export {
   applyAccountNameToChannelSection,
   applySetupAccountConfigPatch,

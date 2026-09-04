@@ -51,6 +51,7 @@ import {
   isRequestBodyLimitError,
   logTypingFailure,
   readRequestBodyWithLimit,
+  sendHttpRequestRejection,
   type OpenClawConfig,
   type RuntimeEnv,
 } from "./runtime-api.js";
@@ -140,6 +141,8 @@ function readBody(
   return readRequestBodyWithLimit(req, {
     maxBytes,
     timeoutMs,
+    // Defer destruction so the rejection below reaches Mattermost before the close.
+    destroyOnLimit: false,
   });
 }
 
@@ -635,12 +638,10 @@ export function createSlashCommandHttpHandler(params: SlashHttpHandlerParams) {
       body = bufferedBody ?? (await readBody(req, MAX_BODY_BYTES, bodyTimeoutMs));
     } catch (error) {
       if (isRequestBodyLimitError(error, "REQUEST_BODY_TIMEOUT")) {
-        res.statusCode = 408;
-        res.end("Request body timeout");
+        await sendHttpRequestRejection(req, res, 408, "Request body timeout");
         return;
       }
-      res.statusCode = 413;
-      res.end("Payload Too Large");
+      await sendHttpRequestRejection(req, res, 413, "Payload Too Large");
       return;
     }
 

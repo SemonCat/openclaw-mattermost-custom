@@ -221,6 +221,8 @@ describe("Mattermost model picker", () => {
 
   it("resolves current and parent model overrides from targeted session entries", async () => {
     const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "mm-model-picker-"));
+    const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+    process.env.OPENCLAW_STATE_DIR = testDir;
     try {
       const storePath = path.join(testDir, "agents", "{agentId}", "sessions", "sessions.json");
       const supportStorePath = path.join(testDir, "agents", "support", "sessions", "sessions.json");
@@ -296,6 +298,11 @@ describe("Mattermost model picker", () => {
         }),
       ).toBe("anthropic/claude-sonnet-4-5");
     } finally {
+      if (previousStateDir === undefined) {
+        delete process.env.OPENCLAW_STATE_DIR;
+      } else {
+        process.env.OPENCLAW_STATE_DIR = previousStateDir;
+      }
       fs.rmSync(testDir, { recursive: true, force: true });
     }
   });

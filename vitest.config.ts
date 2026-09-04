@@ -39,7 +39,7 @@ export default defineConfig({
     ],
     environment: "node",
     hookTimeout: 60_000,
-    // The published beta.1 SDK has a large cold import/policy graph. Bound
+    // The published SDK has a large cold import/policy graph. Bound
     // concurrency so integration tests do not exhaust their per-test timeout
     // merely waiting for CPU while preserving the 10s regression limit.
     maxWorkers: 2,

@@ -1,8 +1,9 @@
 // Mattermost tests cover slash http plugin behavior.
-import { IncomingMessage, type ServerResponse } from "node:http";
+import { createServer, IncomingMessage, type ServerResponse } from "node:http";
 import { Socket } from "node:net";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig, RuntimeEnv } from "../../runtime-api.js";
+import { postRawWebhook } from "../test-support/raw-http-request.js";
 import type { ResolvedMattermostAccount } from "./accounts.js";
 import type { MattermostClient } from "./client.js";
 const clientMocks = vi.hoisted(() => ({
@@ -375,21 +376,60 @@ describe("slash-http", () => {
     expect(response.getBody()).toContain("Temporary error validating the command token");
   });
 
-  it("returns 408 when the request body stalls", async () => {
+  it.each([
+    {
+      name: "413 when the upload exceeds the body limit",
+      bodyTimeoutMs: 5_000,
+      body: "x".repeat(64 * 1024 + 1),
+      contentLength: undefined,
+      statusLine: "HTTP/1.1 413 Payload Too Large",
+      responseBody: "Payload Too Large",
+    },
+    {
+      name: "408 when the sender stalls mid-upload",
+      bodyTimeoutMs: 50,
+      body: "x".repeat(16),
+      contentLength: 64 * 1024,
+      statusLine: "HTTP/1.1 408 Request Timeout",
+      responseBody: "Request body timeout",
+    },
+  ])("delivers $name and then closes the connection", async (scenario) => {
     const handler = createSlashCommandHttpHandler({
       account: accountFixture,
       cfg: {} as OpenClawConfig,
       runtime: {} as RuntimeEnv,
       registeredCommands: [createRegisteredCommand()],
-      bodyTimeoutMs: 1,
+      bodyTimeoutMs: scenario.bodyTimeoutMs,
     });
-    const req = createRequest({ autoEnd: false });
-    const response = createResponse();
+    const server = createServer((req, res) => void handler(req, res));
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => {
+          server.removeListener("error", reject);
+          resolve();
+        });
+      });
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        throw new Error("expected the slash-command test server to have a TCP address");
+      }
+      const result = await postRawWebhook({
+        url: `http://127.0.0.1:${address.port}/slash`,
+        body: scenario.body,
+        contentLength: scenario.contentLength,
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+      });
 
-    await handler(req, response.res);
-
-    expect(response.res.statusCode).toBe(408);
-    expect(response.getBody()).toBe("Request body timeout");
+      expect(result.statusLine).toBe(scenario.statusLine);
+      expect(result.body).toBe(scenario.responseBody);
+      expect(result.closedByServer).toBe(true);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
   });
 
   it.each(["oc_reset", "oc_new"])(

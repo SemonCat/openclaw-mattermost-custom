@@ -9,6 +9,24 @@ import type { ResolvedMattermostAccount } from "./accounts.js";
 const mockState = vi.hoisted(() => ({
   runtimeConfig: {} as OpenClawConfig,
   readRequestBodyWithLimit: vi.fn(async () => "token=valid-token"),
+  isRequestBodyLimitError: vi.fn(
+    (error: unknown, code: string) =>
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      (error as { code?: unknown }).code === code,
+  ),
+  sendHttpRequestRejection: vi.fn(
+    async (
+      _req: IncomingMessage,
+      res: ServerResponse,
+      statusCode: number,
+      body: string,
+    ) => {
+      res.statusCode = statusCode;
+      res.end(body);
+    },
+  ),
   parseSlashCommandPayload: vi.fn(() => ({
     token: "valid-token",
     command: "/oc_models",
@@ -67,11 +85,12 @@ vi.mock("./runtime-api.js", () => {
     })),
     createReplyPrefixOptions: vi.fn(() => ({})),
     createTypingCallbacks: vi.fn(() => ({ onReplyStart: vi.fn() })),
-    isRequestBodyLimitError: vi.fn(() => false),
+    isRequestBodyLimitError: mockState.isRequestBodyLimitError,
     logTypingFailure: vi.fn(),
     formatInboundFromLabel: vi.fn(() => ""),
     rawDataToString: vi.fn((value: unknown) => (typeof value === "string" ? value : "")),
     readRequestBodyWithLimit: mockState.readRequestBodyWithLimit,
+    sendHttpRequestRejection: mockState.sendHttpRequestRejection,
     resolveThreadSessionKeys: vi.fn(
       (params: { baseSessionKey: string; threadId?: string; parentSessionKey?: string }) => ({
         sessionKey: params.threadId
@@ -234,6 +253,8 @@ describe("slash-http cfg threading", () => {
     vi.resetModules();
     mockState.runtimeConfig = {} as OpenClawConfig;
     mockState.readRequestBodyWithLimit.mockClear();
+    mockState.isRequestBodyLimitError.mockClear();
+    mockState.sendHttpRequestRejection.mockClear();
     mockState.parseSlashCommandPayload.mockClear();
     mockState.resolveCommandText.mockClear();
     mockState.buildModelsProviderData.mockClear();
@@ -299,6 +320,32 @@ describe("slash-http cfg threading", () => {
         cfg: runtimeCfg,
         accountId: "default",
       }),
+    );
+    expect(mockState.readRequestBodyWithLimit).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ destroyOnLimit: false }),
+    );
+  });
+
+  it("uses the shared rejection lifecycle for an oversized slash request", async () => {
+    const error = Object.assign(new Error("too large"), { code: "PAYLOAD_TOO_LARGE" });
+    mockState.readRequestBodyWithLimit.mockRejectedValueOnce(error);
+    const handler = createSlashCommandHttpHandler({
+      account: accountFixture,
+      cfg: {} as OpenClawConfig,
+      runtime: {} as RuntimeEnv,
+      registeredCommands: [],
+    });
+    const req = createRequest();
+    const response = createResponse();
+
+    await handler(req, response.res);
+
+    expect(mockState.sendHttpRequestRejection).toHaveBeenCalledWith(
+      req,
+      response.res,
+      413,
+      "Payload Too Large",
     );
   });
 

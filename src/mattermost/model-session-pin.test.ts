@@ -42,6 +42,8 @@ describe("Mattermost explicit default-model pin", () => {
     "pins an explicitly named global default to the targeted thread session: %s",
     async (commandText) => {
       const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "mm-model-pin-"));
+      const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+      process.env.OPENCLAW_STATE_DIR = testDir;
       try {
         const storePath = path.join(testDir, "agents", "{agentId}", "sessions", "sessions.json");
         const resolvedStorePath = path.join(
@@ -104,6 +106,11 @@ describe("Mattermost explicit default-model pin", () => {
           providerOverride: "openai",
         });
       } finally {
+        if (previousStateDir === undefined) {
+          delete process.env.OPENCLAW_STATE_DIR;
+        } else {
+          process.env.OPENCLAW_STATE_DIR = previousStateDir;
+        }
         fs.rmSync(testDir, { recursive: true, force: true });
       }
     },
