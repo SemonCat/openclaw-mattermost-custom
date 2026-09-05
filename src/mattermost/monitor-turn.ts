@@ -93,6 +93,7 @@ type MattermostReplyDispatchResult = {
   counts?: Partial<Record<"tool" | "block" | "final", number>>;
   failedCounts?: Partial<Record<"tool" | "block" | "final", number>>;
   observedReplyDelivery?: boolean;
+  deferredToActiveRun?: "steer" | "followup";
 };
 
 function createDisabledMattermostDraftStream(): ReturnType<typeof createMattermostDraftStream> {
@@ -415,6 +416,25 @@ export async function dispatchMattermostInboundTurn(
   let anyReplyDelivered = false;
   let queuedFollowupActive = false;
   let queuedFollowupDeliveryError = false;
+  let resolveQueuedFollowupLifecycle: (() => void) | undefined;
+  const queuedFollowupLifecycleSettled = new Promise<void>((resolve) => {
+    resolveQueuedFollowupLifecycle = resolve;
+  });
+  const ingressReplyOptions = turnAdoptionLifecycle
+    ? bindIngressLifecycleToReplyOptions(turnAdoptionLifecycle)
+    : undefined;
+  const deferredTurnAdoptionLifecycle = ingressReplyOptions?.turnAdoptionLifecycle
+    ? {
+        ...ingressReplyOptions.turnAdoptionLifecycle,
+        // Core owns a deferred follow-up after the initial dispatch returns. Its
+        // terminal settlement is the safe point to release this turn's provider
+        // presentation resources, including plan/tool callbacks and subscriptions.
+        onSettled: () => {
+          resolveQueuedFollowupLifecycle?.();
+          resolveQueuedFollowupLifecycle = undefined;
+        },
+      }
+    : undefined;
   const delivery: ChannelInboundTurnPlan["delivery"] = {
     observeMessageSent: true,
     deliver: async (payloadEntry: ReplyPayload, info) => {
@@ -580,6 +600,32 @@ export async function dispatchMattermostInboundTurn(
 
   let dispatchError = false;
   let turnResult: Awaited<ReturnType<typeof core.channel.inbound.run>> | undefined;
+  let presentationCleanupStarted = false;
+  const finishPresentation = async () => {
+    if (presentationCleanupStarted) {
+      return;
+    }
+    presentationCleanupStarted = true;
+    try {
+      await draftStream.stop();
+    } catch (err) {
+      monitor.logVerboseMessage(`mattermost draft preview cleanup failed: ${String(err)}`);
+    }
+    const dispatchResult = turnResult?.dispatched
+      ? (turnResult.dispatchResult as MattermostReplyDispatchResult)
+      : undefined;
+    const finalDeliveryFailed = (dispatchResult?.failedCounts?.final ?? 0) > 0;
+    await taskProgressCard.finish({
+      outcome: readAgentRunTerminalOutcome(dispatchResult),
+      deliveryFailed: dispatchError || finalDeliveryFailed || queuedFollowupDeliveryError,
+    });
+    unsubscribeUsageEvents();
+    unsubscribeTranscriptUpdates();
+    await reactions.finish({
+      dispatchError: dispatchError || finalDeliveryFailed || queuedFollowupDeliveryError,
+      anyReplyDelivered: anyReplyDelivered || hasVisibleInboundReplyDispatch(dispatchResult),
+    });
+  };
   try {
     turnResult = await withMattermostSessionAdmissionRetry({
       hasStartedWork: () => hasStartedWork,
@@ -645,8 +691,8 @@ export async function dispatchMattermostInboundTurn(
               dispatcherOptions,
               delivery,
               replyOptions: {
-                ...(turnAdoptionLifecycle
-                  ? bindIngressLifecycleToReplyOptions(turnAdoptionLifecycle)
+                ...(deferredTurnAdoptionLifecycle
+                  ? { turnAdoptionLifecycle: deferredTurnAdoptionLifecycle }
                   : {}),
                 allowProgressCallbacksWhenSourceDeliverySuppressed:
                   true,
@@ -823,24 +869,19 @@ export async function dispatchMattermostInboundTurn(
     dispatchError = true;
     throw err;
   } finally {
-    try {
-      await draftStream.stop();
-    } catch (err) {
-      monitor.logVerboseMessage(`mattermost draft preview cleanup failed: ${String(err)}`);
-    }
     const dispatchResult = turnResult?.dispatched
       ? (turnResult.dispatchResult as MattermostReplyDispatchResult)
       : undefined;
-    const finalDeliveryFailed = (dispatchResult?.failedCounts?.final ?? 0) > 0;
-    await taskProgressCard.finish({
-      outcome: readAgentRunTerminalOutcome(dispatchResult),
-      deliveryFailed: dispatchError || finalDeliveryFailed,
-    });
-    unsubscribeUsageEvents();
-    unsubscribeTranscriptUpdates();
-    await reactions.finish({
-      dispatchError: dispatchError || finalDeliveryFailed,
-      anyReplyDelivered: anyReplyDelivered || hasVisibleInboundReplyDispatch(dispatchResult),
-    });
+    if (dispatchResult?.deferredToActiveRun === "followup" && deferredTurnAdoptionLifecycle) {
+      void queuedFollowupLifecycleSettled
+        .then(finishPresentation)
+        .catch((error: unknown) => {
+          monitor.logVerboseMessage(
+            `mattermost queued follow-up presentation cleanup failed: ${String(error)}`,
+          );
+        });
+    } else {
+      await finishPresentation();
+    }
   }
 }

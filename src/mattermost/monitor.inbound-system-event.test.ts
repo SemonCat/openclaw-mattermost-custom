@@ -1855,6 +1855,118 @@ describe("mattermost inbound user posts", () => {
     );
   });
 
+  it("keeps queued follow-up presentation alive until its deferred lifecycle settles", async () => {
+    const socket = new FakeWebSocket();
+    const abortController = new AbortController();
+    mockState.abortController = abortController;
+    let stopped = false;
+    let toolUpdateAfterStop = false;
+    const draftStream = {
+      update: vi.fn(() => {
+        toolUpdateAfterStop ||= stopped;
+      }),
+      updateAssistantText: vi.fn(),
+      flush: vi.fn(async () => {}),
+      postId: vi.fn(() => undefined),
+      clear: vi.fn(async () => {}),
+      discardPending: vi.fn(async () => {}),
+      seal: vi.fn(async () => {}),
+      stop: vi.fn(async () => {
+        stopped = true;
+      }),
+      forceNewMessage: vi.fn(async () => {}),
+      settleBoundaries: vi.fn(async () => {}),
+      resolveFinalText: (text: string) => ({ kind: "full" as const, text, publishedParts: [] }),
+    };
+    mockState.createMattermostDraftStream.mockReturnValue(draftStream);
+
+    let followupReplyOptions:
+      | {
+          onQueuedFollowupAdmitted?: () => void;
+          onAgentRunStart?: (runId: string) => void;
+          onPlanUpdate?: (plan: {
+            title: string;
+            steps: Array<{ step: string; status: "in_progress" }>;
+          }) => Promise<boolean> | boolean;
+          onToolStart?: (payload: {
+            toolCallId: string;
+            name: string;
+            phase: "start";
+          }) => Promise<boolean> | boolean;
+          onQueuedFollowupSettled?: () => Promise<void> | void;
+          turnAdoptionLifecycle?: { onSettled?: () => void };
+        }
+      | undefined;
+    mockState.dispatchInboundMessage.mockImplementation(async (params) => {
+      followupReplyOptions = params.replyOptions as typeof followupReplyOptions;
+      return {
+        queuedFinal: false,
+        counts: {},
+        deferredToActiveRun: "followup",
+      };
+    });
+
+    const monitor = monitorMattermostProvider({
+      config: testConfig,
+      runtime: testRuntime(),
+      abortSignal: abortController.signal,
+      webSocketFactory: () => socket,
+    });
+    await vi.waitFor(() => expect(socket.openListenerCount).toBeGreaterThan(0));
+    socket.emitOpen();
+    const inbound = emitMattermostChannelPost(socket, {
+      id: "post-queued-late-plan",
+      rootId: "thread-root-queued",
+      message: "continue after the current turn",
+    });
+    await vi.waitFor(() => expect(followupReplyOptions).toBeDefined());
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const stoppedBeforeFollowupCallbacks = draftStream.stop.mock.calls.length > 0;
+    await inbound;
+
+    followupReplyOptions?.onQueuedFollowupAdmitted?.();
+    followupReplyOptions?.onAgentRunStart?.("run-queued-late-plan");
+    await followupReplyOptions?.onPlanUpdate?.({
+      title: "Continue queued work",
+      steps: [{ step: "Inspect live state", status: "in_progress" }],
+    });
+    await followupReplyOptions?.onToolStart?.({
+      toolCallId: "tool-queued-1",
+      name: "read",
+      phase: "start",
+    });
+    for (const listener of mockState.agentEventListeners) {
+      listener({
+        runId: "run-queued-late-plan",
+        stream: "lifecycle",
+        data: { phase: "end" },
+      });
+    }
+    await followupReplyOptions?.onQueuedFollowupSettled?.();
+    followupReplyOptions?.turnAdoptionLifecycle?.onSettled?.();
+    await vi.waitFor(() => expect(draftStream.stop).toHaveBeenCalledOnce());
+
+    abortController.abort();
+    socket.emitClose(1000);
+    await monitor;
+
+    expect(stoppedBeforeFollowupCallbacks).toBe(false);
+    expect(toolUpdateAfterStop).toBe(false);
+    expect(mockState.createMattermostPost).toHaveBeenCalledOnce();
+    expect(mockState.createMattermostPost).toHaveBeenCalledWith(
+      {},
+      expect.objectContaining({
+        rootId: "thread-root-queued",
+        message: expect.stringContaining("Task progress · In progress"),
+      }),
+    );
+    expect(String(draftStream.update.mock.calls.at(-1)?.[0])).toContain("Read");
+    expect(mockState.updateMattermostPost.mock.calls.at(-1)?.[2].message).toContain(
+      "Task progress · Completed",
+    );
+    expect(draftStream.stop).toHaveBeenCalledOnce();
+  });
+
   it("does not create a task card for a final-only turn", async () => {
     const socket = new FakeWebSocket();
     const abortController = new AbortController();
