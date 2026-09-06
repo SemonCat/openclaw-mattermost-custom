@@ -254,7 +254,7 @@ describe("mattermostPlugin", () => {
   it("keeps channel model overrides dynamic while account config restarts stay scoped", () => {
     expect(mattermostPlugin.reload).toMatchObject({
       accountScopedRestart: true,
-      noopPrefixes: ["channels.modelByChannel.mattermost"],
+      noopPrefixes: ["channels.modelByChannel.mattermost", "messages.inbound"],
     });
   });
 

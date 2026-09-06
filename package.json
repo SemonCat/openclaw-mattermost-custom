@@ -1,6 +1,6 @@
 {
   "name": "openclaw-mattermost-custom",
-  "version": "2026.9.1",
+  "version": "2026.9.2",
   "private": true,
   "description": "SemonCat downstream Mattermost channel plugin for OpenClaw.",
   "repository": {
@@ -10,6 +10,7 @@
   "type": "module",
   "files": [
     "dist",
+    "assets",
     "skills",
     "openclaw.plugin.json",
     "README.md"
@@ -24,13 +25,13 @@
   },
   "devDependencies": {
     "@types/node": "26.1.2",
-    "openclaw": "2026.9.1",
+    "openclaw": "2026.9.2",
     "tsdown": "0.22.1",
     "typescript": "6.0.3",
     "vitest": "4.1.10"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.9.1"
+    "openclaw": ">=2026.9.2"
   },
   "peerDependenciesMeta": {
     "openclaw": {
@@ -71,13 +72,13 @@
       ] }
     },
     "install": {
-      "minHostVersion": ">=2026.9.1"
+      "minHostVersion": ">=2026.9.2"
     },
     "compat": {
-      "pluginApi": ">=2026.9.1"
+      "pluginApi": ">=2026.9.2"
     },
     "build": {
-      "openclawVersion": "2026.9.1",
+      "openclawVersion": "2026.9.2",
       "bundledDist": false
     }
   }

@@ -5,7 +5,6 @@
   },
   "name": "Mattermost (SemonCat custom)",
   "description": "SemonCat downstream Mattermost channel plugin with native commands and lifecycle reactions.",
-  "icon": "https://cdn.simpleicons.org/mattermost",
   "activation": {
     "onStartup": false
   },

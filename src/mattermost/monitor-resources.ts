@@ -109,14 +109,16 @@ export function createMattermostMonitorResources(params: {
     saveRemoteMedia,
     mediaKindFromMime,
   } = params;
-  const channelCache = new Map<string, { value: MattermostChannel | null; expiresAt: number }>();
-  const userCache = new Map<string, { value: MattermostUser | null; expiresAt: number }>();
+  // Cache only successful lookups. A transient failure must not hide reactions,
+  // callbacks, or username-allowlisted senders for the full resource TTL.
+  const channelCache = new Map<string, { value: MattermostChannel; expiresAt: number }>();
+  const userCache = new Map<string, { value: MattermostUser; expiresAt: number }>();
 
   const getCachedValue = <T>(
-    cache: Map<string, { value: T | null; expiresAt: number }>,
+    cache: Map<string, { value: T; expiresAt: number }>,
     key: string,
     nowMs: number | undefined,
-  ): T | null | undefined => {
+  ): T | undefined => {
     const cached = cache.get(key);
     if (!cached) {
       return undefined;
@@ -129,9 +131,9 @@ export function createMattermostMonitorResources(params: {
   };
 
   const setCachedValue = <T>(
-    cache: Map<string, { value: T | null; expiresAt: number }>,
+    cache: Map<string, { value: T; expiresAt: number }>,
     key: string,
-    value: T | null,
+    value: T,
     ttlMs: number,
     rawNowMs: number,
   ): void => {
@@ -225,7 +227,6 @@ export function createMattermostMonitorResources(params: {
       return info;
     } catch (err) {
       logger.debug?.(`mattermost: channel lookup failed: ${String(err)}`);
-      setCachedValue(channelCache, channelId, null, CHANNEL_CACHE_TTL_MS, rawNow);
       return null;
     }
   };
@@ -242,7 +243,6 @@ export function createMattermostMonitorResources(params: {
       return info;
     } catch (err) {
       logger.debug?.(`mattermost: user lookup failed: ${String(err)}`);
-      setCachedValue(userCache, userId, null, USER_CACHE_TTL_MS, rawNow);
       return null;
     }
   };

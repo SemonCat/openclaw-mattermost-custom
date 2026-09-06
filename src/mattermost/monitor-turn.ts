@@ -777,6 +777,7 @@ export async function dispatchMattermostInboundTurn(
                 },
                 onToolStart: async (payloadValue) => {
                   hasStartedWork = true;
+                  taskProgressCard.noteToolStart(payloadValue);
                   reactions.setTool(payloadValue.name);
                   if (payloadValue.phase === "start") {
                     progressReceipt.noteToolCall(payloadValue.name, payloadValue.toolCallId);
@@ -809,6 +810,9 @@ export async function dispatchMattermostInboundTurn(
                 onItemEvent: async (payloadLocal) => {
                   if (payloadLocal.kind === "tool" && payloadLocal.phase === "end") {
                     progressReceipt.noteToolCallEnd(payloadLocal.toolCallId);
+                    if (payloadLocal.name === "progress_card") {
+                      taskProgressCard.noteToolEnd(payloadLocal.toolCallId);
+                    }
                   }
                   if (!draftToolProgressEnabled) {
                     return false;

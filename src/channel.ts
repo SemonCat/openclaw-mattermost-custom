@@ -1033,7 +1033,7 @@ export const mattermostPlugin: ChannelPlugin<ResolvedMattermostAccount> = create
     },
     reload: {
       configPrefixes: ["channels.mattermost"],
-      noopPrefixes: ["channels.modelByChannel.mattermost"],
+      noopPrefixes: ["channels.modelByChannel.mattermost", "messages.inbound"],
       /**
        * accounts.default is promoted; named resolution merges only channel-wide fields
        * plus the selected account. Monitor debounce and durable ingress use accountId.

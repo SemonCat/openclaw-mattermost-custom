@@ -29,6 +29,7 @@ describe("Mattermost custom plugin identity", () => {
     };
     const manifest = readJson("./openclaw.plugin.json") as {
       id: string;
+      icon?: string;
       channels: string[];
       channelConfigs: { mattermost: { preferOver: string[] } };
     };
@@ -36,6 +37,10 @@ describe("Mattermost custom plugin identity", () => {
     expect(packageJson.name).toBe("openclaw-mattermost-custom");
     expect(packageJson.private).toBe(true);
     expect(manifest.id).toBe("mattermost-custom");
+    expect(manifest.icon).toBeUndefined();
+    expect(fs.readFileSync(new URL("./assets/icon.png", import.meta.url)).subarray(0, 8)).toEqual(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    );
     expect(pluginDefinition.id).toBe(manifest.id);
     expect(manifest.channels).toEqual(["mattermost"]);
     expect(manifest.channelConfigs?.mattermost?.preferOver).toEqual(["mattermost"]);
@@ -47,7 +52,7 @@ describe("Mattermost custom plugin identity", () => {
     expect(packageJson.openclaw.runtimeExtensions).toEqual(["./dist/index.js"]);
     expect(packageJson.openclaw.setupEntry).toBe("./setup-entry.ts");
     expect(packageJson.openclaw.runtimeSetupEntry).toBe("./dist/setup-entry.js");
-    expect(packageJson.openclaw.install.minHostVersion).toBe(">=2026.9.1");
+    expect(packageJson.openclaw.install.minHostVersion).toBe(">=2026.9.2");
     expect(packageJson.openclaw.install.localPath).toBeUndefined();
     expect(packageJson.openclaw.install.defaultChoice).toBeUndefined();
     expect(packageJson.openclaw.install.allowInvalidConfigRecovery).toBeUndefined();

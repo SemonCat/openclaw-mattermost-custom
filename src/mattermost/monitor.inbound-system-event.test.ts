@@ -2,8 +2,15 @@
 import { once } from "node:events";
 import { createServer } from "node:http";
 import { createChannelPartialDeliveryError } from "openclaw/plugin-sdk/channel-inbound";
-import { createInboundDebouncer } from "openclaw/plugin-sdk/channel-inbound-debounce";
+import {
+  createInboundDebouncer,
+  resolveInboundDebounceMs,
+} from "openclaw/plugin-sdk/channel-inbound-debounce";
 import { createMessageReceiptFromOutboundResults } from "openclaw/plugin-sdk/channel-outbound";
+import {
+  clearRuntimeConfigSnapshot,
+  setRuntimeConfigSnapshot,
+} from "openclaw/plugin-sdk/runtime-config-snapshot";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
 import type { MattermostPost } from "./client.js";
@@ -351,6 +358,7 @@ function createRuntimeCore(
   },
   overrides: {
     inboundDebounceMs?: number;
+    resolveInboundDebounceMs?: typeof resolveInboundDebounceMs;
     isControlCommandMessage?: (text?: string) => boolean;
     shouldComputeCommandAuthorized?: (text?: string) => boolean;
     shouldHandleTextCommands?: () => boolean;
@@ -537,7 +545,8 @@ function createRuntimeCore(
         shouldHandleTextCommands: overrides.shouldHandleTextCommands ?? (() => false),
       },
       debounce: {
-        resolveInboundDebounceMs: () => overrides.inboundDebounceMs ?? 0,
+        resolveInboundDebounceMs:
+          overrides.resolveInboundDebounceMs ?? (() => overrides.inboundDebounceMs ?? 0),
         createInboundDebouncer:
           overrides.createInboundDebouncer ??
           (<T>(params: {
@@ -722,6 +731,57 @@ describe("mattermost inbound user posts", () => {
     mockState.dispatchInboundMessage.mockImplementation(async () => {
       mockState.abortController?.abort();
     });
+  });
+
+  it("changes Mattermost debounce at admission without replacing the socket", async () => {
+    const cfg = { ...testConfig, messages: { inbound: { debounceMs: 0 } } };
+    setRuntimeConfigSnapshot(cfg, cfg);
+    mockState.dispatchInboundMessage.mockResolvedValue(undefined);
+    mockState.runtimeCore = createRuntimeCore(cfg, undefined, {
+      createInboundDebouncer,
+      resolveInboundDebounceMs,
+    });
+    const socket = new FakeWebSocket();
+    const abortController = new AbortController();
+    const socketFactory = vi.fn(() => socket);
+    const monitor = monitorMattermostProvider({
+      config: cfg,
+      runtime: testRuntime(),
+      abortSignal: abortController.signal,
+      webSocketFactory: socketFactory,
+    });
+    await vi.waitFor(() => expect(socket.openListenerCount).toBeGreaterThan(0));
+    socket.emitOpen();
+    const bodies = () =>
+      mockState.dispatchInboundMessage.mock.calls.map(([params]) => params.ctx.BodyForAgent);
+    const publishDebounce = (debounceMs: number) => {
+      const current = {
+        ...cfg,
+        messages: { inbound: { byChannel: { mattermost: debounceMs } } },
+      };
+      setRuntimeConfigSnapshot(current, current);
+    };
+
+    try {
+      await emitMattermostChannelPost(socket, { id: "debounce-1", message: "immediate" });
+      await vi.waitFor(() => expect(bodies()).toEqual(["immediate"]));
+      publishDebounce(500);
+      await emitMattermostChannelPost(socket, { id: "debounce-2", message: "buffered" });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(bodies()).toEqual(["immediate"]);
+      publishDebounce(0);
+      await vi.waitFor(() => expect(bodies()).toEqual(["immediate", "buffered"]));
+      await emitMattermostChannelPost(socket, { id: "debounce-3", message: "after disable" });
+      await vi.waitFor(() =>
+        expect(bodies()).toEqual(["immediate", "buffered", "after disable"]),
+      );
+      expect(socketFactory).toHaveBeenCalledOnce();
+    } finally {
+      abortController.abort();
+      socket.emitClose(1000);
+      await monitor;
+      clearRuntimeConfigSnapshot();
+    }
   });
 
   it("publishes recovering while API authentication retries, including 401", async () => {
@@ -1855,6 +1915,114 @@ describe("mattermost inbound user posts", () => {
     );
   });
 
+  it("renders markdown-only native progress cards instead of an empty placeholder", async () => {
+    const socket = new FakeWebSocket();
+    const abortController = new AbortController();
+    mockState.abortController = abortController;
+    const nativeMarkdown = [
+      '<progress aria-label="Deploy · 4/5" value="4" max="5"></progress>',
+      "**AWS deployment in progress**",
+      "",
+      "- Build complete",
+      "- Running canary",
+    ].join("\n");
+    mockState.dispatchInboundMessage.mockImplementation(async (params) => {
+      params.replyOptions?.onAgentRunStart?.("run-markdown-progress");
+      await params.replyOptions?.onToolStart?.({
+        toolCallId: "progress-card-1",
+        name: "progress_card",
+        phase: "start",
+        args: { markdown: nativeMarkdown },
+      });
+      await params.replyOptions?.onPlanUpdate?.({
+        phase: "update",
+        title: "Plan updated",
+        source: "openclaw",
+        steps: [],
+      });
+      return withAgentRunTerminalOutcome({ counts: {} }, "completed");
+    });
+
+    const monitor = monitorMattermostProvider({
+      config: testConfig,
+      runtime: testRuntime(),
+      abortSignal: abortController.signal,
+      webSocketFactory: () => socket,
+    });
+    await vi.waitFor(() => expect(socket.openListenerCount).toBeGreaterThan(0));
+    socket.emitOpen();
+    await emitMattermostChannelPost(socket, {
+      id: "post-markdown-progress",
+      rootId: "thread-markdown-progress",
+      message: "deploy this",
+    });
+    await vi.waitFor(() => expect(mockState.createMattermostPost).toHaveBeenCalledOnce());
+    abortController.abort();
+    socket.emitClose(1000);
+    await monitor;
+
+    const createdMessage = String(mockState.createMattermostPost.mock.calls[0]?.[1].message);
+    expect(createdMessage).toContain("Deploy · 4/5");
+    expect(createdMessage).toContain("AWS deployment in progress");
+    expect(createdMessage).toContain("Running canary");
+    expect(createdMessage).not.toContain("Plan updated");
+  });
+
+  it("does not reuse markdown from a failed native progress-card call", async () => {
+    const socket = new FakeWebSocket();
+    const abortController = new AbortController();
+    mockState.abortController = abortController;
+    mockState.dispatchInboundMessage.mockImplementation(async (params) => {
+      await params.replyOptions?.onToolStart?.({
+        toolCallId: "failed-progress-card",
+        name: "progress_card",
+        phase: "start",
+        args: { markdown: "Failed draft" },
+      });
+      await params.replyOptions?.onItemEvent?.({
+        toolCallId: "failed-progress-card",
+        kind: "tool",
+        name: "progress_card",
+        phase: "end",
+        status: "failed",
+      });
+      await params.replyOptions?.onToolStart?.({
+        toolCallId: "accepted-progress-card",
+        name: "progress_card",
+        phase: "start",
+        args: { markdown: "Accepted progress" },
+      });
+      await params.replyOptions?.onPlanUpdate?.({
+        phase: "update",
+        title: "Plan updated",
+        source: "openclaw",
+        steps: [],
+      });
+      return withAgentRunTerminalOutcome({ counts: {} }, "completed");
+    });
+
+    const monitor = monitorMattermostProvider({
+      config: testConfig,
+      runtime: testRuntime(),
+      abortSignal: abortController.signal,
+      webSocketFactory: () => socket,
+    });
+    await vi.waitFor(() => expect(socket.openListenerCount).toBeGreaterThan(0));
+    socket.emitOpen();
+    await emitMattermostChannelPost(socket, {
+      id: "post-after-failed-progress",
+      message: "continue after a failed progress update",
+    });
+    await vi.waitFor(() => expect(mockState.createMattermostPost).toHaveBeenCalledOnce());
+    abortController.abort();
+    socket.emitClose(1000);
+    await monitor;
+
+    const createdMessage = String(mockState.createMattermostPost.mock.calls[0]?.[1].message);
+    expect(createdMessage).toContain("Accepted progress");
+    expect(createdMessage).not.toContain("Failed draft");
+  });
+
   it("keeps queued follow-up presentation alive until its deferred lifecycle settles", async () => {
     const socket = new FakeWebSocket();
     const abortController = new AbortController();
@@ -2192,6 +2360,72 @@ describe("mattermost inbound user posts", () => {
     // Inline non-control text must not be tagged as an explicit text-slash command turn —
     // only authorized control commands take the source-reply suppression bypass.
     expect(ctx?.CommandSource).toBeUndefined();
+  });
+
+  it("routes a mention-prefixed text command without treating it as debounced prose", async () => {
+    const socket = new FakeWebSocket();
+    const abortController = new AbortController();
+    mockState.abortController = abortController;
+    const mentionConfig: OpenClawConfig = {
+      channels: {
+        mattermost: {
+          enabled: true,
+          baseUrl: "https://mattermost.example.com",
+          botToken: "bot-token",
+          chatmode: "oncall",
+          dmPolicy: "open",
+          groupPolicy: "open",
+          groupAllowFrom: ["user-1"],
+        },
+      },
+    };
+    const debounceDecisions: boolean[] = [];
+    const createDebouncer = vi.fn((params: {
+      shouldDebounce: (entry: unknown) => boolean;
+      onFlush: (
+        entries: unknown[],
+        createFlush: typeof createTestInboundDebounceFlush,
+      ) => { completion: Promise<void> };
+    }) => ({
+      enqueue: async (entry: unknown) => {
+        debounceDecisions.push(params.shouldDebounce(entry));
+        await params.onFlush([entry], createTestInboundDebounceFlush).completion;
+      },
+      flushKey: async () => {},
+      cancelKey: () => false,
+      drain: async () => {},
+    })) as unknown as typeof createInboundDebouncer;
+    const isControlCommandMessage = vi.fn((text?: string) => text?.trim() === "/reset");
+    mockState.runtimeCore = createRuntimeCore(mentionConfig, undefined, {
+      createInboundDebouncer: createDebouncer,
+      isControlCommandMessage,
+      shouldComputeCommandAuthorized: () => true,
+      shouldHandleTextCommands: () => true,
+    });
+
+    const monitor = monitorMattermostProvider({
+      config: mentionConfig,
+      runtime: testRuntime(),
+      abortSignal: abortController.signal,
+      webSocketFactory: () => socket,
+    });
+    await vi.waitFor(() => expect(socket.openListenerCount).toBeGreaterThan(0));
+    socket.emitOpen();
+    await emitMattermostChannelPost(socket, {
+      id: "post-mention-command",
+      message: "@openclaw /reset",
+    });
+    abortController.abort();
+    socket.emitClose(1000);
+    await monitor;
+
+    expect(debounceDecisions).toEqual([false]);
+    expect(isControlCommandMessage).toHaveBeenCalledWith("/reset", mentionConfig);
+    const ctx = mockState.dispatchInboundMessage.mock.calls.at(0)?.[0].ctx;
+    expect(ctx?.BodyForAgent).toBe("/reset");
+    expect(ctx?.CommandBody).toBe("/reset");
+    expect(ctx?.CommandAuthorized).toBe(true);
+    expect(ctx?.CommandSource).toBe("text");
   });
 
   // Regression for issue #86664: typed `/reset` (and `/new`) on a Mattermost DM under

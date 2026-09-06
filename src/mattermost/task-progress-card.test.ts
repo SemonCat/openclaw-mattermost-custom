@@ -370,6 +370,26 @@ describe("Mattermost durable task progress card", () => {
     expect(String(readBody(request.mock.calls[0]?.[1]).message)).not.toContain("Plan updated");
   });
 
+  it("does not publish a card for a generic empty OpenClaw plan event", async () => {
+    const request = vi.fn<MattermostClient["request"]>();
+    const card = createMattermostTaskProgressCard({
+      client: createTestClient(request),
+      channelId: "channel-1",
+      log: vi.fn(),
+    });
+
+    await expect(
+      card.updatePlan({
+        title: "Plan updated",
+        source: "openclaw",
+        steps: [],
+      }),
+    ).resolves.toBe(false);
+
+    expect(request).not.toHaveBeenCalled();
+    expect(card.postId()).toBeUndefined();
+  });
+
   it.each([
     { channelId: "channel-root", rootId: undefined },
     { channelId: "channel-thread", rootId: "root-post" },

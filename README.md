@@ -41,7 +41,7 @@ mkdir -p /tmp/openclaw/mattermost-custom
 npm run build
 npm pack --omit=dev --pack-destination /tmp/openclaw/mattermost-custom
 openclaw plugins install \
-  /tmp/openclaw/mattermost-custom/openclaw-mattermost-custom-2026.9.1.tgz --force
+  /tmp/openclaw/mattermost-custom/openclaw-mattermost-custom-2026.9.2.tgz --force
 ```
 
 Do not use `plugins install --link` or add this source checkout to
@@ -88,6 +88,9 @@ Compared with the official plugin, this build preserves:
 - Native exec, plugin, and system-agent approval cards with canonical Gateway resolution.
 - Durable interactive callback admission and replay across Gateway restarts.
 - The Mattermost slash-trigger length cap fix.
+- Mention-prefixed text commands such as `@bot /new`, without debounce or prose misrouting.
+- Immediate recovery from transient channel/user lookup failures instead of negative caching.
+- Live `messages.inbound` debounce updates without replacing the Mattermost connection.
 
 Mutable message-tool actions are enabled by default for this personal downstream
 plugin. Each gate can still be disabled globally or per account:
@@ -211,7 +214,7 @@ the editable result identity and card creation fails without disrupting final
 delivery. If Mattermost accepts the copy but returns no usable identity, the
 stream stops that path rather than retrying and risking duplicate posts.
 
-OpenClaw 2026.9.1 restart-recovery runs also reconnect channel/group session
+OpenClaw 2026.9.2 restart-recovery runs also reconnect channel/group session
 events to the original Mattermost thread. Recovery keeps the typing indicator
 alive and restores tool progress in a temporary preview post; terminal recovery
 clears that preview and leaves core's durable final-answer delivery unchanged.
@@ -264,7 +267,7 @@ shared Mattermost contract tests and the downstream behavior tests.
 ### Test status against the published npm SDK
 
 This repo builds and tests against the published `openclaw` npm package
-(`2026.9.1`), not the OpenClaw monorepo checkout. One category of tests
+(`2026.9.2`), not the OpenClaw monorepo checkout. One category of tests
 behaves differently from the monorepo for that reason:
 
 - Ten suites import test-only Plugin SDK subpaths (`channel-test-helpers`,

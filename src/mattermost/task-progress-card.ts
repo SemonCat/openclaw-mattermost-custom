@@ -37,9 +37,22 @@ type MattermostTaskProgressSnapshot = {
   status: MattermostTaskProgressStatus;
 };
 
+type PendingNativeProgressCard = {
+  toolCallId: string;
+  markdown?: string;
+};
+
 function normalizeSingleLine(value?: string): string | undefined {
   const normalized = value?.replace(/\s+/g, " ").trim();
   return normalized || undefined;
+}
+
+function normalizeTitle(value?: string, source?: string): string | undefined {
+  const normalized = normalizeSingleLine(value);
+  if (source === "openclaw" && /^plan updated[.!]?$/i.test(normalized ?? "")) {
+    return undefined;
+  }
+  return normalized;
 }
 
 function normalizeExplanation(value?: string): string | undefined {
@@ -48,6 +61,25 @@ function normalizeExplanation(value?: string): string | undefined {
     return undefined;
   }
   return normalized.length > 1_500 ? `${normalized.slice(0, 1_497)}…` : normalized;
+}
+
+function renderNativeProgressMarkdownForMattermost(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const markdown = value.trim();
+  if (!markdown) {
+    return undefined;
+  }
+  const progress = markdown.match(/^<progress\b([^>]*)><\/progress>\s*/iu);
+  if (!progress) {
+    return markdown;
+  }
+  const attributes = progress[1] ?? "";
+  const ariaLabel = attributes.match(/\baria-label\s*=\s*(?:"([^"]*)"|'([^']*)')/iu);
+  const label = (ariaLabel?.[1] ?? ariaLabel?.[2] ?? "").trim();
+  const remainder = markdown.slice(progress[0].length).trim();
+  return [label ? `**${label}**` : undefined, remainder].filter(Boolean).join("\n\n") || undefined;
 }
 
 function normalizeSteps(steps?: AgentPlanStep[]): AgentPlanStep[] {
@@ -122,6 +154,7 @@ export function createMattermostTaskProgressCard(params: {
   let latestSnapshot: MattermostTaskProgressSnapshot | undefined;
   let lifecycleTerminal: Exclude<MattermostTaskProgressStatus, "in_progress"> | undefined;
   let nextRevision = 0;
+  const pendingNativeProgressCards: PendingNativeProgressCard[] = [];
   let publishedMessage: string | undefined;
   let publishedRevision = 0;
   let resultPostStarted = false;
@@ -242,6 +275,29 @@ export function createMattermostTaskProgressCard(params: {
 
   return {
     postId: () => taskPostId,
+    noteToolStart: (payload: {
+      toolCallId?: string;
+      name?: string;
+      phase?: string;
+      args?: Record<string, unknown>;
+    }) => {
+      if (payload.phase !== "start" || payload.name !== "progress_card" || !payload.toolCallId) {
+        return;
+      }
+      pendingNativeProgressCards.push({
+        toolCallId: payload.toolCallId,
+        markdown: renderNativeProgressMarkdownForMattermost(payload.args?.markdown),
+      });
+    },
+    noteToolEnd: (toolCallId?: string) => {
+      if (!toolCallId) {
+        return;
+      }
+      const index = pendingNativeProgressCards.findIndex((entry) => entry.toolCallId === toolCallId);
+      if (index >= 0) {
+        pendingNativeProgressCards.splice(index, 1);
+      }
+    },
     noteRunStart: (runId: string) => {
       activeRunId = runId;
       lifecycleTerminal = undefined;
@@ -265,8 +321,10 @@ export function createMattermostTaskProgressCard(params: {
       if (finished) {
         return false;
       }
-      const title = normalizeSingleLine(plan.title);
-      const explanation = normalizeExplanation(plan.explanation);
+      const nativeProgressCard =
+        plan.source === "openclaw" ? pendingNativeProgressCards.shift() : undefined;
+      const title = normalizeTitle(plan.title, plan.source);
+      const explanation = normalizeExplanation(plan.explanation ?? nativeProgressCard?.markdown);
       const steps = normalizeSteps(plan.steps);
       if (!title && !explanation && steps.length === 0) {
         return false;
