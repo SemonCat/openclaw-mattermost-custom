@@ -126,6 +126,6 @@ export function createMattermostThreadTool(
 export function registerMattermostThreadTool(api: OpenClawPluginApi): void {
   api.registerTool((context) => createMattermostThreadTool(api, context), {
     name: "mattermost_thread",
-    optional: true,
+    optional: false,
   });
 }

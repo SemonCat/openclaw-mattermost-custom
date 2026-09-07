@@ -2,7 +2,7 @@ import type { OpenClawPluginApi, OpenClawPluginToolContext } from "openclaw/plug
 import { describe, expect, it, vi } from "vitest";
 import { createMattermostClient } from "./client.js";
 import { createMattermostTestConfig, requestUrl } from "./reactions.test-helpers.js";
-import { createMattermostThreadTool } from "./thread-tool.js";
+import { createMattermostThreadTool, registerMattermostThreadTool } from "./thread-tool.js";
 
 const ROOT_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaa";
 const LINK_ID = "bbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -15,6 +15,18 @@ function jsonResponse(body: unknown): Response {
 }
 
 describe("mattermost_thread tool", () => {
+  it("registers as a default tool without requiring an explicit allowlist", () => {
+    const registerTool = vi.fn();
+
+    registerMattermostThreadTool({ registerTool } as unknown as OpenClawPluginApi);
+
+    expect(registerTool).toHaveBeenCalledOnce();
+    expect(registerTool.mock.calls[0]?.[1]).toEqual({
+      name: "mattermost_thread",
+      optional: false,
+    });
+  });
+
   it("is available only in a trusted Mattermost conversation", () => {
     const cfg = createMattermostTestConfig("thread-tool-surface");
     const api = { config: cfg } as OpenClawPluginApi;
