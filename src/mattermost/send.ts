@@ -49,6 +49,7 @@ import {
   resolveMattermostOpaqueTarget,
   type MattermostTarget,
 } from "./target-resolution.js";
+import { registerMattermostQuestionDelivery } from "./question-finalization.js";
 
 type MattermostSendOpts = {
   cfg: OpenClawConfig;
@@ -64,6 +65,8 @@ type MattermostSendOpts = {
   replyToId?: string;
   props?: Record<string, unknown>;
   buttons?: Array<unknown>;
+  /** Gateway question bound to this prompt; used only to retire its visible controls. */
+  questionId?: string;
   attachmentText?: string;
   /** Retry options for DM channel creation */
   dmRetryOptions?: CreateDmChannelRetryOptions;
@@ -686,6 +689,18 @@ export async function sendMessageMattermost(
     receipt,
     content: post.message ?? message,
   };
+  try {
+    registerMattermostQuestionDelivery({
+      accountId,
+      client,
+      post,
+      questionId: opts.questionId,
+    });
+  } catch {
+    // The provider already accepted the post. Terminal-control bookkeeping must
+    // not turn that accepted delivery into a retryable failure or duplicate it.
+    logger.warn?.("mattermost send: question finalization registration failed");
+  }
   try {
     // Core must learn the provider identity before local bookkeeping can fail;
     // preserve the receipt if either post-send step rejects to prevent a duplicate retry.

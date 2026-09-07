@@ -1860,7 +1860,7 @@ describe("mattermost inbound user posts", () => {
     });
     await vi.waitFor(() => {
       expect(mockState.updateMattermostPost.mock.calls.at(-1)?.[2].message).toContain(
-        "Task progress · Completed",
+        "Task progress · Incomplete",
       );
     });
     abortController.abort();
@@ -1901,7 +1901,7 @@ describe("mattermost inbound user posts", () => {
     );
     expect(mockState.updateMattermostPost).toHaveBeenCalledTimes(2);
     expect(mockState.updateMattermostPost.mock.calls.at(-1)?.[2].message).toContain(
-      "Task progress · Completed",
+      "Task progress · Incomplete",
     );
     expect(draftStream.update).toHaveBeenCalled();
     expect(String(draftStream.update.mock.calls.at(-1)?.[0])).toContain("Read");
@@ -2130,7 +2130,7 @@ describe("mattermost inbound user posts", () => {
     );
     expect(String(draftStream.update.mock.calls.at(-1)?.[0])).toContain("Read");
     expect(mockState.updateMattermostPost.mock.calls.at(-1)?.[2].message).toContain(
-      "Task progress · Completed",
+      "Task progress · Incomplete",
     );
     expect(draftStream.stop).toHaveBeenCalledOnce();
   });

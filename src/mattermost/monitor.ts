@@ -242,6 +242,7 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
   const interactions = registerMattermostInteractions({
     monitor,
     interactionPath,
+    interactionCallbackUrl: callbackUrl,
     allowedSourceIps:
       allowedInteractionSourceIps.length > 0 ? allowedInteractionSourceIps : ["127.0.0.1", "::1"],
     handleModelPickerInteraction: createMattermostModelPickerInteractionHandler(monitor),

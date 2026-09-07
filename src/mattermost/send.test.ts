@@ -41,6 +41,7 @@ const mockState = vi.hoisted(() => ({
   fetchMattermostUserTeams: vi.fn(),
   fetchMattermostUserByUsername: vi.fn(),
   normalizeMattermostBaseUrl: vi.fn((input: string | undefined) => input?.trim() ?? ""),
+  registerMattermostQuestionDelivery: vi.fn(),
   resolveMarkdownTableMode: vi.fn(
     (params: { cfg?: { channels?: { mattermost?: { markdown?: { tables?: string } } } } }) =>
       params.cfg?.channels?.mattermost?.markdown?.tables ?? "off",
@@ -192,6 +193,10 @@ vi.mock("./accounts.js", () => ({
   resolveMattermostAccount: mockState.resolveMattermostAccount,
 }));
 
+vi.mock("./question-finalization.js", () => ({
+  registerMattermostQuestionDelivery: mockState.registerMattermostQuestionDelivery,
+}));
+
 vi.mock("./client.js", async () => ({
   parseMattermostApiStatus: (await vi.importActual<typeof import("./client.js")>("./client.js"))
     .parseMattermostApiStatus,
@@ -253,6 +258,7 @@ describe("sendMessageMattermost", () => {
     mockState.fetchMattermostUserTeams.mockReset();
     mockState.fetchMattermostUserByUsername.mockReset();
     mockState.resolveMarkdownTableMode.mockClear();
+    mockState.registerMattermostQuestionDelivery.mockReset();
     mockState.uploadMattermostFile.mockReset();
     mockState.createMattermostClient.mockReturnValue({});
     mockState.createMattermostPost.mockResolvedValue({ id: "post-1" });
@@ -516,6 +522,34 @@ describe("sendMessageMattermost", () => {
     });
     expect(onDeliveryResult).toHaveBeenCalledTimes(1);
     expect(mockState.recordActivity).not.toHaveBeenCalled();
+  });
+
+  it("keeps an accepted send successful when question finalization registration fails", async () => {
+    mockState.createMattermostPost.mockResolvedValueOnce({
+      id: "secret-post",
+      channel_id: "town-square",
+      message: "Credential requested",
+    });
+    mockState.registerMattermostQuestionDelivery.mockImplementationOnce(() => {
+      throw new Error("question registry unavailable");
+    });
+    const onDeliveryResult = vi.fn();
+
+    const result = await sendMessageMattermost("channel:town-square", "Credential requested", {
+      cfg: TEST_CFG,
+      questionId: "ask_0123456789abcdef0123456789abcdef",
+      onDeliveryResult,
+    });
+
+    expect(result.messageId).toBe("secret-post");
+    expect(mockState.registerMattermostQuestionDelivery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        accountId: "default",
+        questionId: "ask_0123456789abcdef0123456789abcdef",
+      }),
+    );
+    expect(onDeliveryResult).toHaveBeenCalledTimes(1);
+    expect(mockState.recordActivity).toHaveBeenCalledTimes(1);
   });
 
   it("marks durable text sends before provider-visible post creation", async () => {

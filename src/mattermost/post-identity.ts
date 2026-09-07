@@ -191,10 +191,22 @@ export async function hydrateMattermostRecoveryPostIdentity(params: {
   }
 }
 
-function terminalLabel(status: MattermostRecoveredTaskTerminalStatus): string {
+function hasUnfinishedTaskChecklist(message: string | null | undefined): boolean {
+  return (message ?? "")
+    .split(/\r?\n/)
+    .some(
+      (line) =>
+        /^\s*-\s+\[\s\]\s+/u.test(line) || /^\s*(?:▸|▢|In progress:|Pending:)\s+/iu.test(line),
+    );
+}
+
+function terminalLabel(
+  status: MattermostRecoveredTaskTerminalStatus,
+  message: string | null | undefined,
+): string {
   switch (status) {
     case "completed":
-      return "Completed";
+      return hasUnfinishedTaskChecklist(message) ? "Incomplete" : "Completed";
     case "failed":
       return "Failed";
     case "cancelled":
@@ -213,7 +225,7 @@ export function renderMattermostRecoveredTaskTerminal(
   let wroteHeader = false;
   for (const line of (message ?? "").split(/\r?\n/)) {
     if (!wroteHeader && /^#{3,4}\s+Task progress(?:\s*·.*)?\s*$/i.test(line)) {
-      output.push(`#### Task progress · ${terminalLabel(status)}`);
+      output.push(`#### Task progress · ${terminalLabel(status, message)}`);
       wroteHeader = true;
       continue;
     }

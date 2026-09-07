@@ -22,11 +22,13 @@ import type { MattermostMonitorContext } from "./monitor-types.js";
 import { deliverMattermostReplyPayload } from "./reply-delivery.js";
 import type { ReplyPayload } from "./runtime-api.js";
 import { registerPluginHttpRoute } from "./runtime-api.js";
+import { createMattermostSecretDialogController } from "./secret-dialog.js";
 import { sendMessageMattermost } from "./send.js";
 
 export function registerMattermostInteractions(params: {
   monitor: MattermostMonitorContext;
   interactionPath: string;
+  interactionCallbackUrl: string;
   allowedSourceIps: string[];
   handleModelPickerInteraction: MattermostModelPickerInteractionHandler;
   abortSignal?: AbortSignal;
@@ -39,6 +41,19 @@ export function registerMattermostInteractions(params: {
     cfg: () => pinMattermostMonitorConfig(monitor).cfg,
     accountId: account.accountId,
   });
+  const secretDialog = createMattermostSecretDialogController({
+    accountId: account.accountId,
+    callbackUrl: params.interactionCallbackUrl,
+    client,
+    cfg: () => pinMattermostMonitorConfig(monitor).cfg,
+    isAuthorizedUser: (senderId) =>
+      isMattermostExecApprovalApprover({
+        cfg: pinMattermostMonitorConfig(monitor).cfg,
+        accountId: account.accountId,
+        senderId,
+      }),
+    log: (message) => runtime.error?.(message),
+  });
   const interactionOptions: Parameters<typeof createMattermostInteractionProcessor>[0] = {
     client,
     botUserId,
@@ -46,6 +61,8 @@ export function registerMattermostInteractions(params: {
     allowedSourceIps: params.allowedSourceIps,
     trustedProxies: startupCfg.gateway?.trustedProxies,
     allowRealIpFallback: startupCfg.gateway?.allowRealIpFallback === true,
+    handleImmediateInteraction: secretDialog.handleInteraction,
+    handleDialogSubmission: secretDialog.handleSubmission,
     handleInteraction: async (interaction) =>
       (await handleApprovalInteraction(interaction)) ??
       (await params.handleModelPickerInteraction(interaction)),

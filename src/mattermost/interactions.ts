@@ -39,6 +39,22 @@ export type MattermostInteractionPayload = {
   context?: Record<string, unknown>;
 };
 
+export type MattermostDialogSubmissionPayload = {
+  type: "dialog_submission";
+  callback_id: string;
+  state: string;
+  user_id: string;
+  channel_id: string;
+  team_id?: string;
+  submission: Record<string, unknown>;
+  cancelled?: boolean;
+};
+
+export type MattermostDialogSubmissionResponse = {
+  statusCode?: number;
+  body?: Record<string, unknown>;
+};
+
 export type MattermostInteractionResponse = {
   update?: {
     message: string;
@@ -76,6 +92,16 @@ export type MattermostInteractionProcessor = (
   interaction: MattermostValidatedInteraction,
 ) => Promise<void>;
 
+type MattermostInteractionCallback = (opts: {
+  payload: MattermostInteractionPayload;
+  userName: string;
+  actionId: string;
+  actionName: string;
+  originalMessage: string;
+  context: Record<string, unknown>;
+  post: MattermostPost;
+}) => Promise<MattermostInteractionResponse | null>;
+
 type MattermostInteractionHandlerOptions = {
   client: MattermostClient;
   botUserId: string;
@@ -88,15 +114,13 @@ type MattermostInteractionHandlerOptions = {
     userId: string;
     post: MattermostPost;
   }) => Promise<string>;
-  handleInteraction?: (opts: {
-    payload: MattermostInteractionPayload;
-    userName: string;
-    actionId: string;
-    actionName: string;
-    originalMessage: string;
-    context: Record<string, unknown>;
-    post: MattermostPost;
-  }) => Promise<MattermostInteractionResponse | null>;
+  handleInteraction?: MattermostInteractionCallback;
+  /** Handle a short-lived trigger before durable admission (for example, opening a dialog). */
+  handleImmediateInteraction?: MattermostInteractionCallback;
+  /** Secret-bearing dialog submissions are handled synchronously and are never queued. */
+  handleDialogSubmission?: (
+    payload: MattermostDialogSubmissionPayload,
+  ) => Promise<MattermostDialogSubmissionResponse>;
   authorizeButtonClick?: (opts: {
     payload: MattermostInteractionPayload;
     post: MattermostPost;
@@ -267,19 +291,42 @@ function canonicalizeInteractionContext(value: unknown): unknown {
   return value;
 }
 
-function generateInteractionToken(context: Record<string, unknown>, accountId?: string): string {
+export function generateInteractionToken(
+  context: Record<string, unknown>,
+  accountId?: string,
+): string {
   const secret = getInteractionSecret(accountId);
   const payload = JSON.stringify(canonicalizeInteractionContext(context));
   return createHmac("sha256", secret).update(payload).digest("hex");
 }
 
-function verifyInteractionToken(
+export function verifyInteractionToken(
   context: Record<string, unknown>,
   token: string,
   accountId?: string,
 ): boolean {
   const expected = generateInteractionToken(context, accountId);
   return safeEqualSecret(expected, token);
+}
+
+function isMattermostDialogSubmissionPayload(
+  value: unknown,
+): value is MattermostDialogSubmissionPayload {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const payload = value as Record<string, unknown>;
+  return (
+    payload.type === "dialog_submission" &&
+    typeof payload.callback_id === "string" &&
+    typeof payload.state === "string" &&
+    typeof payload.user_id === "string" &&
+    typeof payload.channel_id === "string" &&
+    Boolean(payload.submission) &&
+    typeof payload.submission === "object" &&
+    !Array.isArray(payload.submission) &&
+    (payload.cancelled === undefined || typeof payload.cancelled === "boolean")
+  );
 }
 
 // ── Button builder helpers ─────────────────────────────────────────────
@@ -603,9 +650,9 @@ export function createMattermostInteractionHandler(
   const { client, accountId, log } = params;
   const core = getMattermostRuntime();
 
-  function parseInteractionPayload(raw: string): MattermostInteractionPayload {
+  function parseInteractionPayload(raw: string): unknown {
     try {
-      return JSON.parse(raw) as MattermostInteractionPayload;
+      return JSON.parse(raw) as unknown;
     } catch {
       throw new Error("Mattermost interaction body was malformed JSON");
     }
@@ -638,10 +685,10 @@ export function createMattermostInteractionHandler(
       return;
     }
 
-    let payload: MattermostInteractionPayload;
+    let parsedPayload: unknown;
     try {
       const raw = await readInteractionBody(req);
-      payload = parseInteractionPayload(raw);
+      parsedPayload = parseInteractionPayload(raw);
     } catch (err) {
       log?.(`mattermost interaction: failed to parse body: ${String(err)}`);
       if (isRequestBodyLimitError(err, "PAYLOAD_TOO_LARGE")) {
@@ -669,6 +716,41 @@ export function createMattermostInteractionHandler(
       res.end(JSON.stringify({ error: "Invalid request body" }));
       return;
     }
+
+    if (
+      parsedPayload &&
+      typeof parsedPayload === "object" &&
+      !Array.isArray(parsedPayload) &&
+      (parsedPayload as Record<string, unknown>).type === "dialog_submission"
+    ) {
+      if (!isMattermostDialogSubmissionPayload(parsedPayload) || !params.handleDialogSubmission) {
+        res.statusCode = 400;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ error: "Invalid dialog submission" }));
+        return;
+      }
+      try {
+        const response = await params.handleDialogSubmission(parsedPayload);
+        res.statusCode = response.statusCode ?? 200;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify(response.body ?? {}));
+      } catch {
+        // Never stringify a secret-bearing exception or request payload into logs.
+        log?.("mattermost interaction: secret dialog submission failed");
+        res.statusCode = 500;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ error: "Credential submission failed" }));
+      }
+      return;
+    }
+
+    if (!parsedPayload || typeof parsedPayload !== "object" || Array.isArray(parsedPayload)) {
+      res.statusCode = 400;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ error: "Invalid interaction payload" }));
+      return;
+    }
+    const payload = parsedPayload as MattermostInteractionPayload;
 
     const context = payload.context;
     if (!context) {
@@ -806,6 +888,32 @@ export function createMattermostInteractionHandler(
         res.statusCode = 500;
         res.setHeader("Content-Type", "application/json");
         res.end(JSON.stringify({ error: "Interaction authorization failed" }));
+        return;
+      }
+    }
+
+    if (params.handleImmediateInteraction) {
+      try {
+        const response = await params.handleImmediateInteraction({
+          payload,
+          userName,
+          actionId,
+          actionName: clickedButtonName,
+          originalMessage,
+          context: contextWithoutToken,
+          post: originalPost,
+        });
+        if (response !== null) {
+          res.statusCode = 200;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify(response));
+          return;
+        }
+      } catch (err) {
+        log?.(`mattermost interaction: immediate handler failed: ${String(err)}`);
+        res.statusCode = 500;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ error: "Interaction handler failed" }));
         return;
       }
     }

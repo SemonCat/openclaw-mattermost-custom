@@ -316,7 +316,7 @@ describe("Mattermost durable task progress card", () => {
       expect.objectContaining({
         path: "/posts/first-result-post",
         body: expect.objectContaining({
-          message: expect.stringContaining("Task progress · Completed"),
+          message: expect.stringContaining("Task progress · Incomplete"),
         }),
       }),
     ]);
@@ -325,6 +325,7 @@ describe("Mattermost durable task progress card", () => {
   it.each([
     { status: "in_progress" as const, label: "In progress" },
     { status: "completed" as const, label: "Completed" },
+    { status: "incomplete" as const, label: "Incomplete" },
     { status: "failed" as const, label: "Failed" },
     { status: "cancelled" as const, label: "Cancelled" },
   ])("renders a compact $status card", ({ status, label }) => {
@@ -424,7 +425,14 @@ describe("Mattermost durable task progress card", () => {
         log: vi.fn(),
       });
       card.noteRunStart("run-1");
-      await card.updatePlan({ steps: [{ step: "Work", status: "in_progress" }] });
+      await card.updatePlan({
+        steps: [
+          {
+            step: "Work",
+            status: outcome === "completed" && !lifecycle ? "completed" : "in_progress",
+          },
+        ],
+      });
       if (lifecycle) {
         card.noteAgentEvent({ runId: "run-1", stream: "lifecycle", data: lifecycle });
       }
@@ -439,6 +447,30 @@ describe("Mattermost durable task progress card", () => {
     await expect(
       renderTerminal("failed", { phase: "error", aborted: true }),
     ).resolves.toContain("Task progress · Cancelled");
+  });
+
+  it("marks a successful run incomplete while checklist work remains", async () => {
+    const request = vi.fn<MattermostClient["request"]>(async () => ({ id: "card" }) as never);
+    const card = createMattermostTaskProgressCard({
+      client: createTestClient(request),
+      channelId: "channel-1",
+      log: vi.fn(),
+    });
+
+    card.noteRunStart("run-1");
+    await card.updatePlan({
+      steps: [
+        { step: "Inspect", status: "completed" },
+        { step: "Patch", status: "in_progress" },
+        { step: "Verify", status: "pending" },
+      ],
+    });
+    card.noteAgentEvent({ runId: "run-1", stream: "lifecycle", data: { phase: "end" } });
+    await card.finish({ outcome: "completed" });
+
+    expect(String(readBody(request.mock.calls.at(-1)?.[1]).message)).toContain(
+      "Task progress · Incomplete",
+    );
   });
 
   it("contains create/update failures with bounded retry and diagnostics", async () => {

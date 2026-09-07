@@ -128,7 +128,7 @@ describe("Mattermost durable post identity", () => {
   });
 
   it.each([
-    { status: "completed" as const, label: "Completed" },
+    { status: "completed" as const, label: "Incomplete" },
     { status: "failed" as const, label: "Failed" },
     { status: "cancelled" as const, label: "Cancelled" },
   ])("converts compact and legacy cards to truthful $status state", ({ status, label }) => {
@@ -146,5 +146,14 @@ describe("Mattermost durable post identity", () => {
     expect(legacy).toContain(`#### Task progress · ${label}`);
     expect(legacy).not.toContain("Status:");
     expect(legacy).not.toContain("Plan updated");
+  });
+
+  it("recovers a successful task as completed when every checklist item is checked", () => {
+    const rendered = renderMattermostRecoveredTaskTerminal(
+      "#### Task progress · In progress\nDeploy\n\n- [x] Inspect\n- [x] Test",
+      "completed",
+    );
+
+    expect(rendered).toContain("#### Task progress · Completed");
   });
 });

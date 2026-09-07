@@ -25,6 +25,7 @@ import {
   resolveMattermostReplyDeliveryBarrierTimeoutMs,
   type CreateDmChannelRetryOptions,
 } from "./client.js";
+import { buildMattermostSecretPromptButton } from "./secret-dialog.js";
 import type { MattermostSendResult } from "./send.js";
 
 type MarkdownTableMode = Parameters<PluginRuntime["channel"]["text"]["convertMarkdownTables"]>[1];
@@ -40,6 +41,7 @@ type SendMattermostMessage = (
     requireMediaUpload?: boolean;
     replyToId?: string;
     buttons?: Array<unknown>;
+    questionId?: string;
     onDmChannelResolution?: (resolution: PromiseLike<unknown>) => void;
   },
 ) => Promise<MattermostSendResult>;
@@ -136,6 +138,10 @@ export async function deliverMattermostReplyPayload(params: {
     };
   }
   const presentation = resolveMattermostPresentation(params.payload);
+  const secretPrompt = buildMattermostSecretPromptButton(params.payload);
+  const buttons = secretPrompt
+    ? [...presentation.buttons, [secretPrompt.button]]
+    : presentation.buttons;
   const reply = resolveSendableOutboundReplyParts(params.payload, {
     text: params.core.channel.text.convertMarkdownTables(presentation.text, params.tableMode),
   });
@@ -154,9 +160,10 @@ export async function deliverMattermostReplyPayload(params: {
       accountId: params.accountId,
       ...(mediaUrl ? { mediaUrl, mediaLocalRoots } : {}),
       ...(requiresMattermostMediaUpload(mediaUrl) ? { requireMediaUpload: true } : {}),
-      ...(results.length === 0 && reply.mediaUrls.length < 2 && presentation.buttons.length
-        ? { buttons: presentation.buttons }
+      ...(results.length === 0 && reply.mediaUrls.length < 2 && buttons.length
+        ? { buttons }
         : {}),
+      ...(results.length === 0 && secretPrompt ? { questionId: secretPrompt.questionId } : {}),
       replyToId: params.replyToId,
       ...(params.onDmChannelResolution
         ? { onDmChannelResolution: params.onDmChannelResolution }

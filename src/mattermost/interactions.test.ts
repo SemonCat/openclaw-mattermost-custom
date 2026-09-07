@@ -811,6 +811,38 @@ describe("createMattermostInteractionHandler", () => {
     );
   });
 
+  it("handles secret-bearing dialog submissions synchronously without durable admission", async () => {
+    const handleDialogSubmission = vi.fn(async () => ({ statusCode: 200, body: {} }));
+    const admitInteraction = vi.fn();
+    const clientRequest = vi.fn(async () => {
+      throw new Error("dialog submission must not fetch a post");
+    });
+    const handler = createMattermostInteractionHandler({
+      client: createMattermostClientMock(clientRequest),
+      botUserId: "bot",
+      accountId: "acct",
+      handleDialogSubmission,
+      admitInteraction,
+    });
+    const body = {
+      type: "dialog_submission",
+      callback_id: "openclaw_secret_input_v1",
+      state: "signed-state",
+      user_id: "user-1",
+      channel_id: "chan-1",
+      submission: { secret_value: "do-not-persist" },
+      cancelled: false,
+    };
+
+    const res = await runHandler(handler, { body });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toBe("{}");
+    expect(handleDialogSubmission).toHaveBeenCalledWith(body);
+    expect(admitInteraction).not.toHaveBeenCalled();
+    expect(clientRequest).not.toHaveBeenCalled();
+  });
+
   it("returns the provider-specific 413 response for an oversized callback", async () => {
     const handleInteraction = vi.fn();
     const handler = createMattermostInteractionHandler({
@@ -957,6 +989,30 @@ describe("createMattermostInteractionHandler", () => {
     expect(handleInteraction).toHaveBeenCalledWith(
       expect.objectContaining({ actionId: "approve", actionName: "Approve" }),
     );
+  });
+
+  it("runs short-lived dialog triggers before durable interaction admission", async () => {
+    const { context, token } = createActionContext("ocsecretinput");
+    const handleImmediateInteraction = vi.fn(async () => ({}));
+    const admitInteraction = vi.fn();
+    const handler = createMattermostInteractionHandler({
+      client: createMattermostClientMock(async () =>
+        createActionPost({ actionId: "ocsecretinput", actionName: "Enter credential" }),
+      ),
+      botUserId: "bot",
+      accountId: "acct",
+      handleImmediateInteraction,
+      admitInteraction,
+    });
+
+    const res = await runHandler(handler, {
+      body: createInteractionBody({ context, token }),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toBe("{}");
+    expect(handleImmediateInteraction).toHaveBeenCalledOnce();
+    expect(admitInteraction).not.toHaveBeenCalled();
   });
 
   it("accepts actions when the button name matches the action id", async () => {

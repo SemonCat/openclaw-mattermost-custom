@@ -27,7 +27,12 @@ export type MattermostTaskProgressAgentEvent = {
   data: Record<string, unknown>;
 };
 
-type MattermostTaskProgressStatus = "in_progress" | "completed" | "failed" | "cancelled";
+type MattermostTaskProgressStatus =
+  | "in_progress"
+  | "completed"
+  | "incomplete"
+  | "failed"
+  | "cancelled";
 
 type MattermostTaskProgressSnapshot = {
   revision: number;
@@ -101,6 +106,8 @@ function renderStatus(status: MattermostTaskProgressStatus): string {
   switch (status) {
     case "completed":
       return "Completed";
+    case "incomplete":
+      return "Incomplete";
     case "failed":
       return "Failed";
     case "cancelled":
@@ -351,13 +358,17 @@ export function createMattermostTaskProgressCard(params: {
         await writeTail;
         return;
       }
+      const nominallyCompleted =
+        result.outcome === "completed" || lifecycleTerminal === "completed";
       const status: Exclude<MattermostTaskProgressStatus, "in_progress"> | undefined =
         lifecycleTerminal === "cancelled"
           ? "cancelled"
           : result.deliveryFailed || result.outcome === "failed" || lifecycleTerminal === "failed"
             ? "failed"
-            : result.outcome === "completed" || lifecycleTerminal === "completed"
-              ? "completed"
+            : nominallyCompleted
+              ? latestSnapshot.steps.some((step) => step.status !== "completed")
+                ? "incomplete"
+                : "completed"
               : undefined;
       if (status) {
         latestSnapshot = {

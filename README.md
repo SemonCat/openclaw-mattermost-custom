@@ -86,6 +86,7 @@ Compared with the official plugin, this build preserves:
   licensed Mattermost move endpoint.
 - Durable plan-backed task progress cards that remain after the final answer.
 - Native exec, plugin, and system-agent approval cards with canonical Gateway resolution.
+- Native secret-entry dialogs that submit password fields directly to OpenClaw's protected store.
 - Durable interactive callback admission and replay across Gateway restarts.
 - The Mattermost slash-trigger length cap fix.
 - Mention-prefixed text commands such as `@bot /new`, without debounce or prose misrouting.
@@ -142,6 +143,13 @@ Approval decisions use typed, HMAC-signed callback context and the canonical
 Gateway approval service, so first-answer-wins state remains authoritative.
 Mutable usernames are deliberately ignored for privileged approval decisions.
 Pending cards are edited in place when resolved, expired, or cancelled.
+
+Secret requests originating in Mattermost include an **Enter credential** button. It opens a
+Mattermost password dialog for the requested secret. The submitted value is handled synchronously
+by the authenticated plugin callback route and sent through OpenClaw's store-bound secret-question
+resolver; it is never posted to the conversation or written to the durable interaction queue. Only
+stable Mattermost users accepted by the approval/owner allowlist may open or submit the dialog. The
+Web UI link remains available for reviewing host restrictions and as a fallback.
 
 Validated button callbacks are stored before Mattermost receives HTTP 200.
 They use a separate `interactions.sqlite` queue under the plugin state directory,
