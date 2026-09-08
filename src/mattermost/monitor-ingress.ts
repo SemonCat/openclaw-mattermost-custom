@@ -19,15 +19,90 @@ import {
 
 const MATTERMOST_INGRESS_PAYLOAD_VERSION = 1;
 const MATTERMOST_INGRESS_POLL_INTERVAL_MS = 1_000;
+const MATTERMOST_PENDING_DISPATCH_HEARTBEAT_INTERVAL_MS = 60_000;
 
 export type MattermostIngressLifecycle = {
   abortSignal: AbortSignal;
   onAdopted: () => void | Promise<void>;
-  onDeferred: () => void;
+  onDeferred: () => boolean | void;
+  onDeferredHeartbeat?: () => void;
   onAdoptionFinalizing: () => void;
   onFailed?: (error: unknown) => void | Promise<void>;
+  onCancelled?: () => void | Promise<void>;
   onAbandoned: () => void | Promise<void>;
 };
+
+/**
+ * Keep a deferred ingress claim leased while the synchronous core dispatch is
+ * still negotiating ownership with an active run. Core owns heartbeats after
+ * it returns a queued follow-up; this bridge only covers the pending call.
+ */
+export function keepMattermostIngressAliveWhileDispatchPending(
+  source: MattermostIngressLifecycle,
+): { lifecycle: MattermostIngressLifecycle; stop: () => void } {
+  let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+  const stop = () => {
+    if (!heartbeatTimer) {
+      return;
+    }
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = undefined;
+  };
+  const start = () => {
+    if (heartbeatTimer || !source.onDeferredHeartbeat) {
+      return;
+    }
+    heartbeatTimer = setInterval(() => {
+      source.onDeferredHeartbeat?.();
+    }, MATTERMOST_PENDING_DISPATCH_HEARTBEAT_INTERVAL_MS);
+    heartbeatTimer.unref?.();
+  };
+
+  return {
+    lifecycle: {
+      abortSignal: source.abortSignal,
+      onAdopted: async () => {
+        stop();
+        await source.onAdopted();
+      },
+      onDeferred: () => {
+        const accepted = source.onDeferred();
+        if (accepted !== false) {
+          start();
+        }
+        return accepted;
+      },
+      ...(source.onDeferredHeartbeat
+        ? { onDeferredHeartbeat: () => source.onDeferredHeartbeat?.() }
+        : {}),
+      onAdoptionFinalizing: () => {
+        stop();
+        source.onAdoptionFinalizing();
+      },
+      ...(source.onFailed
+        ? {
+            onFailed: async (error: unknown) => {
+              stop();
+              await source.onFailed?.(error);
+            },
+          }
+        : {}),
+      ...(source.onCancelled
+        ? {
+            onCancelled: async () => {
+              stop();
+              await source.onCancelled?.();
+            },
+          }
+        : {}),
+      onAbandoned: async () => {
+        stop();
+        await source.onAbandoned();
+      },
+    },
+    stop,
+  };
+}
 
 export type MattermostIngressLaneFacts = {
   channelId: string;

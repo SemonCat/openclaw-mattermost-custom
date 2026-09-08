@@ -22,6 +22,7 @@ type TestInboundLifecycle = {
   abortSignal?: AbortSignal;
   onAdopted?: () => void | Promise<void>;
   onDeferred?: () => void;
+  onDeferredHeartbeat?: () => void;
   onAdoptionFinalizing?: () => void;
   onFailed?: (error: unknown) => void | Promise<void>;
   onAbandoned?: () => void | Promise<void>;
@@ -31,6 +32,7 @@ type TestInboundDispatch = (params: {
   abortSignal: AbortSignal;
   onAdopted: () => Promise<void>;
   onDeferred: () => void;
+  onDeferredHeartbeat?: () => void;
   onAdoptionFinalizing: () => void;
   onFailed?: (error: unknown) => Promise<void>;
   onAbandoned: () => Promise<void>;
@@ -47,6 +49,7 @@ const createTestInboundDebounceFlush = (params: {
     abortSignal: source?.abortSignal ?? new AbortController().signal,
     onAdopted: async () => await source?.onAdopted?.(),
     onDeferred: () => source?.onDeferred?.(),
+    onDeferredHeartbeat: () => source?.onDeferredHeartbeat?.(),
     onAdoptionFinalizing: () => source?.onAdoptionFinalizing?.(),
     onFailed: source?.onFailed ? async (error) => await source.onFailed?.(error) : undefined,
     onAbandoned: async () => await source?.onAbandoned?.(),
@@ -156,6 +159,7 @@ const mockState = vi.hoisted(() => ({
   fetchMattermostPost: vi.fn(),
   getGlobalHookRunner: vi.fn(),
   hasMattermostThreadParticipation: vi.fn(),
+  ingressOnDeferredHeartbeat: vi.fn(),
   sessionTranscriptListeners: [] as Array<(update: {
     target: { agentId: string; sessionId: string; sessionKey: string };
     message?: unknown;
@@ -285,6 +289,7 @@ vi.mock("./monitor-ingress.js", async (importOriginal) => {
           abortSignal: new AbortController().signal,
           onAdopted: async () => {},
           onDeferred: () => {},
+          onDeferredHeartbeat: mockState.ingressOnDeferredHeartbeat,
           onAdoptionFinalizing: () => {},
           onAbandoned: async () => {},
         });
@@ -2133,6 +2138,85 @@ describe("mattermost inbound user posts", () => {
       "Task progress · Incomplete",
     );
     expect(draftStream.stop).toHaveBeenCalledOnce();
+  });
+
+  it("heartbeats deferred ingress while core steer admission remains pending", async () => {
+    const socket = new FakeWebSocket();
+    const abortController = new AbortController();
+    mockState.abortController = abortController;
+    let resolveRunStarted = () => {};
+    const runStarted = new Promise<void>((resolve) => {
+      resolveRunStarted = resolve;
+    });
+    let resolveRun = () => {};
+    const runGate = new Promise<void>((resolve) => {
+      resolveRun = resolve;
+    });
+    const runtimeCore = createRuntimeCore(testConfig);
+    runtimeCore.channel.inbound.run.mockImplementation(async (params) => {
+      const input = params.adapter.ingest(params.raw);
+      const turn = params.adapter.resolveTurn(
+        input,
+        { kind: "message", canStartAgentTurn: true },
+        {},
+      );
+      const lifecycle = turn.replyOptions?.turnAdoptionLifecycle as
+        | {
+            onAdopted?: () => void | Promise<void>;
+            onDeferred?: () => void;
+          }
+        | undefined;
+      lifecycle?.onDeferred?.();
+      resolveRunStarted();
+      await runGate;
+      await lifecycle?.onAdopted?.();
+      return {
+        admission: { kind: "dispatch" as const },
+        dispatched: true,
+        ctxPayload: turn.ctxPayload,
+        routeSessionKey: turn.route.sessionKey,
+        dispatchResult: {
+          queuedFinal: false,
+          counts: {},
+          deferredToActiveRun: "steer" as const,
+        },
+      };
+    });
+    mockState.runtimeCore = runtimeCore;
+
+    const monitor = monitorMattermostProvider({
+      config: testConfig,
+      runtime: testRuntime(),
+      abortSignal: abortController.signal,
+      webSocketFactory: () => socket,
+    });
+    await vi.waitFor(() => expect(socket.openListenerCount).toBeGreaterThan(0));
+    socket.emitOpen();
+    vi.useFakeTimers();
+    try {
+      const inbound = emitMattermostChannelPost(socket, {
+        id: "post-pending-steer-admission",
+        message: "continue while the active run is busy",
+      });
+      await runStarted;
+
+      await vi.advanceTimersByTimeAsync(60_001);
+      expect(mockState.ingressOnDeferredHeartbeat).toHaveBeenCalled();
+
+      resolveRun();
+      await inbound;
+      mockState.ingressOnDeferredHeartbeat.mockClear();
+      await vi.advanceTimersByTimeAsync(2 * 60_000);
+      expect(mockState.ingressOnDeferredHeartbeat).not.toHaveBeenCalled();
+      abortController.abort();
+      socket.emitClose(1000);
+      await monitor;
+    } finally {
+      resolveRun();
+      abortController.abort();
+      socket.emitClose(1000);
+      vi.useRealTimers();
+    }
   });
 
   it("does not create a task card for a final-only turn", async () => {

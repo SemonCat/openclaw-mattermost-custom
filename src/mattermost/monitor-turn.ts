@@ -38,7 +38,10 @@ import {
   type MattermostDraftPreviewState,
 } from "./monitor-draft-delivery.js";
 import type { MattermostEventPlan } from "./monitor-event-plan.js";
-import type { MattermostIngressLifecycle } from "./monitor-ingress.js";
+import {
+  keepMattermostIngressAliveWhileDispatchPending,
+  type MattermostIngressLifecycle,
+} from "./monitor-ingress.js";
 import {
   createMattermostMessageReactionRuntime,
   type MattermostReactionLifecycleStore,
@@ -420,8 +423,11 @@ export async function dispatchMattermostInboundTurn(
   const queuedFollowupLifecycleSettled = new Promise<void>((resolve) => {
     resolveQueuedFollowupLifecycle = resolve;
   });
-  const ingressReplyOptions = turnAdoptionLifecycle
-    ? bindIngressLifecycleToReplyOptions(turnAdoptionLifecycle)
+  const pendingDispatchIngress = turnAdoptionLifecycle
+    ? keepMattermostIngressAliveWhileDispatchPending(turnAdoptionLifecycle)
+    : undefined;
+  const ingressReplyOptions = pendingDispatchIngress
+    ? bindIngressLifecycleToReplyOptions(pendingDispatchIngress.lifecycle)
     : undefined;
   const deferredTurnAdoptionLifecycle = ingressReplyOptions?.turnAdoptionLifecycle
     ? {
@@ -873,6 +879,10 @@ export async function dispatchMattermostInboundTurn(
     dispatchError = true;
     throw err;
   } finally {
+    // Once core returns, an admitted turn has completed the claim and a queued
+    // follow-up owns its own retry heartbeat. This timer only bridges the
+    // in-call steer/admission wait where core cannot heartbeat the provider.
+    pendingDispatchIngress?.stop();
     const dispatchResult = turnResult?.dispatched
       ? (turnResult.dispatchResult as MattermostReplyDispatchResult)
       : undefined;
