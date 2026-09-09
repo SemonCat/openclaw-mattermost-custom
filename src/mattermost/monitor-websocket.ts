@@ -1,42 +1,22 @@
 // Mattermost plugin module implements monitor websocket behavior.
 import { randomUUID } from "node:crypto";
 import { safeParseJsonWithSchema, safeParseWithSchema } from "openclaw/plugin-sdk/extension-shared";
+import { channelReadyPatch } from "openclaw/plugin-sdk/gateway-runtime";
 import {
   captureWsEvent,
   createDebugProxyWebSocketAgent,
   resolveDebugProxySettings,
 } from "openclaw/plugin-sdk/proxy-capture";
-import WebSocket, { type ClientOptions } from "ws";
+import type { ClientOptions, RawData } from "ws";
 import { z } from "zod";
-import { channelReadyPatch } from "./channel-ready-patch.js";
 import { MattermostPostSchema, type MattermostPost } from "./client.js";
 import { rawDataToString } from "./monitor-helpers.js";
 import type { ChannelAccountSnapshot, RuntimeEnv } from "./runtime-api.js";
-
-export type MattermostEventPayload = {
-  event?: string;
-  status?: string;
-  seq_reply?: number;
-  data?: {
-    post?: unknown;
-    reaction?: string | Record<string, unknown>;
-    channel_id?: string;
-    channel_name?: string;
-    channel_display_name?: string;
-    channel_type?: string;
-    sender_name?: string;
-    team_id?: string;
-  };
-  broadcast?: {
-    channel_id?: string;
-    team_id?: string;
-    user_id?: string;
-  };
-};
+import { WebSocket } from "./ws-runtime.js";
 
 type MattermostWebSocketLike = {
   on(event: "open", listener: () => void): void;
-  on(event: "message", listener: (data: WebSocket.RawData) => void | Promise<void>): void;
+  on(event: "message", listener: (data: RawData) => void | Promise<void>): void;
   on(event: "pong", listener: (data: Buffer) => void): void;
   on(event: "close", listener: (code: number, reason: Buffer) => void): void;
   on(event: "error", listener: (err: unknown) => void): void;
@@ -84,7 +64,9 @@ const MattermostEventPayloadSchema = z.object({
       user_id: z.string().optional(),
     })
     .optional(),
-}) as z.ZodType<MattermostEventPayload>;
+});
+
+export type MattermostEventPayload = z.infer<typeof MattermostEventPayloadSchema>;
 
 export function parseMattermostEventPayload(raw: string): MattermostEventPayload | null {
   return safeParseJsonWithSchema(MattermostEventPayloadSchema, raw);

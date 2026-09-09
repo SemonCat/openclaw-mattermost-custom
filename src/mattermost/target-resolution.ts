@@ -12,6 +12,7 @@ import {
   fetchMattermostUser,
   normalizeMattermostBaseUrl,
   parseMattermostApiStatus,
+  type MattermostClient,
 } from "./client.js";
 import { resolveMattermostTrustedChatKind } from "./monitor-auth.js";
 import type { OpenClawConfig } from "./runtime-api.js";
@@ -139,43 +140,60 @@ function isExplicitMattermostTarget(raw: string): boolean {
   );
 }
 
-export async function resolveMattermostOpaqueTarget(params: {
-  input: string;
-  cfg?: OpenClawConfig;
-  accountId?: string | null;
-  token?: string;
-  baseUrl?: string;
-}): Promise<MattermostOpaqueTargetResolution | null> {
+export async function resolveMattermostOpaqueTarget(
+  params: { input: string } & (
+    | { client: MattermostClient }
+    | {
+        cfg?: OpenClawConfig;
+        accountId?: string | null;
+        token?: string;
+        baseUrl?: string;
+      }
+  ),
+): Promise<MattermostOpaqueTargetResolution | null> {
   const input = params.input.trim();
   if (!input || isExplicitMattermostTarget(input) || !isMattermostId(input)) {
     return null;
   }
 
-  const account =
-    params.cfg && (!params.token || !params.baseUrl)
-      ? resolveMattermostAccount({ cfg: params.cfg, accountId: params.accountId })
-      : null;
-  if (account && !account.enabled) {
-    throw new Error(`Mattermost account "${account.accountId}" is disabled`);
-  }
-  const token = normalizeOptionalString(params.token) ?? normalizeOptionalString(account?.botToken);
-  const baseUrl = normalizeMattermostBaseUrl(params.baseUrl ?? account?.baseUrl);
-  if (!token || !baseUrl) {
-    return null;
+  let client: MattermostClient;
+  let key: string;
+  if ("client" in params) {
+    client = params.client;
+    key = cacheKey(client.baseUrl, client.token, input);
+  } else {
+    const account =
+      params.cfg && (!params.token || !params.baseUrl)
+        ? resolveMattermostAccount({ cfg: params.cfg, accountId: params.accountId })
+        : null;
+    if (account && !account.enabled) {
+      throw new Error(`Mattermost account "${account.accountId}" is disabled`);
+    }
+    const token =
+      normalizeOptionalString(params.token) ?? normalizeOptionalString(account?.botToken);
+    const baseUrl = normalizeMattermostBaseUrl(params.baseUrl ?? account?.baseUrl);
+    if (!token || !baseUrl) {
+      return null;
+    }
+    key = cacheKey(baseUrl, token, input);
+    const cachedKind = getCachedMattermostOpaqueTargetKind(key);
+    if (cachedKind) {
+      const to = cachedKind === "user" ? `user:${input}` : `channel:${input}`;
+      return { kind: cachedKind, id: input, to };
+    }
+    client = createMattermostClient({
+      baseUrl,
+      botToken: token,
+      allowPrivateNetwork: isPrivateNetworkOptInEnabled(account?.config),
+    });
   }
 
-  const key = cacheKey(baseUrl, token, input);
   const cachedKind = getCachedMattermostOpaqueTargetKind(key);
   if (cachedKind) {
     const to = cachedKind === "user" ? `user:${input}` : `channel:${input}`;
     return { kind: cachedKind, id: input, to };
   }
 
-  const client = createMattermostClient({
-    baseUrl,
-    botToken: token,
-    allowPrivateNetwork: isPrivateNetworkOptInEnabled(account?.config),
-  });
   try {
     await fetchMattermostUser(client, input);
     cacheMattermostOpaqueTarget(key, "user");

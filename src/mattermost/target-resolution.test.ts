@@ -1,10 +1,18 @@
 // Mattermost tests cover target resolution plugin behavior.
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type { MattermostClient } from "./client.js";
 
 const resolveMattermostAccount = vi.fn();
 const createMattermostClient = vi.fn();
 const fetchMattermostUser = vi.fn();
 const fetchMattermostChannel = vi.fn();
+const fixtureClient = (token = "token", baseUrl = "https://mm.example.com"): MattermostClient => ({
+  token,
+  baseUrl,
+  apiBaseUrl: `${baseUrl}/api/v4`,
+  request: vi.fn(),
+  fetchImpl: vi.fn(),
+});
 const normalizeMattermostBaseUrl = vi.fn((value: string | undefined) => value?.trim());
 
 vi.mock("./accounts.js", () => ({
@@ -70,6 +78,20 @@ describe("mattermost target resolution", () => {
     await expect(resolveMattermostOpaqueTarget(params)).resolves.toMatchObject({ kind: "channel" });
     await expect(resolveMattermostOpaqueTarget(params)).resolves.toMatchObject({ kind: "channel" });
     expect(fetchMattermostUser).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses a supplied transport client without rebuilding its account policy", async () => {
+    const input = "same1234abcd1234abcd1234ab";
+    const client = fixtureClient("same-client-token");
+    fetchMattermostUser.mockResolvedValue({ id: input });
+
+    await expect(resolveMattermostOpaqueTarget({ input, client })).resolves.toMatchObject({
+      kind: "user",
+      id: input,
+    });
+
+    expect(createMattermostClient).not.toHaveBeenCalled();
+    expect(fetchMattermostUser).toHaveBeenCalledWith(client, input);
   });
 
   it("resolves opaque ids as users and caches the result", async () => {

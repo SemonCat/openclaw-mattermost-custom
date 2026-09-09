@@ -20,6 +20,7 @@ import { normalizeMattermostBaseUrl } from "./setup.client.runtime.js";
 import { hasConfiguredSecretInput } from "./setup.secret-input.runtime.js";
 
 const channel = "mattermost" as const;
+const accountCredentialKeys = ["botToken", "baseUrl"];
 
 type MattermostSetupInput = ChannelSetupInput & {
   botToken?: string;
@@ -64,6 +65,8 @@ export function applyMattermostSetupConfigPatch(params: {
 }
 
 export const mattermostSetupAdapter: ChannelSetupAdapter = {
+  singleAccountKeysToMove: accountCredentialKeys,
+  namedAccountPromotionKeys: accountCredentialKeys,
   resolveAccountId: ({ accountId }) => normalizeAccountId(accountId),
   applyAccountName: ({ cfg, accountId, name }) =>
     applyAccountNameToChannelSection({

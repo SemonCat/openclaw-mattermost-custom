@@ -1001,6 +1001,29 @@ describe("sendMessageMattermost user-first resolution", () => {
     expect(res.receipt.platformMessageIds).toEqual(["post-id"]);
   });
 
+  it("keeps opaque lookup, DM creation, and delivery on one transport client", async () => {
+    const userId = "samecl3333333333samecl3333";
+    const client = {
+      baseUrl: "https://mattermost.example.com",
+      token: "token-same-client",
+    };
+    mockState.resolveMattermostAccount.mockReturnValue(makeAccount(client.token));
+    mockState.createMattermostClient.mockReturnValue(client);
+    mockState.fetchMattermostUser.mockResolvedValueOnce({ id: userId });
+
+    await sendMessageMattermost(userId, "hello", { cfg: TEST_CFG });
+
+    expect(mockState.createMattermostClient).toHaveBeenCalledOnce();
+    expect(mockState.fetchMattermostUser).toHaveBeenCalledWith(client, userId);
+    expect(mockState.fetchMattermostMe).toHaveBeenCalledWith(client);
+    expect(mockState.createMattermostDirectChannelWithRetry).toHaveBeenCalledWith(
+      client,
+      ["bot-id", userId],
+      expect.any(Object),
+    );
+    expect(mockState.createMattermostPost).toHaveBeenCalledWith(client, expect.any(Object));
+  });
+
   it("falls back to channel id when user lookup returns 404", async () => {
     // Unique token + id for this test
     const channelId = "bbbbbb2222222222bbbbbb2222"; // 26 chars
