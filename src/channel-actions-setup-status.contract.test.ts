@@ -5,7 +5,7 @@ import {
   installChannelStatusContractSuite,
 } from "openclaw/plugin-sdk/channel-test-helpers";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
-import { describe, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import { mattermostPlugin, mattermostSetupPlugin } from "../channel-plugin-api.js";
 
 describe("mattermost actions contract", () => {
@@ -105,6 +105,37 @@ describe("mattermost setup contract", () => {
         expectedValidation: "Mattermost requires --bot-token and --http-url (or --use-env).",
       },
     ],
+  });
+
+  it("inspects unresolved SecretRefs without requiring runtime resolution", () => {
+    const inspectAccount = mattermostSetupPlugin.config?.inspectAccount;
+    expect(inspectAccount).toBeTypeOf("function");
+    const account = inspectAccount?.(
+      {
+        channels: {
+          mattermost: {
+            accounts: {
+              work: {
+                botToken: {
+                  source: "env",
+                  provider: "default",
+                  id: "OPENCLAW_TEST_MISSING_MATTERMOST_SETUP_TOKEN",
+                },
+                baseUrl: "https://mm.example.com",
+              },
+            },
+          },
+        },
+      } as OpenClawConfig,
+      "work",
+    );
+
+    expect(account).toMatchObject({
+      accountId: "work",
+      configured: true,
+      botToken: undefined,
+      botTokenStatus: "configured_unavailable",
+    });
   });
 });
 

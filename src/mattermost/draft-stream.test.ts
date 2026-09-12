@@ -69,6 +69,14 @@ function parseRequestJson(init: RequestInit | undefined): Record<string, unknown
   return parsed as Record<string, unknown>;
 }
 
+function createDeferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
 describe("createMattermostDraftStream", () => {
   it("adopts a recovered post identity and edits it instead of creating a duplicate", async () => {
     const { calls, stream } = createDraftStreamFixture({
@@ -173,6 +181,54 @@ describe("createMattermostDraftStream", () => {
     });
     expect(stream.postId()).toBe("post-2");
   });
+
+  it.each(["different", "identical"] as const)(
+    "keeps a %s replacement that arrives while preview retraction is pending",
+    async (replacementKind) => {
+      const deleteStarted = createDeferred();
+      const releaseDelete = createDeferred();
+      const posts = new Map<string, string>();
+      let nextId = 1;
+      const request: MattermostClient["request"] = async <T>(
+        path: string,
+        init?: RequestInit,
+      ): Promise<T> => {
+        if (path === "/posts" && init?.method === "POST") {
+          const id = `post-${nextId++}`;
+          const message = String(parseRequestJson(init).message);
+          posts.set(id, message);
+          return { id, message } as T;
+        }
+        const id = path.slice("/posts/".length);
+        if (init?.method === "DELETE") {
+          deleteStarted.resolve();
+          await releaseDelete.promise;
+          posts.delete(id);
+          return undefined as T;
+        }
+        if (init?.method === "PUT") {
+          const message = String(parseRequestJson(init).message);
+          posts.set(id, message);
+          return { id, message } as T;
+        }
+        throw new Error(`Unexpected Mattermost request: ${init?.method} ${path}`);
+      };
+      const { stream } = createDraftStreamFixture({ request });
+
+      stream.update("Inspect");
+      await stream.flush();
+      const retirement = stream.deleteCurrentMessage();
+      await deleteStarted.promise;
+      const replacement = replacementKind === "identical" ? "Inspect" : "Verify";
+      stream.update(replacement);
+      const replacementPublication = stream.flush();
+      releaseDelete.resolve();
+      await Promise.all([retirement, replacementPublication]);
+
+      expect([...posts.entries()]).toEqual([["post-2", replacement]]);
+      expect(stream.postId()).toBe("post-2");
+    },
+  );
 
   it("discardPending keeps the preview post but ignores later updates", async () => {
     const { calls, stream } = createDraftStreamFixture({ rootId: "root-1" });

@@ -68,6 +68,14 @@ function normalizeExplanation(value?: string): string | undefined {
   return normalized.length > 1_500 ? `${normalized.slice(0, 1_497)}…` : normalized;
 }
 
+function normalizePlanExplanation(value?: string, source?: string): string | undefined {
+  const normalized = normalizeExplanation(value);
+  if (source === "openclaw" && /^progress updated[.!]?$/i.test(normalized ?? "")) {
+    return undefined;
+  }
+  return normalized;
+}
+
 function renderNativeProgressMarkdownForMattermost(value: unknown): string | undefined {
   if (typeof value !== "string") {
     return undefined;
@@ -331,7 +339,9 @@ export function createMattermostTaskProgressCard(params: {
       const nativeProgressCard =
         plan.source === "openclaw" ? pendingNativeProgressCards.shift() : undefined;
       const title = normalizeTitle(plan.title, plan.source);
-      const explanation = normalizeExplanation(plan.explanation ?? nativeProgressCard?.markdown);
+      const explanation =
+        normalizePlanExplanation(plan.explanation, plan.source) ??
+        normalizeExplanation(nativeProgressCard?.markdown);
       const steps = normalizeSteps(plan.steps);
       if (!title && !explanation && steps.length === 0) {
         return false;

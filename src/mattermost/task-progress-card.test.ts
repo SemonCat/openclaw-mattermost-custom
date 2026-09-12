@@ -391,6 +391,69 @@ describe("Mattermost durable task progress card", () => {
     expect(card.postId()).toBeUndefined();
   });
 
+  it("uses captured native markdown when OpenClaw emits a generic progress explanation", async () => {
+    const request = vi.fn<MattermostClient["request"]>(async () => ({ id: "card" }) as never);
+    const card = createMattermostTaskProgressCard({
+      client: createTestClient(request),
+      channelId: "channel-1",
+      log: vi.fn(),
+    });
+
+    card.noteToolStart({
+      toolCallId: "progress-1",
+      name: "progress_card",
+      phase: "start",
+      args: {
+        markdown:
+          '<progress aria-label="Deploy · 1/2" value="1" max="2"></progress>\n\n**Inspecting the live runtime**',
+      },
+    });
+    await card.updatePlan({
+      title: "Plan updated",
+      explanation: "Progress updated",
+      source: "openclaw",
+      steps: [],
+    });
+
+    const message = String(readBody(request.mock.calls[0]?.[1]).message);
+    expect(message).toContain("**Deploy · 1/2**");
+    expect(message).toContain("**Inspecting the live runtime**");
+    expect(message).not.toContain("Progress updated");
+  });
+
+  it("does not replace native progress content with a generic OpenClaw update", async () => {
+    const request = vi.fn<MattermostClient["request"]>(async () => ({ id: "card" }) as never);
+    const card = createMattermostTaskProgressCard({
+      client: createTestClient(request),
+      channelId: "channel-1",
+      log: vi.fn(),
+    });
+
+    card.noteToolStart({
+      toolCallId: "progress-1",
+      name: "progress_card",
+      phase: "start",
+      args: { markdown: "**Still running the focused tests**" },
+    });
+    await card.updatePlan({
+      title: "Plan updated",
+      explanation: "Progress updated",
+      source: "openclaw",
+      steps: [],
+    });
+    await card.updatePlan({
+      title: "Plan updated",
+      explanation: "Progress updated",
+      source: "openclaw",
+      steps: [],
+    });
+
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(String(readBody(request.mock.calls[0]?.[1]).message)).toContain(
+      "**Still running the focused tests**",
+    );
+  });
+
   it.each([
     { channelId: "channel-root", rootId: undefined },
     { channelId: "channel-thread", rootId: "root-post" },
