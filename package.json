@@ -27,7 +27,7 @@
     "openclaw": "2026.9.5",
     "tsdown": "0.22.1",
     "typescript": "6.0.3",
-    "vitest": "4.1.10"
+    "vitest": "4.1.11"
   },
   "peerDependencies": {
     "openclaw": ">=2026.9.5"
