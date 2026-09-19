@@ -421,6 +421,49 @@ describe("Mattermost durable task progress card", () => {
     expect(message).not.toContain("Progress updated");
   });
 
+  it("preserves native markdown when OpenClaw 9.5 also emits a flattened explanation", async () => {
+    const request = vi.fn<MattermostClient["request"]>(async () => ({ id: "card" }) as never);
+    const card = createMattermostTaskProgressCard({
+      client: createTestClient(request),
+      channelId: "channel-1",
+      log: vi.fn(),
+    });
+    const markdown = [
+      "**Autolearn P5 canary**",
+      "",
+      "| Gate | Status |",
+      "|---|---|",
+      "| GBrain query | ✅ 5/5 fresh |",
+      "| Waza result | 🔧 Retesting |",
+    ].join("\n");
+
+    card.noteToolStart({
+      toolCallId: "progress-1",
+      name: "progress_card",
+      phase: "start",
+      args: { markdown },
+    });
+    await card.updatePlan({
+      title: "Plan updated",
+      explanation:
+        "Autolearn P5 canary Gate Status GBrain query ✅ 5/5 fresh Waza result 🔧 Retesting",
+      source: "openclaw",
+      steps: [],
+    });
+    await card.updatePlan({
+      title: "Plan updated",
+      explanation:
+        "Autolearn P5 canary Gate Status GBrain query ✅ 5/5 fresh Waza result 🔧 Retesting",
+      source: "openclaw",
+      steps: [],
+    });
+
+    const message = String(readBody(request.mock.calls[0]?.[1]).message);
+    expect(message).toContain(markdown);
+    expect(message).not.toContain("Autolearn P5 canary Gate Status");
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
   it("does not replace native progress content with a generic OpenClaw update", async () => {
     const request = vi.fn<MattermostClient["request"]>(async () => ({ id: "card" }) as never);
     const card = createMattermostTaskProgressCard({

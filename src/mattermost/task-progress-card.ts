@@ -167,6 +167,7 @@ export function createMattermostTaskProgressCard(params: {
   let diagnosticLogs = 0;
   let finished = false;
   let latestSnapshot: MattermostTaskProgressSnapshot | undefined;
+  let lastNativeProgressMarkdown: string | undefined;
   let lifecycleTerminal: Exclude<MattermostTaskProgressStatus, "in_progress"> | undefined;
   let nextRevision = 0;
   const pendingNativeProgressCards: PendingNativeProgressCard[] = [];
@@ -338,10 +339,18 @@ export function createMattermostTaskProgressCard(params: {
       }
       const nativeProgressCard =
         plan.source === "openclaw" ? pendingNativeProgressCards.shift() : undefined;
+      if (nativeProgressCard) {
+        // Each native call replaces the whole card. Remember its renderer-owned
+        // Markdown across duplicate/late plan projections, but clear it when the
+        // next native call intentionally carries only a structured checklist.
+        lastNativeProgressMarkdown = nativeProgressCard.markdown;
+      }
       const title = normalizeTitle(plan.title, plan.source);
       const explanation =
-        normalizePlanExplanation(plan.explanation, plan.source) ??
-        normalizeExplanation(nativeProgressCard?.markdown);
+        (plan.source === "openclaw"
+          ? normalizeExplanation(lastNativeProgressMarkdown)
+          : undefined) ??
+        normalizePlanExplanation(plan.explanation, plan.source);
       const steps = normalizeSteps(plan.steps);
       if (!title && !explanation && steps.length === 0) {
         return false;
