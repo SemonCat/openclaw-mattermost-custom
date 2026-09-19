@@ -199,7 +199,7 @@ describe("readMattermostError", () => {
     const jsonSpy = vi.spyOn(response, "json").mockRejectedValue(new Error("unbounded"));
     const textSpy = vi.spyOn(response, "text").mockRejectedValue(new Error("unbounded"));
 
-    await expect(readMattermostError(response)).resolves.toBe("");
+    await expect(readMattermostError(response, {})).resolves.toBe("");
 
     expect(jsonSpy).not.toHaveBeenCalled();
     expect(textSpy).not.toHaveBeenCalled();
@@ -213,7 +213,7 @@ describe("readMattermostError", () => {
     const jsonSpy = vi.spyOn(response, "json").mockRejectedValue(new Error("unbounded"));
     const textSpy = vi.spyOn(response, "text").mockRejectedValue(new Error("unbounded"));
 
-    await expect(readMattermostError(response)).resolves.toBe("invalid token");
+    await expect(readMattermostError(response, {})).resolves.toBe("invalid token");
 
     expect(jsonSpy).not.toHaveBeenCalled();
     expect(textSpy).not.toHaveBeenCalled();
@@ -235,6 +235,48 @@ describe("createMattermostClient", () => {
     await expect(client.request("/users/me")).resolves.toEqual({ id: "u1" });
 
     expect(arrayBuffer).not.toHaveBeenCalled();
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats an accepted reaction add with no body as success", async () => {
+    const release = vi.fn(async () => {});
+    const stream = new ReadableStream<Uint8Array>();
+    fetchWithSsrFGuardMock.mockResolvedValueOnce({
+      response: new Response(stream, {
+        status: 201,
+        headers: { "content-type": "application/json" },
+      }),
+      release,
+    });
+    const client = createMattermostClient({
+      baseUrl: "https://chat.example.com",
+      botToken: "test-token",
+    });
+
+    await expect(
+      client.request("/reactions", {
+        method: "POST",
+        body: JSON.stringify({ user_id: "u1", post_id: "p1", emoji_name: "+1" }),
+      }),
+    ).resolves.toBeUndefined();
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats an accepted reaction add with an undecodable body as success", async () => {
+    const release = vi.fn(async () => {});
+    fetchWithSsrFGuardMock.mockResolvedValueOnce({
+      response: new Response('{"partial":', {
+        status: 201,
+        headers: { "content-type": "application/json" },
+      }),
+      release,
+    });
+    const client = createMattermostClient({
+      baseUrl: "https://chat.example.com",
+      botToken: "test-token",
+    });
+
+    await expect(client.request("/reactions", { method: "POST" })).resolves.toBeUndefined();
     expect(release).toHaveBeenCalledTimes(1);
   });
 

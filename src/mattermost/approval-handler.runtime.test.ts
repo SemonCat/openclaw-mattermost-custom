@@ -103,7 +103,7 @@ describe("Mattermost native approval renderer", () => {
       label: "not applied",
       resolved: { decision: "allow-once" },
       view: { applicationStatus: "not-applied" },
-      expected: "not applied",
+      expected: "completion could not be confirmed",
     },
     {
       label: "cancelled",

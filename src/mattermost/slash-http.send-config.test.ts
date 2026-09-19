@@ -312,7 +312,9 @@ describe("slash-http cfg threading", () => {
     expect(mockState.authorizeMattermostCommandInvocation).toHaveBeenCalledWith(
       expect.objectContaining({ cfg: runtimeCfg }),
     );
-    expect(mockState.buildModelsProviderData).toHaveBeenCalledWith(runtimeCfg, "agent-1");
+    expect(mockState.buildModelsProviderData).toHaveBeenCalledWith(runtimeCfg, "agent-1", {
+      sessionEntry: undefined,
+    });
     expect(mockState.sendMessageMattermost).toHaveBeenCalledWith(
       "channel:chan-1",
       "No models available.",

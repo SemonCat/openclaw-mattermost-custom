@@ -208,7 +208,12 @@ export function createMattermostModelPickerInteractionHandler(
       sessionKey: eventPlan.thread.sessionKey,
     };
     if (pickerState.action !== "select") {
-      const data = await buildModelsProviderData(cfg, eventPlan.route.agentId);
+      const sessionEntry = getSessionEntry({
+        storePath: resolveStorePath(cfg.session?.store, { agentId: modelSessionRoute.agentId }),
+        sessionKey: modelSessionRoute.sessionKey,
+        readConsistency: "latest",
+      });
+      const data = await buildModelsProviderData(cfg, eventPlan.route.agentId, { sessionEntry });
       if (data.providers.length === 0) {
         return await updatePickerPost("No models available.");
       }

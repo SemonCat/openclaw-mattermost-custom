@@ -4,10 +4,6 @@ import {
   implicitMentionKindWhen,
   resolveInboundSessionEnvelopeContext,
 } from "openclaw/plugin-sdk/channel-inbound";
-import {
-  resolveChannelContextVisibilityMode,
-  shouldIncludeSupplementalContext,
-} from "openclaw/plugin-sdk/context-visibility-runtime";
 import { resolvePinnedMainDmOwnerFromAllowlist } from "openclaw/plugin-sdk/security-runtime";
 import {
   normalizeOptionalString,
@@ -22,6 +18,7 @@ import {
   formatMattermostDirectMessageDropLog,
   normalizeMattermostAllowEntry,
   resolveMattermostMonitorInboundAccess,
+  shouldRetainMattermostSenderHistory,
 } from "./monitor-auth.js";
 import {
   pinMattermostMonitorConfig,
@@ -42,6 +39,7 @@ import {
   formatMattermostInboundMediaText,
   formatMattermostPendingMediaText,
 } from "./monitor-resources.js";
+import { createMattermostThreadBackfill } from "./monitor-thread-backfill.js";
 import { createMattermostReactionLifecycleStore } from "./monitor-turn-reactions.js";
 import { dispatchMattermostInboundTurn } from "./monitor-turn.js";
 import type { MattermostMonitorContext } from "./monitor-types.js";
@@ -74,6 +72,7 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
     accountHistoryLimit: account.config.historyLimit,
     globalHistoryLimit: monitor.cfg.messages?.groupChat?.historyLimit,
   });
+  const recoverThread = createMattermostThreadBackfill({ monitor, channelHistories, historyLimit });
 
   return async (
     post: MattermostPost,
@@ -148,7 +147,11 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
       agentId: route.agentId,
       sessionKey,
     });
-    const historyKey = resolveMattermostPendingHistoryKey({ kind, sessionKey });
+    const historyKey = resolveMattermostPendingHistoryKey({
+      kind,
+      sessionKey,
+      threadRootId: effectiveReplyToId,
+    });
     const fileIds = uniqueStrings(normalizeTrimmedStringList(post.file_ids ?? []));
     const nativeMedia = fileIds.map(() => ({}));
     const pendingBody = formatMattermostPendingMediaText({ body: rawText, media: nativeMedia });
@@ -245,14 +248,11 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
         // Trigger allowlists do not hide history unless context visibility opts in.
         // Denied senders must still return before commands, sessions, or replies.
         if (
-          shouldIncludeSupplementalContext({
-            mode: resolveChannelContextVisibilityMode({
-              cfg,
-              channel: "mattermost",
-              accountId: account.accountId,
-            }),
-            kind: "history",
-            senderAllowed: false,
+          shouldRetainMattermostSenderHistory({
+            cfg,
+            accountId: account.accountId,
+            kind,
+            ingress: accessDecision.ingress,
           })
         ) {
           recordPendingHistory();
@@ -405,9 +405,44 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
       previousTimestamp,
       envelope: envelopeOptions,
     });
+    const backfill =
+      historyKey && effectiveReplyToId
+        ? await recoverThread({
+            cfg,
+            historyKey,
+            threadRootId: effectiveReplyToId,
+            currentPostId: post.id,
+            currentPostTimestamp: post.create_at ?? 0,
+            agentId: route.agentId,
+            channelId,
+            kind,
+          })
+        : undefined;
+    if (backfill && !backfill.current) {
+      monitor.logVerboseMessage("mattermost: drop stale thread turn after session rotation");
+      return;
+    }
+    const turnHistories = new Map<string, HistoryEntry[]>(
+      historyKey
+        ? [
+            [
+              historyKey,
+              (backfill?.history ?? channelHistories.get(historyKey) ?? [])
+                .filter(
+                  (entry) =>
+                    !allMessageIds.includes(entry.messageId ?? "") &&
+                    (entry.timestamp === undefined ||
+                      post.create_at == null ||
+                      entry.timestamp <= post.create_at),
+                )
+                .slice(-historyLimit),
+            ],
+          ]
+        : [],
+    );
     let combinedBody = body;
     if (historyKey) {
-      const channelHistory = createChannelHistoryWindow({ historyMap: channelHistories });
+      const channelHistory = createChannelHistoryWindow({ historyMap: turnHistories });
       combinedBody = channelHistory.buildPendingContext({
         historyKey,
         limit: historyLimit,
@@ -429,7 +464,7 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
 
     const inboundHistory =
       historyKey && historyLimit > 0
-        ? createChannelHistoryWindow({ historyMap: channelHistories }).buildInboundHistory({
+        ? createChannelHistoryWindow({ historyMap: turnHistories }).buildInboundHistory({
             historyKey,
             limit: historyLimit,
           })

@@ -24,7 +24,7 @@ describe("mattermost thread participation", () => {
   });
 
   it("remembers a thread the bot replied in", async () => {
-    recordMattermostThreadParticipation("acct", "chan", "root-1");
+    await recordMattermostThreadParticipation("acct", "chan", "root-1");
     await expect(
       hasMattermostThreadParticipation({
         accountId: "acct",
@@ -35,7 +35,7 @@ describe("mattermost thread participation", () => {
   });
 
   it("isolates participation by account, channel, and thread", async () => {
-    recordMattermostThreadParticipation("acct", "chan", "root-1");
+    await recordMattermostThreadParticipation("acct", "chan", "root-1");
     for (const probe of [
       { accountId: "other", channelId: "chan", threadRootId: "root-1" },
       { accountId: "acct", channelId: "other", threadRootId: "root-1" },
@@ -46,7 +46,7 @@ describe("mattermost thread participation", () => {
   });
 
   it("ignores empty identifiers", async () => {
-    recordMattermostThreadParticipation("", "chan", "root-1");
+    await recordMattermostThreadParticipation("", "chan", "root-1");
     await expect(
       hasMattermostThreadParticipation({
         accountId: "",
@@ -57,7 +57,7 @@ describe("mattermost thread participation", () => {
   });
 
   it("forgets participation when the process-local cache is cleared", async () => {
-    recordMattermostThreadParticipation("acct", "chan", "root-1");
+    await recordMattermostThreadParticipation("acct", "chan", "root-1");
     threadParticipationMemory.clear();
     await expect(
       hasMattermostThreadParticipation({

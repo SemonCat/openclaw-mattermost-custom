@@ -7,6 +7,7 @@ import {
 import type { MessageReceipt } from "openclaw/plugin-sdk/channel-outbound";
 import type { OpenClawConfig, PluginRuntime } from "openclaw/plugin-sdk/core";
 import { getAgentScopedMediaLocalRoots } from "openclaw/plugin-sdk/media-runtime";
+import { questionGatewayRuntime } from "openclaw/plugin-sdk/question-gateway-runtime";
 import {
   deliverTextOrMediaReply,
   isReasoningReplyPayload,
@@ -136,6 +137,11 @@ export async function deliverMattermostReplyPayload(params: {
   }
   const presentation = resolveMattermostPresentation(params.payload);
   const secretPrompt = buildMattermostSecretPromptButton(params.payload);
+  const questionId =
+    secretPrompt?.questionId ??
+    (presentation.buttons.length > 0
+      ? questionGatewayRuntime.readAskUserQuestionId(params.payload)
+      : undefined);
   const buttons = secretPrompt
     ? [...presentation.buttons, [secretPrompt.button]]
     : presentation.buttons;
@@ -160,7 +166,7 @@ export async function deliverMattermostReplyPayload(params: {
       ...(results.length === 0 && reply.mediaUrls.length < 2 && buttons.length
         ? { buttons }
         : {}),
-      ...(results.length === 0 && secretPrompt ? { questionId: secretPrompt.questionId } : {}),
+      ...(results.length === 0 && questionId ? { questionId } : {}),
       replyToId: params.replyToId,
       ...(params.onDmChannelResolution
         ? { onDmChannelResolution: params.onDmChannelResolution }

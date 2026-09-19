@@ -1,6 +1,7 @@
 import { createMessageReceiptFromOutboundResults } from "openclaw/plugin-sdk/channel-outbound";
 import { describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig, PluginRuntime } from "../../runtime-api.js";
+import { resolveMattermostPresentation } from "../normalize.js";
 import { deliverMattermostReplyPayload } from "./reply-delivery.js";
 import type { MattermostSendResult } from "./send.js";
 
@@ -29,7 +30,79 @@ function createSendMock() {
 }
 
 describe("Mattermost normal reply presentation delivery", () => {
-  it("renders presentation text and sends buttons on the first provider post", async () => {
+  it("renders question buttons and carries their finalization identity on the first post", async () => {
+    const sendMessage = createSendMock();
+    const questionId = "ask_0123456789abcdef0123456789abcdef";
+    const payload = {
+      text: "Which environment?\n- staging",
+      presentationTextMode: "fallback" as const,
+      presentation: {
+        blocks: [
+          { type: "text" as const, text: "Which environment?" },
+          {
+            type: "buttons" as const,
+            buttons: [
+              {
+                label: "staging",
+                action: {
+                  type: "question" as const,
+                  questionId,
+                  optionValue: "staging",
+                },
+              },
+              {
+                label: "production",
+                action: {
+                  type: "question" as const,
+                  questionId,
+                  optionValue: "production",
+                },
+              },
+            ],
+          },
+        ],
+      },
+      channelData: {
+        askUser: { questionId, optionValues: ["staging", "production"] },
+      },
+    };
+
+    expect(resolveMattermostPresentation(payload).buttons).toHaveLength(1);
+
+    await deliverMattermostReplyPayload({
+      core: createCore(),
+      cfg: {} satisfies OpenClawConfig,
+      payload,
+      channelId: "town-square",
+      accountId: "default",
+      replyToId: "root-post",
+      textLimit: 4000,
+      tableMode: "off",
+      sendMessage,
+    });
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      "channel:town-square",
+      expect.stringContaining("Which environment?"),
+      expect.objectContaining({
+        buttons: [
+          [
+            expect.objectContaining({
+              text: "staging",
+              context: expect.objectContaining({ question_id: questionId, option_index: 0 }),
+            }),
+            expect.objectContaining({
+              text: "production",
+              context: expect.objectContaining({ question_id: questionId, option_index: 1 }),
+            }),
+          ],
+        ],
+        questionId,
+      }),
+    );
+  });
+
+  it("does not register ordinary non-question presentation buttons as questions", async () => {
     const sendMessage = createSendMock();
 
     await deliverMattermostReplyPayload({
@@ -41,36 +114,19 @@ describe("Mattermost normal reply presentation delivery", () => {
             { type: "text", text: "Choose one" },
             {
               type: "buttons",
-              buttons: [
-                { label: "Sol", value: "openai/gpt-5.6-sol", style: "primary" },
-              ],
+              buttons: [{ label: "Sol", value: "openai/gpt-5.6-sol" }],
             },
           ],
         },
       },
       channelId: "town-square",
       accountId: "default",
-      replyToId: "root-post",
       textLimit: 4000,
       tableMode: "off",
       sendMessage,
     });
 
-    expect(sendMessage).toHaveBeenCalledWith(
-      "channel:town-square",
-      expect.stringContaining("Choose one"),
-      expect.objectContaining({
-        buttons: [
-          [
-            expect.objectContaining({
-              text: "Sol",
-              callback_data: "openai/gpt-5.6-sol",
-              style: "primary",
-            }),
-          ],
-        ],
-      }),
-    );
+    expect(sendMessage.mock.calls[0]?.[2]).not.toHaveProperty("questionId");
   });
 
   it("requires successful upload for local media replies", async () => {

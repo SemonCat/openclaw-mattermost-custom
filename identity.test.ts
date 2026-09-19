@@ -54,7 +54,7 @@ describe("Mattermost custom plugin identity", () => {
     expect(packageJson.openclaw.setupEntry).toBe("./setup-entry.ts");
     expect(packageJson.openclaw.runtimeSetupEntry).toBe("./dist/setup-entry.js");
     expect(packageJson.openclaw.setupFeatures).toEqual({ configPromotion: true });
-    expect(packageJson.openclaw.install.minHostVersion).toBe(">=2026.9.4");
+    expect(packageJson.openclaw.install.minHostVersion).toBe(">=2026.9.5");
     expect(packageJson.openclaw.install.localPath).toBeUndefined();
     expect(packageJson.openclaw.install.defaultChoice).toBeUndefined();
     expect(packageJson.openclaw.install.allowInvalidConfigRecovery).toBeUndefined();

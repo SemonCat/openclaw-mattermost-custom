@@ -1,5 +1,7 @@
 // Mattermost plugin module registers interactive callback transport handling.
 import { resolveHumanDelayConfig } from "openclaw/plugin-sdk/agent-runtime";
+import { questionGatewayRuntime } from "openclaw/plugin-sdk/question-gateway-runtime";
+import { parseMattermostQuestionContext } from "../normalize.js";
 import {
   createMattermostApprovalInteractionHandler,
   parseMattermostApprovalAction,
@@ -9,6 +11,7 @@ import { createMattermostInteractionIngressMonitor } from "./interaction-ingress
 import {
   createMattermostInteractionHandler,
   createMattermostInteractionProcessor,
+  type MattermostInteractionResponse,
 } from "./interactions.js";
 import { authorizeMattermostCommandInvocation } from "./monitor-auth.js";
 import {
@@ -24,6 +27,75 @@ import type { ReplyPayload } from "./runtime-api.js";
 import { registerPluginHttpRoute } from "./runtime-api.js";
 import { createMattermostSecretDialogController } from "./secret-dialog.js";
 import { sendMessageMattermost } from "./send.js";
+
+type MattermostInteractionDispatch = NonNullable<
+  Parameters<typeof createMattermostInteractionHandler>[0]["handleInteraction"]
+>;
+
+function createMattermostQuestionInteractionHandler(
+  monitor: MattermostMonitorContext,
+): MattermostInteractionDispatch {
+  const { account, core, pairing, resources, runtime } = monitor;
+  return async (interaction) => {
+    const selection = parseMattermostQuestionContext(interaction.context);
+    if (!selection) {
+      return null;
+    }
+    const eventMonitor = pinMattermostMonitorConfig(monitor);
+    const { cfg } = eventMonitor;
+    const channelInfo = await resources.resolveChannelInfo(interaction.payload.channel_id);
+    const decide = async () =>
+      await authorizeMattermostCommandInvocation({
+        account,
+        cfg,
+        senderId: interaction.payload.user_id,
+        senderName: interaction.userName,
+        channelId: interaction.payload.channel_id,
+        channelInfo,
+        readStoreAllowFrom: pairing.readAllowFromStore,
+        allowTextCommands: core.channel.commands.shouldHandleTextCommands({
+          cfg,
+          surface: "mattermost",
+        }),
+        hasControlCommand: false,
+      });
+    const auth = await decide();
+    if (!auth.ok) {
+      return { ephemeral_text: `OpenClaw ignored this action for ${auth.roomLabel}.` };
+    }
+    try {
+      const result = await questionGatewayRuntime.resolveOption({
+        cfg,
+        questionId: selection.questionId,
+        optionIndex: selection.optionIndex,
+        senderId: interaction.payload.user_id,
+        clientDisplayName: `Mattermost question (${account.accountId})`,
+        authorize: async () => (await decide()).ok,
+      });
+      if (result.status === "denied") {
+        return { ephemeral_text: `OpenClaw ignored this action for ${auth.roomLabel}.` };
+      }
+      if (result.status !== "answered") {
+        return { ephemeral_text: "This question was already answered." };
+      }
+    } catch (error) {
+      runtime.error?.(`mattermost question interaction failed: ${String(error)}`);
+      return { ephemeral_text: "Could not submit this answer." };
+    }
+    const response: MattermostInteractionResponse = {
+      update: {
+        message: interaction.post.message ?? "",
+        props: {
+          attachments: [
+            { text: `✓ **${interaction.actionName}** selected by @${interaction.userName}` },
+          ],
+        },
+      },
+      ephemeral_text: "Answer submitted.",
+    };
+    return response;
+  };
+}
 
 export function registerMattermostInteractions(params: {
   monitor: MattermostMonitorContext;
@@ -54,6 +126,7 @@ export function registerMattermostInteractions(params: {
       }),
     log: (message) => runtime.error?.(message),
   });
+  const handleQuestionInteraction = createMattermostQuestionInteractionHandler(monitor);
   const interactionOptions: Parameters<typeof createMattermostInteractionProcessor>[0] = {
     client,
     botUserId,
@@ -65,8 +138,9 @@ export function registerMattermostInteractions(params: {
     handleDialogSubmission: secretDialog.handleSubmission,
     handleInteraction: async (interaction) =>
       (await handleApprovalInteraction(interaction)) ??
+      (await handleQuestionInteraction(interaction)) ??
       (await params.handleModelPickerInteraction(interaction)),
-    authorizeButtonClick: async ({ payload, post }) => {
+    authorizeButtonClick: async ({ payload }) => {
       const eventMonitor = pinMattermostMonitorConfig(monitor);
       const { cfg } = eventMonitor;
       const approvalAction = parseMattermostApprovalAction(payload.context ?? {});
@@ -102,10 +176,6 @@ export function registerMattermostInteractions(params: {
       return {
         ok: false as const,
         response: {
-          update: {
-            message: post.message ?? "",
-            props: post.props ?? undefined,
-          },
           ephemeral_text: `OpenClaw ignored this action for ${decision.roomLabel}.`,
         },
       };

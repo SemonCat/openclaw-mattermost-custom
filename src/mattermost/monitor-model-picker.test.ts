@@ -252,4 +252,53 @@ describe("Mattermost model-picker interaction dispatch", () => {
     );
     expect(mocks.pinExplicitDefaultModel).toHaveBeenCalledOnce();
   });
+
+  it("builds model menus from the thread session pinned account", async () => {
+    mocks.parseContext.mockReturnValue({
+      action: "providers",
+      ownerUserId: "user-1",
+      page: 0,
+    });
+    const sessionEntry = { sessionId: "thread-session", updatedAt: 2, providerOverride: "openai" };
+    mocks.getSessionEntry.mockReturnValue(sessionEntry);
+    const runtimeCfg = { agents: { defaults: { model: { primary: "openai/current" } } } };
+    const updateModelPickerPost = vi.fn(async () => ({}));
+    const monitor = {
+      account: { accountId: "default", config: {} },
+      cfg: {},
+      core: {
+        config: { current: vi.fn(() => runtimeCfg) },
+        channel: {
+          commands: { shouldHandleTextCommands: vi.fn(() => true) },
+          inbound: { dispatch: mocks.dispatch },
+          text: { hasControlCommand: vi.fn(() => true) },
+        },
+      },
+      pairing: { readAllowFromStore: vi.fn(async () => []) },
+      resources: {
+        resolveChannelInfo: vi.fn(async () => ({ id: "channel-1", type: "O" })),
+        updateModelPickerPost,
+      },
+      runtime: { error: vi.fn() },
+    } as unknown as MattermostMonitorContext;
+
+    await createMattermostModelPickerInteractionHandler(monitor)({
+      payload: {
+        channel_id: "channel-1",
+        post_id: "picker-post-1",
+        team_id: "team-1",
+        user_id: "user-1",
+      },
+      userName: "tester",
+      context: {},
+      post: { id: "picker-post-1", channel_id: "channel-1", message: "picker" },
+    });
+
+    expect(mocks.buildModelsProviderData).toHaveBeenCalledWith(runtimeCfg, "main", {
+      sessionEntry,
+    });
+    expect(updateModelPickerPost).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "provider picker" }),
+    );
+  });
 });

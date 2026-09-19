@@ -41,7 +41,7 @@ mkdir -p /tmp/openclaw/mattermost-custom
 npm run build
 npm pack --omit=dev --pack-destination /tmp/openclaw/mattermost-custom
 openclaw plugins install \
-  /tmp/openclaw/mattermost-custom/openclaw-mattermost-custom-2026.9.4.tgz --force
+  /tmp/openclaw/mattermost-custom/openclaw-mattermost-custom-2026.9.5.tgz --force
 ```
 
 Do not use `plugins install --link` or add this source checkout to
@@ -87,7 +87,9 @@ Compared with the official plugin, this build preserves:
 - Durable plan-backed task progress cards that remain after the final answer.
 - Native exec, plugin, and system-agent approval cards with canonical Gateway resolution.
 - Native secret-entry dialogs that submit password fields directly to OpenClaw's protected store.
+- Native `ask_user` option buttons that resolve the original Gateway question without a second agent turn.
 - Durable interactive callback admission and replay across Gateway restarts.
+- Bounded Mattermost thread-history recovery after Gateway restart or session reset.
 - The Mattermost slash-trigger length cap fix.
 - Mention-prefixed text commands such as `@bot /new`, without debounce or prose misrouting.
 - Immediate recovery from transient channel/user lookup failures instead of negative caching.
@@ -275,7 +277,7 @@ shared Mattermost contract tests and the downstream behavior tests.
 ### Test status against the published npm SDK
 
 This repo builds and tests against the published `openclaw` npm package
-(`2026.9.4`), not the OpenClaw monorepo checkout. One category of tests
+(`2026.9.5`), not the OpenClaw monorepo checkout. One category of tests
 behaves differently from the monorepo for that reason:
 
 - Ten suites import test-only Plugin SDK subpaths (`channel-test-helpers`,
