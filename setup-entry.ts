@@ -1,5 +1,14 @@
 // Mattermost plugin module implements setup entry behavior.
-import { defineSetupPluginEntry } from "openclaw/plugin-sdk/core";
-import { mattermostSetupPlugin } from "./channel-plugin-api.js";
+import { defineBundledChannelSetupEntry } from "openclaw/plugin-sdk/channel-entry-contract";
 
-export default defineSetupPluginEntry(mattermostSetupPlugin);
+export default defineBundledChannelSetupEntry({
+  importMetaUrl: import.meta.url,
+  plugin: {
+    specifier: "./channel-plugin-api.js",
+    exportName: "mattermostSetupPlugin",
+  },
+  secrets: {
+    specifier: "./secret-contract-api.js",
+    exportName: "channelSecrets",
+  },
+});

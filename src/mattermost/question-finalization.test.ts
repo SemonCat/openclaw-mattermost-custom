@@ -29,7 +29,7 @@ describe("Mattermost question finalization", () => {
       | undefined;
     await finalize?.("Answered");
 
-    expect(request).toHaveBeenCalledWith("/posts/post-1", {
+    expect(request).toHaveBeenCalledWith("/posts/post-1/patch", {
       method: "PUT",
       body: JSON.stringify({ id: "post-1", message: "Credential requested\n\nAnswered", props: {} }),
     });

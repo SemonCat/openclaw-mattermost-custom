@@ -1,5 +1,6 @@
 import { createHash, createHmac } from "node:crypto";
 import { resolveChannelMediaMaxBytes } from "openclaw/plugin-sdk/account-helpers";
+import type { ChannelOutboundContext } from "openclaw/plugin-sdk/channel-contract";
 import { createChannelPartialDeliveryError } from "openclaw/plugin-sdk/channel-inbound";
 // Mattermost plugin module implements send behavior.
 import {
@@ -52,7 +53,10 @@ import {
 } from "./target-resolution.js";
 import { registerMattermostQuestionDelivery } from "./question-finalization.js";
 
-type MattermostSendOpts = {
+type MattermostSendOpts = Pick<
+  ChannelOutboundContext,
+  "assertDirectAdapterHandoff" | "onPlatformSendDispatch"
+> & {
   cfg: OpenClawConfig;
   botToken?: string;
   baseUrl?: string;
@@ -81,8 +85,6 @@ type MattermostSendOpts = {
   deliveryPartIndex?: number;
   /** Exact number of platform sends expected for one durable text payload. */
   deliveryPartCount?: number;
-  /** Refresh host-owned durable timing immediately before provider-visible I/O. */
-  onPlatformSendDispatch?: () => Promise<void>;
 };
 
 export type MattermostSendResult = {
@@ -469,13 +471,8 @@ async function resolveMattermostSendContext(
     baseUrl,
     botToken: token,
     allowPrivateNetwork: isPrivateNetworkOptInEnabled(account.config),
+    assertRequestCurrent: opts.assertDirectAdapterHandoff,
   });
-  const trimmedTo = normalizeOptionalString(to) ?? "";
-  const opaqueTarget = await resolveMattermostOpaqueTarget({
-    input: trimmedTo,
-    client,
-  });
-  const target = parseMattermostTarget(opaqueTarget?.to ?? trimmedTo);
   // Build retry options from account config, allowing opts to override
   const accountRetryConfig: CreateDmChannelRetryOptions | undefined = account.config.dmChannelRetry
     ? {
@@ -487,13 +484,26 @@ async function resolveMattermostSendContext(
     : undefined;
   const dmRetryOptions = mergeDmRetryOptions(accountRetryConfig, opts.dmRetryOptions);
 
-  const channelId = await resolveTargetChannelId({
-    target,
-    client,
-    dmRetryOptions,
-    onDmChannelResolution: opts.onDmChannelResolution,
-    logger: core.logging.shouldLogVerbose() ? logger : undefined,
-  });
+  let channelId: string;
+  try {
+    const trimmedTo = normalizeOptionalString(to) ?? "";
+    const opaqueTarget = await resolveMattermostOpaqueTarget({
+      input: trimmedTo,
+      client,
+    });
+    channelId = await resolveTargetChannelId({
+      target: parseMattermostTarget(opaqueTarget?.to ?? trimmedTo),
+      client,
+      dmRetryOptions,
+      onDmChannelResolution: opts.onDmChannelResolution,
+      logger: core.logging.shouldLogVerbose() ? logger : undefined,
+    });
+  } catch (error) {
+    // Target preparation cannot have posted a message. Recheck outside its
+    // retry history before returning the failure to delivery settlement.
+    client.assertRequestCurrent?.();
+    throw error;
+  }
 
   return {
     cfg,
@@ -517,14 +527,7 @@ export async function sendMessageMattermost(
   const logger = core.logging.getChildLogger({ module: "mattermost" });
   const { cfg, accountId, client, channelId, mediaMaxBytes } =
     await resolveMattermostSendContext(to, opts);
-  let platformSendDispatched = false;
-  const dispatchPlatformSendOnce = async () => {
-    if (platformSendDispatched) {
-      return;
-    }
-    platformSendDispatched = true;
-    await opts.onPlatformSendDispatch?.();
-  };
+  client.assertRequestCurrent?.();
   let props = opts.props;
   let legacyButtonFallbackProps: Record<string, unknown> | undefined;
   if (!props && Array.isArray(opts.buttons) && opts.buttons.length > 0) {
@@ -576,7 +579,6 @@ export async function sendMessageMattermost(
         mediaReadFile: opts.mediaReadFile,
         workspaceDir: opts.workspaceDir,
       });
-      await dispatchPlatformSendOnce();
       const fileInfo = await uploadMattermostFile(client, {
         channelId,
         buffer: media.buffer,
@@ -585,6 +587,7 @@ export async function sendMessageMattermost(
       });
       fileIds = [fileInfo.id];
     } catch (err) {
+      client.assertRequestCurrent?.();
       uploadError = err instanceof Error ? err : new Error(String(err));
       if (opts.requireMediaUpload || mediaMaxBytes !== undefined) {
         throw new Error(`Mattermost media upload failed: ${uploadError.message}`, {
@@ -618,7 +621,13 @@ export async function sendMessageMattermost(
     throw new Error("Mattermost message is empty");
   }
 
-  await dispatchPlatformSendOnce();
+  client.assertRequestCurrent?.();
+  try {
+    await opts.onPlatformSendDispatch?.();
+  } catch (error) {
+    client.assertRequestCurrent?.();
+    throw error;
+  }
   const created = await createMattermostPostWithButtonFallback({
     client,
     post: {

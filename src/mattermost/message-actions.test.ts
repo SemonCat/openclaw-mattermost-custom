@@ -44,7 +44,7 @@ describe("Mattermost message actions", () => {
     ).resolves.toMatchObject({ id: "POST1", message: "updated" });
     expect(calls.map((call) => [call.url.split("/api/v4")[1], call.method])).toEqual([
       ["/posts/POST1", undefined],
-      ["/posts/POST1", "PUT"],
+      ["/posts/POST1/patch", "PUT"],
     ]);
     expect(calls[1]?.body).toEqual({ id: "POST1", message: "updated" });
   });

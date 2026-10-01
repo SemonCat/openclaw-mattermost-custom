@@ -1,7 +1,15 @@
 // Mattermost plugin module implements client behavior.
+import { bufferToBlobPart } from "openclaw/plugin-sdk/blob-runtime";
 import { createChannelPartialDeliveryError } from "openclaw/plugin-sdk/channel-inbound";
+import {
+  collectErrorGraphCandidates,
+  PlatformMessageNotDispatchedError,
+} from "openclaw/plugin-sdk/error-runtime";
 import { buildTimeoutAbortSignal } from "openclaw/plugin-sdk/extension-shared";
-import { captureChannelReadAuthority } from "openclaw/plugin-sdk/fetch-runtime";
+import {
+  captureChannelReadAuthority,
+  responseWithRelease,
+} from "openclaw/plugin-sdk/fetch-runtime";
 import { resolveTimerTimeoutMs } from "openclaw/plugin-sdk/number-runtime";
 import {
   readProviderJsonResponse,
@@ -21,7 +29,6 @@ import {
   normalizeOptionalString,
 } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { z } from "zod";
-import { responseWithRelease } from "./response-with-release.js";
 
 const MATTERMOST_ERROR_BODY_LIMIT_BYTES = 8 * 1024;
 const MATTERMOST_REQUEST_TIMEOUT_MS = 30_000;
@@ -36,12 +43,16 @@ const MATTERMOST_TEXT_RESPONSE_LIMIT_BYTES = 64 * 1024;
 export type MattermostFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 type MattermostRequestInit = RequestInit & {
   timeoutMs?: number;
+  /** Internal dispatch evidence; never forwarded to the HTTP transport. */
+  isMessagePost?: boolean;
 };
 
 export type MattermostClient = {
   baseUrl: string;
   apiBaseUrl: string;
   token: string;
+  /** Operation-local sender fence, independent of ambient read authority. */
+  assertRequestCurrent?: () => void;
   request: <T>(path: string, init?: MattermostRequestInit) => Promise<T>;
   /** Guarded fetch implementation; use in place of raw fetch for outbound requests. */
   fetchImpl: MattermostFetch;
@@ -220,6 +231,7 @@ export function createMattermostClient(params: {
   timeoutMs?: number;
   /** Allow requests to private/internal IPs (self-hosted/LAN deployments). */
   allowPrivateNetwork?: boolean;
+  assertRequestCurrent?: () => void;
 }): MattermostClient {
   const baseUrl = normalizeMattermostBaseUrl(params.baseUrl);
   if (!baseUrl) {
@@ -228,6 +240,27 @@ export function createMattermostClient(params: {
   const apiBaseUrl = `${baseUrl}/api/v4`;
   const token = params.botToken.trim();
   const requestTimeoutMs = resolveTimerTimeoutMs(params.timeoutMs, MATTERMOST_REQUEST_TIMEOUT_MS);
+  const assertSenderCurrent = params.assertRequestCurrent;
+  let postDispatchStarted = false;
+  const assertRequestCurrent = assertSenderCurrent
+    ? () => {
+        try {
+          assertSenderCurrent();
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (postDispatchStarted) {
+            // A redirected POST may already have had an effect. Keep that
+            // uncertainty even if the caller's assertion carries no-send proof.
+            throw new AggregateError(
+              [error, new Error("A Mattermost post request was already dispatched")],
+              message,
+              { cause: error },
+            );
+          }
+          throw new PlatformMessageNotDispatchedError(message, { cause: error, retryable: false });
+        }
+      }
+    : undefined;
   // When no custom fetchImpl is provided (production path), use an SSRF-guarded wrapper
   // that validates the target URL before making the request (DNS rebinding protection etc.).
   // A custom fetchImpl is accepted for testing and special cases.
@@ -239,14 +272,21 @@ export function createMattermostClient(params: {
   ): Promise<Response> => {
     const assertReadAuthority = captureChannelReadAuthority();
     assertReadAuthority?.();
+    assertRequestCurrent?.();
     const url =
       typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const { timeoutMs: initTimeoutMs, ...requestInit } = init ?? {};
+    const { timeoutMs: initTimeoutMs, isMessagePost, ...requestInit } = init ?? {};
     const timeoutMs = resolveTimerTimeoutMs(initTimeoutMs, requestTimeoutMs);
     const { response, release } = await fetchWithSsrFGuard({
       url,
       init: requestInit,
-      beforeRequest: assertReadAuthority,
+      beforeRequest: () => {
+        assertReadAuthority?.();
+        assertRequestCurrent?.();
+        if (isMessagePost) {
+          postDispatchStarted = true;
+        }
+      },
       auditContext: "mattermost-api",
       policy: ssrfPolicyFromPrivateNetworkOptIn(params.allowPrivateNetwork),
       signal: requestInit.signal ?? undefined,
@@ -263,7 +303,7 @@ export function createMattermostClient(params: {
         assertReadAuthority?.();
         const url =
           typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-        const { timeoutMs: initTimeoutMs, ...requestInit } = init ?? {};
+        const { timeoutMs: initTimeoutMs, isMessagePost, ...requestInit } = init ?? {};
         const timeoutMs = resolveTimerTimeoutMs(initTimeoutMs, requestTimeoutMs);
         const { signal: timeoutSignal, cleanup } = buildTimeoutAbortSignal({
           timeoutMs,
@@ -276,6 +316,10 @@ export function createMattermostClient(params: {
             ? AbortSignal.any([callerSignal, timeoutSignal])
             : (callerSignal ?? timeoutSignal);
         try {
+          assertRequestCurrent?.();
+          if (isMessagePost) {
+            postDispatchStarted = true;
+          }
           const response = await externalFetchImpl(input, { ...requestInit, signal });
           // Match guarded production fetches: retain cancellation and the
           // request deadline until the custom response body is consumed.
@@ -296,7 +340,8 @@ export function createMattermostClient(params: {
     if (typeof init?.body === "string" && !headers.has("Content-Type")) {
       headers.set("Content-Type", "application/json");
     }
-    const res = await fetchImpl(url, { ...init, headers });
+    const isMessagePost = path === "/posts" && init?.method?.toUpperCase() === "POST";
+    const res = await fetchImpl(url, { ...init, headers, isMessagePost });
     if (!res.ok) {
       const detail = await readMattermostError(res, headers);
       throw new Error(
@@ -325,7 +370,7 @@ export function createMattermostClient(params: {
       }
       return (await readMattermostSuccessText(res, path)) as T;
     } catch (error) {
-      if (path === "/posts" && init?.method?.toUpperCase() === "POST") {
+      if (isMessagePost) {
         // POST already succeeded; a lost/unreadable receipt must never schedule another visible post.
         throw createChannelPartialDeliveryError(error, { messageIds: [], visibleReplySent: true });
       }
@@ -333,7 +378,14 @@ export function createMattermostClient(params: {
     }
   };
 
-  return { baseUrl, apiBaseUrl, token, request, fetchImpl };
+  return {
+    baseUrl,
+    apiBaseUrl,
+    token,
+    request,
+    fetchImpl,
+    ...(assertRequestCurrent ? { assertRequestCurrent } : {}),
+  };
 }
 
 export async function fetchMattermostMe(client: MattermostClient): Promise<MattermostUser> {
@@ -688,7 +740,14 @@ export async function createMattermostDirectChannelWithRetry(
 }
 
 export function isRetryableError(error: Error): boolean {
-  const candidates = collectErrorCandidates(error);
+  if (error instanceof PlatformMessageNotDispatchedError && !error.retryable) {
+    return false;
+  }
+  const candidates = collectErrorGraphCandidates(error, (current) => [
+    current.cause,
+    current.reason,
+    ...(Array.isArray(current.errors) ? current.errors : []),
+  ]);
   const messages = candidates
     .map((candidate) => normalizeLowercaseStringOrEmpty(readErrorMessage(candidate)))
     .filter((message): message is string => Boolean(message));
@@ -765,39 +824,6 @@ export function isRetryableError(error: Error): boolean {
   return messages.some((message) =>
     RETRYABLE_NETWORK_MESSAGE_SNIPPETS.some((pattern) => message.includes(pattern)),
   );
-}
-
-function collectErrorCandidates(error: unknown): unknown[] {
-  const queue: unknown[] = [error];
-  let queueIndex = 0;
-  const seen = new Set<unknown>();
-  const candidates: unknown[] = [];
-
-  while (queueIndex < queue.length) {
-    const current = queue[queueIndex];
-    queueIndex += 1;
-    if (!current || seen.has(current)) {
-      continue;
-    }
-    seen.add(current);
-    candidates.push(current);
-
-    if (typeof current !== "object") {
-      continue;
-    }
-
-    const nested = current as {
-      cause?: unknown;
-      reason?: unknown;
-      errors?: unknown;
-    };
-    queue.push(nested.cause, nested.reason);
-    if (Array.isArray(nested.errors)) {
-      queue.push(...nested.errors);
-    }
-  }
-
-  return candidates;
 }
 
 function readErrorMessage(error: unknown): string | undefined {
@@ -903,8 +929,15 @@ export async function updateMattermostPost(
   }
   if (params.props !== undefined) {
     payload.props = params.props;
+  } else if (params.message !== undefined && /\B@(channel|all|here)\b/i.test(params.message)) {
+    // PatchPost's mention suppression replaces omitted props with its own map.
+    const current = MattermostPostSchema.parse(await client.request<unknown>(`/posts/${postId}`));
+    if (current.id !== postId) {
+      throw new Error("Mattermost post lookup returned a different post id");
+    }
+    payload.props = current.props ?? {};
   }
-  return await client.request<MattermostPost>(`/posts/${postId}`, {
+  return await client.request<MattermostPost>(`/posts/${postId}/patch`, {
     method: "PUT",
     body: JSON.stringify(payload),
   });
@@ -1033,10 +1066,7 @@ export async function uploadMattermostFile(
 ): Promise<MattermostFileInfo> {
   const form = new FormData();
   const fileName = normalizeOptionalString(params.fileName) ?? "upload";
-  const bytes = Uint8Array.from(params.buffer);
-  const blob = params.contentType
-    ? new Blob([bytes], { type: params.contentType })
-    : new Blob([bytes]);
+  const blob = new Blob([bufferToBlobPart(params.buffer)], { type: params.contentType });
   form.append("files", blob, fileName);
   form.append("channel_id", params.channelId);
 

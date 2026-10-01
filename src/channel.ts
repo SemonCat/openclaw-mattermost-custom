@@ -908,6 +908,8 @@ const mattermostOutbound: ChannelOutboundAdapter = {
         replyToId: ctx.replyToId ?? (ctx.threadId != null ? String(ctx.threadId) : undefined),
         buttons: buttons?.length ? buttons : undefined,
         attachmentText,
+        assertDirectAdapterHandoff: ctx.assertDirectAdapterHandoff,
+        onPlatformSendDispatch: ctx.onPlatformSendDispatch,
         onDeliveryResult: createMattermostDeliveryProgressReporter(ctx.onDeliveryResult),
       });
       return attachChannelToResult("mattermost", toMattermostOutboundResult(result));
@@ -938,6 +940,7 @@ const mattermostOutbound: ChannelOutboundAdapter = {
       deliveryQueueId,
       deliveryPartIndex,
       deliveryPartCount,
+      assertDirectAdapterHandoff,
       onPlatformSendDispatch,
       onDeliveryResult,
     }) =>
@@ -951,6 +954,7 @@ const mattermostOutbound: ChannelOutboundAdapter = {
           ...(deliveryQueueId
             ? { deliveryQueueId, deliveryPartIndex, deliveryPartCount }
             : {}),
+          ...(assertDirectAdapterHandoff ? { assertDirectAdapterHandoff } : {}),
           ...(onPlatformSendDispatch ? { onPlatformSendDispatch } : {}),
           onDeliveryResult: createMattermostDeliveryProgressReporter(onDeliveryResult),
         }),
@@ -966,6 +970,8 @@ const mattermostOutbound: ChannelOutboundAdapter = {
       accountId,
       replyToId,
       threadId,
+      assertDirectAdapterHandoff,
+      onPlatformSendDispatch,
       onDeliveryResult,
     }) =>
       toMattermostOutboundResult(
@@ -980,6 +986,8 @@ const mattermostOutbound: ChannelOutboundAdapter = {
           ...(mediaAccess?.workspaceDir ? { workspaceDir: mediaAccess.workspaceDir } : {}),
           requireMediaUpload: requiresMattermostMediaUpload(mediaUrl) ? true : undefined,
           replyToId: replyToId ?? (threadId != null ? String(threadId) : undefined),
+          assertDirectAdapterHandoff,
+          onPlatformSendDispatch,
           onDeliveryResult: createMattermostDeliveryProgressReporter(onDeliveryResult),
         }),
       ),

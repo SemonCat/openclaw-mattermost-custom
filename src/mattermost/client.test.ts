@@ -1,6 +1,7 @@
 // Mattermost tests cover client plugin behavior.
 import { expectDefined } from "../test-support/expect-defined.js";
 import { isChannelPartialDeliveryError } from "openclaw/plugin-sdk/channel-inbound";
+import { PlatformMessageNotDispatchedError } from "openclaw/plugin-sdk/error-runtime";
 import { describe, expect, it, vi } from "vitest";
 
 const fetchWithSsrFGuardMock = vi.hoisted(() => vi.fn());
@@ -21,6 +22,7 @@ import {
   fetchMattermostChannel,
   fetchMattermostChannelPosts,
   fetchMattermostChannelPostsSince,
+  isRetryableError,
   normalizeMattermostBaseUrl,
   patchMattermostChannelHeader,
   readMattermostError,
@@ -223,6 +225,58 @@ describe("readMattermostError", () => {
 // ── createMattermostClient ───────────────────────────────────────────
 
 describe("createMattermostClient", () => {
+  it("fences a stale direct message before the custom transport is invoked", async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    const client = createMattermostClient({
+      baseUrl: "https://chat.example.com",
+      botToken: "test-token",
+      fetchImpl,
+      assertRequestCurrent: () => {
+        throw new Error("stale handoff");
+      },
+    });
+
+    await expect(
+      createMattermostPost(client, { channelId: "channel-1", message: "hello" }),
+    ).rejects.toMatchObject({
+      code: "OPENCLAW_PLATFORM_MESSAGE_NOT_DISPATCHED",
+      retryable: false,
+      message: "stale handoff",
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("does not forward the internal message-post marker to a custom transport", async () => {
+    const assertRequestCurrent = vi.fn();
+    const fetchImpl = vi.fn<typeof fetch>(async (_input, init) => {
+      expect(init).not.toHaveProperty("isMessagePost");
+      return Response.json({ id: "post-1" });
+    });
+    const client = createMattermostClient({
+      baseUrl: "https://chat.example.com",
+      botToken: "test-token",
+      fetchImpl,
+      assertRequestCurrent,
+    });
+
+    await expect(
+      createMattermostPost(client, { channelId: "channel-1", message: "hello" }),
+    ).resolves.toMatchObject({ id: "post-1" });
+    expect(assertRequestCurrent).toHaveBeenCalled();
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("marks stale handoff errors as non-retryable before dispatch", () => {
+    const error = new PlatformMessageNotDispatchedError("stale handoff", {
+      cause: new Error("owner changed"),
+      retryable: false,
+    });
+
+    expect(error.code).toBe("OPENCLAW_PLATFORM_MESSAGE_NOT_DISPATCHED");
+    expect(error.retryable).toBe(false);
+    expect(isRetryableError(error)).toBe(false);
+  });
+
   it("keeps guarded Mattermost responses streaming until callers consume them", async () => {
     const release = vi.fn(async () => {});
     const { response, arrayBuffer } = streamingMattermostResponse({ id: "u1" });
@@ -962,11 +1016,11 @@ describe("downloadMattermostFile", () => {
 // ── updateMattermostPost ─────────────────────────────────────────────
 
 describe("updateMattermostPost", () => {
-  it("sends PUT to /posts/{id}", async () => {
+  it("sends PUT to /posts/{id}/patch", async () => {
     const { calls } = await updatePostAndCapture({ message: "Updated" });
 
     const firstCall = requireRequestCall(calls);
-    expect(firstCall.url).toContain("/posts/post1");
+    expect(firstCall.url).toContain("/posts/post1/patch");
     if (!firstCall.init) {
       throw new Error("expected Mattermost update post request init");
     }
@@ -1002,6 +1056,23 @@ describe("updateMattermostPost", () => {
     expect(body.id).toBe("post1");
     expect(body.message).toBeUndefined();
     expect(body.props).toEqual({ attachments: [] });
+  });
+
+  it("preserves props when patching a broadcast mention", async () => {
+    const { client, calls } = createTestClient({
+      body: { id: "post1", message: "Old", props: { from_webhook: "true" } },
+    });
+
+    await updateMattermostPost(client, "post1", { message: "Attention @channel" });
+
+    expect(calls).toHaveLength(2);
+    expect(requireRequestCall(calls, 0).url).toContain("/posts/post1");
+    expect(requireRequestCall(calls, 1).url).toContain("/posts/post1/patch");
+    expect(parseRequestJson(requireRequestCall(calls, 1).init)).toEqual({
+      id: "post1",
+      message: "Attention @channel",
+      props: { from_webhook: "true" },
+    });
   });
 });
 

@@ -1,9 +1,11 @@
 // Mattermost tests cover the append-once, consume-after-ack metrics receipt.
+import { createLivePreviewLifecycle } from "openclaw/plugin-sdk/channel-outbound";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as clientModule from "./client.js";
 import type { MattermostClient } from "./client.js";
 import { deliverMattermostReplyWithDraftPreview } from "./monitor-draft-delivery.js";
 import { createMattermostProgressReceipt } from "./progress-receipt.js";
+import type { ReplyPayload } from "./runtime-api.js";
 
 const updateMattermostPostSpy = vi.spyOn(
   clientModule,
@@ -30,6 +32,12 @@ function createDraftStreamMock(postId: string | null | undefined = "preview-post
     discardPending: vi.fn(async () => {}),
     seal: vi.fn(async () => {}),
   };
+}
+
+function createPreviewLifecycle(draftStream: ReturnType<typeof createDraftStreamMock>) {
+  return createLivePreviewLifecycle<ReplyPayload, string>({
+    draft: { ...draftStream, id: draftStream.postId },
+  });
 }
 
 beforeEach(() => {
@@ -313,10 +321,9 @@ describe("createMattermostProgressReceipt", () => {
       info: { kind: "final" },
       kind: "channel",
       client: createMattermostClientMock(),
-      draftStream,
+      previewLifecycle: createPreviewLifecycle(draftStream),
       resolvePreviewFinalText: (text) =>
         text?.trim() ? { editText: text.trim(), alreadyDelivered: false } : undefined,
-      previewState: { finalizedViaPreviewPost: false },
       logVerboseMessage: vi.fn(),
       deliverPayload: deliverFinal,
     });
@@ -346,10 +353,9 @@ describe("createMattermostProgressReceipt", () => {
       info: { kind: "final" },
       kind: "channel",
       client: createMattermostClientMock(),
-      draftStream,
+      previewLifecycle: createPreviewLifecycle(draftStream),
       // No draft post to edit and deliverPayload reports a suppressed/empty send.
       resolvePreviewFinalText: () => undefined,
-      previewState: { finalizedViaPreviewPost: false },
       logVerboseMessage: vi.fn(),
       deliverPayload: vi.fn(async () => ({
         outcome: "empty" as const,

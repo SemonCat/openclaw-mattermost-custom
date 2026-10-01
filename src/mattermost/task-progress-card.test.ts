@@ -114,7 +114,9 @@ describe("Mattermost durable task progress card", () => {
     await Promise.all([slowUpdate, newestUpdate, duplicateUpdate]);
 
     const createCalls = request.mock.calls.filter(([path]) => path === "/posts");
-    const updateCalls = request.mock.calls.filter(([path]) => path === "/posts/task-card-1");
+    const updateCalls = request.mock.calls.filter(
+      ([path]) => path === "/posts/task-card-1/patch",
+    );
     expect(createCalls).toHaveLength(1);
     expect(readBody(createCalls[0]?.[1])).toMatchObject({
       channel_id: "channel-1",
@@ -301,7 +303,7 @@ describe("Mattermost durable task progress card", () => {
         }),
       }),
       expect.objectContaining({
-        path: "/posts/first-result-post",
+        path: "/posts/first-result-post/patch",
         body: expect.objectContaining({
           message: expect.stringContaining("Task progress · In progress"),
           props: expect.objectContaining({
@@ -310,11 +312,11 @@ describe("Mattermost durable task progress card", () => {
         }),
       }),
       expect.objectContaining({
-        path: "/posts/continuing-result-post",
+        path: "/posts/continuing-result-post/patch",
         body: expect.objectContaining({ message: "Continuing tool progress" }),
       }),
       expect.objectContaining({
-        path: "/posts/first-result-post",
+        path: "/posts/first-result-post/patch",
         body: expect.objectContaining({
           message: expect.stringContaining("Task progress · Incomplete"),
         }),

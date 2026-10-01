@@ -164,6 +164,7 @@ describe("mattermost channel message adapter", () => {
   it("forwards durable text identity and dispatch hooks to Mattermost", async () => {
     const sendText = requireTextSender(requireMattermostMessageAdapter());
     const onPlatformSendDispatch = vi.fn(async () => {});
+    const assertDirectAdapterHandoff = vi.fn();
 
     await sendText({
       cfg: {},
@@ -173,6 +174,7 @@ describe("mattermost channel message adapter", () => {
       deliveryQueueId: "queue-1",
       deliveryPartIndex: 1,
       deliveryPartCount: 2,
+      assertDirectAdapterHandoff,
       onPlatformSendDispatch,
     });
 
@@ -183,6 +185,7 @@ describe("mattermost channel message adapter", () => {
         deliveryQueueId: "queue-1",
         deliveryPartIndex: 1,
         deliveryPartCount: 2,
+        assertDirectAdapterHandoff,
         onPlatformSendDispatch,
       }),
     );

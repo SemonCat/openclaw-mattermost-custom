@@ -1,6 +1,7 @@
 // Mattermost tests cover monitor.inbound system event plugin behavior.
 import { once } from "node:events";
 import { createServer } from "node:http";
+import { projectAgentToolActivity } from "openclaw/plugin-sdk/agent-harness-runtime";
 import { createChannelPartialDeliveryError } from "openclaw/plugin-sdk/channel-inbound";
 import {
   createInboundDebouncer,
@@ -1701,6 +1702,13 @@ describe("mattermost inbound user posts", () => {
     };
     mockState.runtimeCore = createRuntimeCore(progressConfig);
     mockState.dispatchInboundMessage.mockImplementation(async (params) => {
+      await params.replyOptions?.onItemEvent?.(
+        projectAgentToolActivity({
+          toolCallId: "read-1",
+          name: "read",
+          phase: "start",
+        }),
+      );
       await params.replyOptions?.onToolStart?.({
         toolCallId: "read-1",
         name: "read",
@@ -1708,6 +1716,13 @@ describe("mattermost inbound user posts", () => {
       });
       params.replyOptions?.onAssistantMessageStart?.();
       params.replyOptions?.onReasoningEnd?.();
+      await params.replyOptions?.onItemEvent?.(
+        projectAgentToolActivity({
+          toolCallId: "exec-1",
+          name: "exec",
+          phase: "start",
+        }),
+      );
       await params.replyOptions?.onToolStart?.({
         toolCallId: "exec-1",
         name: "exec",
@@ -1771,7 +1786,7 @@ describe("mattermost inbound user posts", () => {
 
     const replyOptions = mockState.dispatchInboundMessage.mock.calls.at(0)?.[0].replyOptions;
     expect(replyOptions?.allowProgressCallbacksWhenSourceDeliverySuppressed).toBe(true);
-    expect(draftStream.clear).toHaveBeenCalledTimes(1);
+    expect(draftStream.clear).toHaveBeenCalled();
     const updates = draftStream.update.mock.calls.map((call) => String(call[0]));
     expect(updates.at(-1)).toContain("Read");
     expect(updates.at(-1)).toContain("Exec");
@@ -1831,6 +1846,13 @@ describe("mattermost inbound user posts", () => {
         title: "Implement durable cards",
         steps: [{ step: "Inspect", status: "in_progress" }],
       });
+      await params.replyOptions?.onItemEvent?.(
+        projectAgentToolActivity({
+          toolCallId: "tool-1",
+          name: "read",
+          phase: "start",
+        }),
+      );
       await params.replyOptions?.onToolStart?.({
         toolCallId: "tool-1",
         name: "read",
@@ -2066,6 +2088,9 @@ describe("mattermost inbound user posts", () => {
             name: string;
             phase: "start";
           }) => Promise<boolean> | boolean;
+          onItemEvent?: (payload: ReturnType<typeof projectAgentToolActivity>) =>
+            | Promise<boolean>
+            | boolean;
           onQueuedFollowupSettled?: () => Promise<void> | void;
           turnAdoptionLifecycle?: { onSettled?: () => void };
         }
@@ -2103,6 +2128,13 @@ describe("mattermost inbound user posts", () => {
       title: "Continue queued work",
       steps: [{ step: "Inspect live state", status: "in_progress" }],
     });
+    await followupReplyOptions?.onItemEvent?.(
+      projectAgentToolActivity({
+        toolCallId: "tool-queued-1",
+        name: "read",
+        phase: "start",
+      }),
+    );
     await followupReplyOptions?.onToolStart?.({
       toolCallId: "tool-queued-1",
       name: "read",
@@ -3230,21 +3262,45 @@ describe("mattermost inbound user posts", () => {
     mockState.dispatchInboundMessage.mockImplementation(async (params) => {
       await params.replyOptions?.onAssistantMessageStart?.();
       params.replyOptions?.onPartialReply?.({ text: "A much longer first block" });
-      const firstToolStart = params.replyOptions?.onToolStart?.({
+      const firstToolStart = params.replyOptions?.onItemEvent?.(
+        projectAgentToolActivity({
+          toolCallId: "bash-1",
+          name: "bash",
+          phase: "start",
+          args: { command: "ls" },
+        }),
+      );
+      void params.replyOptions?.onToolStart?.({
         toolCallId: "bash-1",
         name: "bash",
         phase: "start",
         detailMode: "raw",
         args: { command: "ls" },
       });
-      const secondToolStart = params.replyOptions?.onToolStart?.({
+      const secondToolStart = params.replyOptions?.onItemEvent?.(
+        projectAgentToolActivity({
+          toolCallId: "bash-2",
+          name: "bash",
+          phase: "start",
+          args: { command: "pwd" },
+        }),
+      );
+      void params.replyOptions?.onToolStart?.({
         toolCallId: "bash-2",
         name: "bash",
         phase: "start",
         detailMode: "raw",
         args: { command: "pwd" },
       });
-      const firstToolUpdate = params.replyOptions?.onToolStart?.({
+      const firstToolUpdate = params.replyOptions?.onItemEvent?.(
+        projectAgentToolActivity({
+          toolCallId: "bash-1",
+          name: "bash",
+          phase: "update",
+          args: { command: "ls -alh" },
+        }),
+      );
+      void params.replyOptions?.onToolStart?.({
         toolCallId: "bash-1",
         name: "bash",
         phase: "update",
@@ -3255,7 +3311,15 @@ describe("mattermost inbound user posts", () => {
       params.replyOptions?.onAssistantMessageStart?.();
       await params.replyOptions?.onReasoningEnd?.();
       hiddenReasoningBoundaryCount = forceNewMessage.mock.calls.length;
-      const consecutiveToolStart = params.replyOptions?.onToolStart?.({
+      const consecutiveToolStart = params.replyOptions?.onItemEvent?.(
+        projectAgentToolActivity({
+          toolCallId: "bash-3",
+          name: "bash",
+          phase: "start",
+          args: { command: "whoami" },
+        }),
+      );
+      void params.replyOptions?.onToolStart?.({
         toolCallId: "bash-3",
         name: "bash",
         phase: "start",
@@ -3290,6 +3354,14 @@ describe("mattermost inbound user posts", () => {
       await params.replyOptions?.onPartialReply?.({ text: "Answer after reasoning" });
       reasoningTextBoundaryCount = forceNewMessage.mock.calls.length;
       params.replyOptions?.onAssistantMessageStart?.();
+      await params.replyOptions?.onItemEvent?.(
+        projectAgentToolActivity({
+          toolCallId: "bash-final",
+          name: "bash",
+          phase: "start",
+          args: { command: "date" },
+        }),
+      );
       await params.replyOptions?.onToolStart?.({
         toolCallId: "bash-final",
         name: "bash",

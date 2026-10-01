@@ -10,6 +10,7 @@ import {
   normalizeTrimmedStringList,
   uniqueStrings,
 } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { resolvePromptHistoryLimit } from "openclaw/plugin-sdk/number-runtime";
 import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
 import type { MattermostPost } from "./client.js";
 import { waitForMattermostChannelModelTransition } from "./channel-model-transition.js";
@@ -57,9 +58,9 @@ export function resolveMattermostHistoryLimit(params: {
   accountHistoryLimit?: number;
   globalHistoryLimit?: number;
 }): number {
-  return Math.max(
-    0,
-    params.accountHistoryLimit ?? params.globalHistoryLimit ?? DEFAULT_GROUP_HISTORY_LIMIT,
+  return resolvePromptHistoryLimit(
+    params.accountHistoryLimit ?? params.globalHistoryLimit,
+    DEFAULT_GROUP_HISTORY_LIMIT,
   );
 }
 
