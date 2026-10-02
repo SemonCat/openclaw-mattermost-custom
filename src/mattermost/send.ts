@@ -676,7 +676,7 @@ export async function sendMessageMattermost(
     registerMattermostQuestionDelivery({
       accountId,
       client,
-      post,
+      post: post.props == null && props ? { ...post, props } : post,
       questionId: opts.questionId,
     });
   } catch {
