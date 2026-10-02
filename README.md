@@ -117,10 +117,14 @@ plugin. Each gate can still be disabled globally or per account:
 `messages` remains opt-in for channel reads, `reactions` enables add/remove/list,
 and the three mutation gates can be overridden per account.
 
-Interactive buttons use native Mattermost Blocks by default. Set
-`channels.mattermost.interactions.blocks: false` to force legacy attachments.
-An explicit HTTP 400 rejection falls back once to legacy attachments; transport
-failures are not retried because the first post may already have been accepted.
+Interactive buttons automatically use native Mattermost Blocks on Mattermost
+11.10 and newer, based on the server's `X-Version-ID` response header. Older
+servers use legacy interactive attachments because they may accept `mm_blocks`
+props without rendering them. Set `channels.mattermost.interactions.blocks` to
+`true` or `false` to override detection. If the version cannot be determined,
+the existing Blocks default is preserved. An explicit HTTP 400 rejection falls
+back once to legacy attachments; transport failures are not retried because the
+first post may already have been accepted.
 
 Native approval cards enable automatically when a stable 26-character
 Mattermost user id is available in `execApprovals.approvers`, `allowFrom`, or

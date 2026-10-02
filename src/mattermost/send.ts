@@ -25,6 +25,10 @@ import { getMattermostRuntime } from "../runtime.js";
 import { resolveMattermostAccount } from "./accounts.js";
 import { createMattermostPostWithButtonFallback } from "./button-delivery.js";
 import {
+  detectMattermostBlocksSupport,
+  resolveMattermostButtonFormat,
+} from "./capabilities.js";
+import {
   createMattermostClient,
   createMattermostDirectChannelWithRetry,
   fetchMattermostChannelByName,
@@ -533,7 +537,15 @@ export async function sendMessageMattermost(
   if (!props && Array.isArray(opts.buttons) && opts.buttons.length > 0) {
     setInteractionSecret(accountId, client.token);
     const interactions = resolveMattermostAccount({ cfg, accountId }).config?.interactions;
-    const useBlocks = interactions?.blocks ?? true;
+    const detectedBlocksSupport =
+      interactions?.blocks === undefined
+        ? await detectMattermostBlocksSupport(client)
+        : undefined;
+    const buttonFormat = resolveMattermostButtonFormat(
+      interactions?.blocks,
+      detectedBlocksSupport,
+    );
+    const useBlocks = buttonFormat === "blocks";
     const callbackUrl = resolveInteractionCallbackUrl(accountId, {
       gateway: cfg.gateway,
       interactions,

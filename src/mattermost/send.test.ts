@@ -34,6 +34,7 @@ const mockState = vi.hoisted(() => ({
   createMattermostClient: vi.fn(),
   createMattermostDirectChannelWithRetry: vi.fn(),
   createMattermostPost: vi.fn(),
+  detectMattermostBlocksSupport: vi.fn(),
   fetchMattermostChannelByName: vi.fn(),
   fetchMattermostChannelPostsSince: vi.fn(),
   fetchMattermostMe: vi.fn(),
@@ -197,6 +198,11 @@ vi.mock("./question-finalization.js", () => ({
   registerMattermostQuestionDelivery: mockState.registerMattermostQuestionDelivery,
 }));
 
+vi.mock("./capabilities.js", async () => ({
+  ...(await vi.importActual<typeof import("./capabilities.js")>("./capabilities.js")),
+  detectMattermostBlocksSupport: mockState.detectMattermostBlocksSupport,
+}));
+
 vi.mock("./client.js", async () => ({
   parseMattermostApiStatus: (await vi.importActual<typeof import("./client.js")>("./client.js"))
     .parseMattermostApiStatus,
@@ -251,6 +257,8 @@ describe("sendMessageMattermost", () => {
     mockState.createMattermostClient.mockReset();
     mockState.createMattermostDirectChannelWithRetry.mockReset();
     mockState.createMattermostPost.mockReset();
+    mockState.detectMattermostBlocksSupport.mockReset();
+    mockState.detectMattermostBlocksSupport.mockResolvedValue(true);
     mockState.fetchMattermostChannelByName.mockReset();
     mockState.fetchMattermostChannelPostsSince.mockReset();
     mockState.fetchMattermostMe.mockReset();
@@ -719,7 +727,7 @@ describe("sendMessageMattermost", () => {
     expect(mockState.createMattermostPost).not.toHaveBeenCalled();
   });
 
-  it("uses native Mattermost Blocks by default", async () => {
+  it("uses native Mattermost Blocks when the detected server version supports them", async () => {
     mockState.resolveMattermostAccount.mockReturnValue({
       accountId: "default",
       botToken: "bot-token",
@@ -744,6 +752,25 @@ describe("sendMessageMattermost", () => {
     expect(postCall?.[1]?.props?.attachments).toBeUndefined();
   });
 
+  it("uses legacy attachments when the detected server predates Mattermost Blocks", async () => {
+    mockState.resolveMattermostAccount.mockReturnValue({
+      accountId: "default",
+      botToken: "bot-token",
+      baseUrl: "https://mattermost.example.com",
+      config: {},
+    });
+    mockState.detectMattermostBlocksSupport.mockResolvedValueOnce(false);
+
+    await sendMessageMattermost("channel:town-square", "Pick a model", {
+      cfg: TEST_CFG,
+      buttons: [[{ callback_data: "mdlprov", text: "Browse providers" }]],
+    });
+
+    const props = createMattermostPostParams().props;
+    expect(props?.attachments).toBeDefined();
+    expect(props?.mm_blocks).toBeUndefined();
+  });
+
   it("uses legacy Mattermost attachments when Blocks are explicitly disabled", async () => {
     mockState.resolveMattermostAccount.mockReturnValue({
       accountId: "default",
@@ -765,6 +792,7 @@ describe("sendMessageMattermost", () => {
     expect(actions?.[0]?.id).toBe("mdlprov");
     expect(actions?.[0]?.name).toBe("Browse providers");
     expect(props?.mm_blocks).toBeUndefined();
+    expect(mockState.detectMattermostBlocksSupport).not.toHaveBeenCalled();
   });
 
   it("falls back to legacy buttons only after an explicit Blocks rejection", async () => {
