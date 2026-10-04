@@ -59,13 +59,17 @@ import {
   createMattermostTranscriptUsageAccumulator,
   type MattermostSessionTranscriptUpdate,
 } from "./transcript-usage.js";
-import { createMattermostTaskProgressCard } from "./task-progress-card.js";
+import {
+  createMattermostTaskProgressCard,
+  type MattermostVisibleWorkSession,
+} from "./task-progress-card.js";
 
 type MattermostAgentEventRuntime = {
   events?: {
     onAgentEvent?: (
       listener: (event: {
         runId?: string;
+        sessionKey?: string;
         stream: string;
         data: Record<string, unknown>;
       }) => void,
@@ -97,6 +101,23 @@ type MattermostReplyDispatchResult = {
   observedReplyDelivery?: boolean;
   deferredToActiveRun?: "steer" | "followup";
 };
+
+function readVisibleWorkSessionStatus(
+  value: unknown,
+): MattermostVisibleWorkSession["status"] {
+  switch (value) {
+    case "queued":
+    case "running":
+    case "done":
+    case "failed":
+    case "interrupted":
+    case "killed":
+    case "timeout":
+      return value;
+    default:
+      return undefined;
+  }
+}
 
 function createDisabledMattermostDraftStream(): ReturnType<typeof createMattermostDraftStream> {
   const noopAsync = async () => {};
@@ -185,6 +206,13 @@ export async function dispatchMattermostInboundTurn(
   const suppressDefaultToolProgressMessages =
     draftPreviewEnabled && shouldSuppressMattermostDefaultToolProgressMessages(account);
   let claimResultPost: (() => Promise<string | undefined>) | undefined;
+  let unsubscribeAgentEvents: (() => void) | undefined;
+  let agentEventsShouldStop = false;
+  const stopAgentEvents = () => {
+    agentEventsShouldStop = true;
+    unsubscribeAgentEvents?.();
+    unsubscribeAgentEvents = undefined;
+  };
   const taskProgressCard = createMattermostTaskProgressCard({
     client,
     channelId,
@@ -196,6 +224,7 @@ export async function dispatchMattermostInboundTurn(
       ...(effectiveReplyToId ? { threadId: effectiveReplyToId } : {}),
     }),
     claimResultPost: async () => await claimResultPost?.(),
+    onSettled: stopAgentEvents,
     log: monitor.logVerboseMessage,
   });
   const draftStream = draftPreviewEnabled
@@ -260,10 +289,11 @@ export async function dispatchMattermostInboundTurn(
       progressReceipt.noteTranscriptUsage(usage);
     },
   });
-  const unsubscribeUsageEvents =
+  let usageEventsActive = true;
+  unsubscribeAgentEvents =
     eventRuntime.events?.onAgentEvent?.((evt) => {
       taskProgressCard.noteAgentEvent(evt);
-      if (evt.stream !== "usage") {
+      if (!usageEventsActive || evt.stream !== "usage") {
         return;
       }
       if (typeof evt.runId === "string") {
@@ -275,6 +305,9 @@ export async function dispatchMattermostInboundTurn(
         });
       }
     }) ?? (() => {});
+  if (agentEventsShouldStop) {
+    stopAgentEvents();
+  }
   const unsubscribeTranscriptUpdates =
     eventRuntime.events?.onSessionTranscriptUpdate?.(transcriptUsage.onUpdate) ?? (() => {});
   const enterBlockPreviewActivity = (activity: "reasoning" | "text" | "tool") => {
@@ -620,6 +653,7 @@ export async function dispatchMattermostInboundTurn(
     sessionKey: route.sessionKey,
   });
 
+  const turnStartedAt = Date.now();
   let dispatchError = false;
   let turnResult: Awaited<ReturnType<typeof core.channel.inbound.run>> | undefined;
   let presentationCleanupStarted = false;
@@ -640,11 +674,42 @@ export async function dispatchMattermostInboundTurn(
     await previewLifecycle.cleanup({
       failed: dispatchError || finalDeliveryFailed || queuedFollowupDeliveryError,
     });
+    try {
+      const directChildSessions = core.agent.session
+        .listSessionEntries({
+          agentId: route.agentId,
+          readOnly: true,
+        })
+        .flatMap(({ sessionKey, entry }) => {
+          if (
+            entry.spawnedBy !== thread.sessionKey ||
+            typeof entry.createdAt !== "number" ||
+            entry.createdAt < turnStartedAt
+          ) {
+            return [];
+          }
+          return [
+            {
+              sessionKey,
+              label: typeof entry.label === "string" ? entry.label : undefined,
+              runId: entry.lastRunId,
+              status: readVisibleWorkSessionStatus(entry.status),
+            } satisfies MattermostVisibleWorkSession,
+          ];
+        });
+      if (directChildSessions.length > 0) {
+        await taskProgressCard.noteVisibleWorkSessions(directChildSessions);
+      }
+    } catch (error: unknown) {
+      monitor.logVerboseMessage(
+        `mattermost hidden work session discovery failed parent=${thread.sessionKey}: ${String(error)}`,
+      );
+    }
     await taskProgressCard.finish({
       outcome: readAgentRunTerminalOutcome(dispatchResult),
       deliveryFailed: dispatchError || finalDeliveryFailed || queuedFollowupDeliveryError,
     });
-    unsubscribeUsageEvents();
+    usageEventsActive = false;
     unsubscribeTranscriptUpdates();
     await reactions.finish({
       dispatchError: dispatchError || finalDeliveryFailed || queuedFollowupDeliveryError,
@@ -745,6 +810,34 @@ export async function dispatchMattermostInboundTurn(
                 onAgentRunStart: (runId) => {
                   progressReceipt.noteRunStart(runId);
                   taskProgressCard.noteRunStart(runId);
+                },
+                onVisibleWorkSessions: (sessions) => {
+                  const visibleWorkSessions = sessions.map((session) => {
+                    let entry:
+                      | { lastRunId?: string; status?: unknown }
+                      | undefined;
+                    try {
+                      entry = core.agent.session.getSessionEntry({
+                        sessionKey: session.sessionKey,
+                      });
+                    } catch (error: unknown) {
+                      monitor.logVerboseMessage(
+                        `mattermost work session state read failed session=${session.sessionKey}: ${String(error)}`,
+                      );
+                    }
+                    return {
+                      ...session,
+                      runId: entry?.lastRunId,
+                      status: readVisibleWorkSessionStatus(entry?.status),
+                    } satisfies MattermostVisibleWorkSession;
+                  });
+                  void taskProgressCard
+                    .noteVisibleWorkSessions(visibleWorkSessions)
+                    .catch((error: unknown) => {
+                      monitor.logVerboseMessage(
+                        `mattermost work session card callback failed: ${String(error)}`,
+                      );
+                    });
                 },
                 onModelSelected,
                 onPlanUpdate: async (planUpdate) => {

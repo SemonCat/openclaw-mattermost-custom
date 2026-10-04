@@ -541,4 +541,45 @@ describe("mattermost monitor resources", () => {
       parentId: "root-1",
     });
   });
+
+  it("validates and caches post lookups used for reaction thread routing", async () => {
+    const request = vi.fn(async () => ({ id: "post-1", root_id: "root-1" }));
+    const resources = createMattermostMonitorResources({
+      accountId: "default",
+      callbackUrl: "https://openclaw.test/callback",
+      client: { request } as never,
+      logger: {},
+      mediaMaxBytes: 1024,
+      saveRemoteMedia: vi.fn(),
+      mediaKindFromMime: () => "document",
+    });
+
+    await expect(resources.resolvePostInfo("post-1")).resolves.toMatchObject({
+      id: "post-1",
+      root_id: "root-1",
+    });
+    await expect(resources.resolvePostInfo("post-1")).resolves.toMatchObject({ id: "post-1" });
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledWith("/posts/post-1");
+  });
+
+  it("rejects mismatched post identities without caching the failure", async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce({ id: "different-post" })
+      .mockResolvedValueOnce({ id: "post-1", root_id: "root-1" });
+    const resources = createMattermostMonitorResources({
+      accountId: "default",
+      callbackUrl: "https://openclaw.test/callback",
+      client: { request } as never,
+      logger: {},
+      mediaMaxBytes: 1024,
+      saveRemoteMedia: vi.fn(),
+      mediaKindFromMime: () => "document",
+    });
+
+    await expect(resources.resolvePostInfo("post-1")).resolves.toBeNull();
+    await expect(resources.resolvePostInfo("post-1")).resolves.toMatchObject({ id: "post-1" });
+    expect(request).toHaveBeenCalledTimes(2);
+  });
 });

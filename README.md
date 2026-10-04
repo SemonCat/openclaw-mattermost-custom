@@ -41,7 +41,7 @@ mkdir -p /tmp/openclaw/mattermost-custom
 npm run build
 npm pack --omit=dev --pack-destination /tmp/openclaw/mattermost-custom
 openclaw plugins install \
-  /tmp/openclaw/mattermost-custom/openclaw-mattermost-custom-2026.9.6.tgz --force
+  /tmp/openclaw/mattermost-custom/openclaw-mattermost-custom-2026.9.8.tgz --force
 ```
 
 Do not use `plugins install --link` or add this source checkout to
@@ -84,7 +84,8 @@ Compared with the official plugin, this build preserves:
 - Message edit, delete, and pin actions enabled by default, plus reaction reads.
 - Owner-only `/move_thread #channel` verified copy-then-delete moves without the
   licensed Mattermost move endpoint.
-- Durable plan-backed task progress cards that remain after the final answer.
+- Durable plan-backed task progress cards that remain after the final answer and
+  continuously update linked child work-session progress until those subtasks settle.
 - Native exec, plugin, and system-agent approval cards with canonical Gateway resolution.
 - Native secret-entry dialogs that submit password fields directly to OpenClaw's protected store.
 - Native `ask_user` option buttons that resolve the original Gateway question without a second agent turn.
@@ -92,6 +93,7 @@ Compared with the official plugin, this build preserves:
 - Bounded Mattermost thread-history recovery after Gateway restart or session reset.
 - The Mattermost slash-trigger length cap fix.
 - Mention-prefixed text commands such as `@bot /new`, without debounce or prose misrouting.
+- Configurable mention gating for threads rooted in the receiving bot's own posts.
 - Immediate recovery from transient channel/user lookup failures instead of negative caching.
 - Live `messages.inbound` debounce updates without replacing the Mattermost connection.
 
@@ -116,6 +118,17 @@ plugin. Each gate can still be disabled globally or per account:
 
 `messages` remains opt-in for channel reads, `reactions` enables add/remove/list,
 and the three mutation gates can be overridden per account.
+
+Set `channels.mattermost.requireMentionInBotThreads: false` to accept unmentioned
+follow-ups in threads whose root post was sent by the receiving bot. Set it to
+`true` to require explicit activation there even after the bot has participated.
+Omitting it preserves the existing mention and participation behavior.
+
+Account settings override the channel-wide value. For an individual channel,
+`groups.<channelId>.requireMentionInBotThreads` overrides
+`groups["*"].requireMentionInBotThreads`, then the account value. Unavailable,
+deleted, cross-channel, or non-root posts retain the existing mention behavior;
+sender and channel access restrictions still apply.
 
 Interactive buttons automatically use native Mattermost Blocks on Mattermost
 11.10 and newer, based on the server's `X-Version-ID` response header. Older
@@ -240,8 +253,8 @@ queue under the OpenClaw state directory before dispatch. The separate spool is
 required because beta.2 reserves the host channel-ingress queue for trusted
 official plugins. Uncompleted posts can still be reclaimed after a Gateway
 restart, and debounce/adoption lifecycle settlement keeps retry and dead-letter
-handling bounded. Thread participation remains process-local, so its seven-day
-mention-bypass window resets when the Gateway restarts.
+handling bounded. The seven-day thread-participation mention-bypass window is
+persisted across Gateway restarts.
 
 ## Package build
 
@@ -281,7 +294,7 @@ shared Mattermost contract tests and the downstream behavior tests.
 ### Test status against the published npm SDK
 
 This repo builds and tests against the published `openclaw` npm package
-(`2026.9.6`), not the OpenClaw monorepo checkout. One category of tests
+(`2026.9.8`), not the OpenClaw monorepo checkout. One category of tests
 behaves differently from the monorepo for that reason:
 
 - Ten suites import test-only Plugin SDK subpaths (`channel-test-helpers`,

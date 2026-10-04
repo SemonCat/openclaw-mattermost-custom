@@ -104,6 +104,7 @@ describe("createMattermostMessageReactionRuntime", () => {
       expect(params.request).toHaveBeenCalledExactlyOnceWith("/reactions", {
         method: "POST",
         body: JSON.stringify({ user_id: "bot-1", post_id: "post-1", emoji_name: "eyes" }),
+        discardResponse: true,
       });
     });
 
@@ -133,6 +134,7 @@ describe("createMattermostMessageReactionRuntime", () => {
       expect(params.request).toHaveBeenCalledExactlyOnceWith("/reactions", {
         method: "POST",
         body: JSON.stringify({ user_id: "bot-1", post_id: "post-1", emoji_name: "eyes" }),
+        discardResponse: true,
       });
 
       await runtime.controller.setTool("bash");

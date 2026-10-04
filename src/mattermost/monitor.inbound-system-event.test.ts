@@ -158,6 +158,8 @@ const mockState = vi.hoisted(() => ({
   enqueueSystemEvent: vi.fn(),
   fetchMattermostMe: vi.fn(),
   fetchMattermostPost: vi.fn(),
+  getSessionEntry: vi.fn(),
+  listSessionEntries: vi.fn(),
   getGlobalHookRunner: vi.fn(),
   hasMattermostThreadParticipation: vi.fn(),
   ingressOnDeferredHeartbeat: vi.fn(),
@@ -501,6 +503,12 @@ function createRuntimeCore(
     },
   );
   return {
+    agent: {
+      session: {
+        getSessionEntry: mockState.getSessionEntry,
+        listSessionEntries: mockState.listSessionEntries,
+      },
+    },
     config: {
       current: () => cfg,
     },
@@ -698,6 +706,8 @@ describe("mattermost inbound user posts", () => {
     mockState.progressDrafts.length = 0;
     mockState.sessionTranscriptListeners.length = 0;
     mockState.getGlobalHookRunner.mockReturnValue(null);
+    mockState.getSessionEntry.mockReturnValue(undefined);
+    mockState.listSessionEntries.mockReturnValue([]);
     mockState.hasMattermostThreadParticipation.mockResolvedValue(false);
     mockState.runtimeCore = createRuntimeCore(testConfig);
     mockState.createMattermostClient.mockReturnValue({});
@@ -1940,6 +1950,210 @@ describe("mattermost inbound user posts", () => {
     expect(mockState.createMattermostPost.mock.invocationCallOrder[0]).toBeLessThan(
       mockState.sendMessageMattermost.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
     );
+  });
+
+  it("keeps the task card subscribed until a visible child work session settles", async () => {
+    const socket = new FakeWebSocket();
+    const abortController = new AbortController();
+    mockState.abortController = abortController;
+    mockState.getSessionEntry.mockReturnValue({
+      lastRunId: "child-run-1",
+      status: "running",
+    });
+    mockState.dispatchInboundMessage.mockImplementation(async (params) => {
+      params.replyOptions?.onAgentRunStart?.("parent-run-1");
+      await params.replyOptions?.onPlanUpdate?.({
+        title: "Parallel investigation",
+        steps: [{ step: "Delegate focused check", status: "completed" }],
+      });
+      params.replyOptions?.onVisibleWorkSessions?.([
+        {
+          sessionKey: "agent:main:subagent:child-one",
+          url: "https://control.example.com/sessions/child-one",
+          label: "Inspect upstream",
+        },
+      ]);
+      return withAgentRunTerminalOutcome({ counts: {} }, "completed");
+    });
+
+    const monitor = monitorMattermostProvider({
+      config: testConfig,
+      runtime: testRuntime(),
+      abortSignal: abortController.signal,
+      webSocketFactory: () => socket,
+    });
+    await vi.waitFor(() => expect(socket.openListenerCount).toBeGreaterThan(0));
+    socket.emitOpen();
+    const baselineAgentEventListenerCount = mockState.agentEventListeners.length;
+    await emitMattermostChannelPost(socket, {
+      id: "post-visible-work-session",
+      rootId: "thread-visible-work-session",
+      message: "investigate in parallel",
+    });
+
+    await vi.waitFor(() => {
+      expect(String(mockState.updateMattermostPost.mock.calls.at(-1)?.[2].message)).toContain(
+        "[Inspect upstream](https://control.example.com/sessions/child-one) · Running",
+      );
+    });
+    expect(mockState.agentEventListeners).toHaveLength(baselineAgentEventListenerCount + 1);
+    expect(mockState.sessionTranscriptListeners).toHaveLength(0);
+
+    for (const listener of [...mockState.agentEventListeners]) {
+      listener({
+        runId: "child-run-1",
+        sessionKey: "agent:main:subagent:child-one",
+        stream: "item",
+        data: {
+          phase: "update",
+          kind: "tool",
+          title: "Comparing callback order",
+          status: "running",
+        },
+      });
+    }
+    await vi.waitFor(() => {
+      expect(String(mockState.updateMattermostPost.mock.calls.at(-1)?.[2].message)).toContain(
+        "Comparing callback order",
+      );
+    });
+
+    for (const listener of [...mockState.agentEventListeners]) {
+      listener({
+        runId: "child-run-1",
+        sessionKey: "agent:main:subagent:child-one",
+        stream: "lifecycle",
+        data: { phase: "end" },
+      });
+    }
+    await vi.waitFor(() => {
+      expect(String(mockState.updateMattermostPost.mock.calls.at(-1)?.[2].message)).toContain(
+        "Task progress · Completed",
+      );
+      expect(mockState.agentEventListeners).toHaveLength(baselineAgentEventListenerCount);
+    });
+
+    expect(mockState.getSessionEntry).toHaveBeenCalledWith({
+      sessionKey: "agent:main:subagent:child-one",
+    });
+    expect(mockState.updateMattermostPost.mock.calls.at(-1)?.[1]).toBe("task-card-post");
+    expect(String(mockState.updateMattermostPost.mock.calls.at(-1)?.[2].message)).toContain(
+      "- [x] [Inspect upstream](https://control.example.com/sessions/child-one) · Completed",
+    );
+
+    abortController.abort();
+    socket.emitClose(1000);
+    await monitor;
+  });
+
+  it("discovers a hidden child session from this turn and keeps the task card live", async () => {
+    const socket = new FakeWebSocket();
+    const abortController = new AbortController();
+    mockState.abortController = abortController;
+    mockState.listSessionEntries.mockReturnValue([
+      {
+        sessionKey: "agent:main:subagent:hidden-child",
+        entry: {
+          spawnedBy:
+            "mattermost:default:channel:chan-1:thread:thread-hidden-work-session",
+          createdAt: Number.MAX_SAFE_INTEGER,
+          label: "Context Mode source comparison",
+          lastRunId: "hidden-child-run",
+          status: "running",
+        },
+      },
+      {
+        sessionKey: "agent:main:subagent:old-child",
+        entry: {
+          spawnedBy:
+            "mattermost:default:channel:chan-1:thread:thread-hidden-work-session",
+          createdAt: 1,
+          label: "Old investigation",
+          status: "running",
+        },
+      },
+      {
+        sessionKey: "agent:main:subagent:other-parent",
+        entry: {
+          spawnedBy: "agent:main:another-thread",
+          createdAt: Number.MAX_SAFE_INTEGER,
+          label: "Unrelated investigation",
+          status: "running",
+        },
+      },
+    ]);
+    mockState.dispatchInboundMessage.mockImplementation(async (params) => {
+      params.replyOptions?.onAgentRunStart?.("parent-run-hidden-child");
+      await params.replyOptions?.onPlanUpdate?.({
+        title: "Compare context modes",
+        steps: [{ step: "Delegate source comparison", status: "completed" }],
+      });
+      return withAgentRunTerminalOutcome({ counts: {} }, "completed");
+    });
+
+    const monitor = monitorMattermostProvider({
+      config: testConfig,
+      runtime: testRuntime(),
+      abortSignal: abortController.signal,
+      webSocketFactory: () => socket,
+    });
+    await vi.waitFor(() => expect(socket.openListenerCount).toBeGreaterThan(0));
+    socket.emitOpen();
+    const baselineAgentEventListenerCount = mockState.agentEventListeners.length;
+    await emitMattermostChannelPost(socket, {
+      id: "post-hidden-work-session",
+      rootId: "thread-hidden-work-session",
+      message: "compare context modes",
+    });
+
+    await vi.waitFor(() => {
+      const message = String(mockState.updateMattermostPost.mock.calls.at(-1)?.[2].message);
+      expect(message).toContain("Task progress · In progress");
+      expect(message).toContain("Context Mode source comparison · Running");
+      expect(message).not.toContain("Old investigation");
+      expect(message).not.toContain("Unrelated investigation");
+    });
+    expect(mockState.agentEventListeners).toHaveLength(baselineAgentEventListenerCount + 1);
+    expect(mockState.listSessionEntries).toHaveBeenCalledWith({
+      agentId: "main",
+      readOnly: true,
+    });
+
+    for (const listener of [...mockState.agentEventListeners]) {
+      listener({
+        runId: "hidden-child-run",
+        sessionKey: "agent:main:subagent:hidden-child",
+        stream: "item",
+        data: {
+          phase: "update",
+          title: "Reviewing source differences",
+        },
+      });
+    }
+    await vi.waitFor(() => {
+      expect(String(mockState.updateMattermostPost.mock.calls.at(-1)?.[2].message)).toContain(
+        "Reviewing source differences",
+      );
+    });
+
+    for (const listener of [...mockState.agentEventListeners]) {
+      listener({
+        runId: "hidden-child-run",
+        sessionKey: "agent:main:subagent:hidden-child",
+        stream: "lifecycle",
+        data: { phase: "end" },
+      });
+    }
+    await vi.waitFor(() => {
+      const message = String(mockState.updateMattermostPost.mock.calls.at(-1)?.[2].message);
+      expect(message).toContain("Task progress · Completed");
+      expect(message).toContain("- [x] Context Mode source comparison · Completed");
+      expect(mockState.agentEventListeners).toHaveLength(baselineAgentEventListenerCount);
+    });
+
+    abortController.abort();
+    socket.emitClose(1000);
+    await monitor;
   });
 
   it("renders markdown-only native progress cards instead of an empty placeholder", async () => {

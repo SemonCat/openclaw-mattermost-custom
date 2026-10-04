@@ -46,6 +46,7 @@ describe("createMattermostStatusReactionAdapter", () => {
     expect(request).toHaveBeenCalledExactlyOnceWith("/reactions", {
       method: "POST",
       body: JSON.stringify({ user_id: "bot-1", post_id: "post-1", emoji_name: "brain" }),
+      discardResponse: true,
     });
   });
 
@@ -61,6 +62,7 @@ describe("createMattermostStatusReactionAdapter", () => {
 
     expect(request).toHaveBeenCalledExactlyOnceWith("/users/bot-1/posts/post-1/reactions/brain", {
       method: "DELETE",
+      discardResponse: true,
     });
   });
 });

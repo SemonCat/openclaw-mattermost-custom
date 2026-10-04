@@ -50,6 +50,167 @@ describe("Mattermost durable task progress card", () => {
     expect(card.postId()).toBeUndefined();
   });
 
+  it("does not create a card for visible work sessions when the turn has no plan", async () => {
+    const request = vi.fn<MattermostClient["request"]>();
+    const onSettled = vi.fn();
+    const card = createMattermostTaskProgressCard({
+      client: createTestClient(request),
+      channelId: "channel-1",
+      onSettled,
+      log: vi.fn(),
+    });
+
+    await card.noteVisibleWorkSessions([
+      {
+        sessionKey: "agent:main:subagent:one",
+        url: "https://control.example.com/sessions/one",
+        label: "Investigate",
+        status: "running",
+      },
+    ]);
+    await card.finish({ outcome: "completed" });
+
+    expect(request).not.toHaveBeenCalled();
+    expect(card.postId()).toBeUndefined();
+    expect(onSettled).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the parent card live and continuously projects child-session progress", async () => {
+    const request = vi.fn<MattermostClient["request"]>(async () => ({ id: "card" }) as never);
+    const onSettled = vi.fn();
+    const card = createMattermostTaskProgressCard({
+      client: createTestClient(request),
+      channelId: "channel-1",
+      onSettled,
+      log: vi.fn(),
+    });
+
+    await card.updatePlan({
+      title: "Investigate regression",
+      steps: [{ step: "Delegate focused checks", status: "completed" }],
+    });
+    await card.noteVisibleWorkSessions([
+      {
+        sessionKey: "agent:main:subagent:one",
+        url: "https://control.example.com/sessions/one",
+        label: "Inspect API",
+        runId: "child-run-1",
+        status: "running",
+      },
+    ]);
+    await card.finish({ outcome: "completed" });
+
+    expect(onSettled).not.toHaveBeenCalled();
+    expect(String(readBody(request.mock.calls.at(-1)?.[1]).message)).toContain(
+      "Task progress · In progress",
+    );
+    expect(String(readBody(request.mock.calls.at(-1)?.[1]).message)).toContain(
+      "[Inspect API](https://control.example.com/sessions/one) · Running",
+    );
+
+    card.noteAgentEvent({
+      runId: "child-run-1",
+      sessionKey: "agent:main:subagent:one",
+      stream: "plan",
+      data: {
+        steps: [
+          { step: "Read upstream implementation", status: "completed" },
+          { step: "Reproduce event ordering", status: "in_progress" },
+        ],
+      },
+    });
+    await vi.waitFor(() => {
+      expect(String(readBody(request.mock.calls.at(-1)?.[1]).message)).toContain(
+        "Reproduce event ordering",
+      );
+    });
+
+    card.noteAgentEvent({
+      runId: "child-run-1",
+      sessionKey: "agent:main:subagent:one",
+      stream: "item",
+      data: {
+        phase: "update",
+        kind: "tool",
+        title: "Running focused regression test",
+        status: "running",
+      },
+    });
+    await vi.waitFor(() => {
+      expect(String(readBody(request.mock.calls.at(-1)?.[1]).message)).toContain(
+        "Running focused regression test",
+      );
+    });
+
+    card.noteAgentEvent({
+      runId: "child-run-1",
+      sessionKey: "agent:main:subagent:one",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+    await vi.waitFor(() => expect(onSettled).toHaveBeenCalledOnce());
+
+    const terminalMessage = String(readBody(request.mock.calls.at(-1)?.[1]).message);
+    expect(terminalMessage).toContain("Task progress · Completed");
+    expect(terminalMessage).toContain(
+      "- [x] [Inspect API](https://control.example.com/sessions/one) · Completed",
+    );
+    expect(terminalMessage).not.toContain("Running focused regression test");
+  });
+
+  it("normalizes child state while bounding rendered work-session links", async () => {
+    const request = vi.fn<MattermostClient["request"]>(async () => ({ id: "card" }) as never);
+    const onSettled = vi.fn();
+    const card = createMattermostTaskProgressCard({
+      client: createTestClient(request),
+      channelId: "channel-1",
+      onSettled,
+      log: vi.fn(),
+    });
+    await card.updatePlan({ steps: [{ step: "Delegate", status: "completed" }] });
+
+    await card.noteVisibleWorkSessions([
+      {
+        sessionKey: "invalid",
+        url: "javascript:alert(1)",
+        label: "Invalid",
+        status: "running",
+      },
+      ...Array.from({ length: 6 }, (_, index) => ({
+        sessionKey: `child-${index + 1}`,
+        url: `https://control.example.com/sessions/${index + 1}`,
+        label: index === 0 ? "Check [API]" : `Child ${index + 1}`,
+        status:
+          index === 1
+            ? ("failed" as const)
+            : index === 5
+              ? ("running" as const)
+              : ("done" as const),
+      })),
+    ]);
+    await card.finish({ outcome: "completed" });
+
+    const runningMessage = String(readBody(request.mock.calls.at(-1)?.[1]).message);
+    expect(runningMessage).toContain("Task progress · In progress");
+    expect(runningMessage).toContain("[Check \\[API\\]](https://control.example.com/sessions/1)");
+    expect(runningMessage).toContain("[Child 5](https://control.example.com/sessions/5)");
+    expect(runningMessage).toContain("1 additional subtask tracked");
+    expect(runningMessage).not.toContain("sessions/6");
+    expect(runningMessage).not.toContain("javascript:");
+    expect(onSettled).not.toHaveBeenCalled();
+
+    card.noteAgentEvent({
+      runId: "child-run-6",
+      sessionKey: "child-6",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+    await vi.waitFor(() => expect(onSettled).toHaveBeenCalledOnce());
+    expect(String(readBody(request.mock.calls.at(-1)?.[1]).message)).toContain(
+      "Task progress · Failed",
+    );
+  });
+
   it("creates once and serializes rapid, duplicate, and slow updates onto one post", async () => {
     const firstUpdate = deferred<{ id: string }>();
     let updateCount = 0;

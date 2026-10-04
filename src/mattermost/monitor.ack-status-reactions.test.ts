@@ -571,6 +571,7 @@ describe("mattermost ack reactions", () => {
     expect(mockState.request).toHaveBeenCalledExactlyOnceWith("/reactions", {
       method: "POST",
       body: JSON.stringify({ user_id: "bot-user", post_id: "post-ack", emoji_name: "eyes" }),
+      discardResponse: true,
     });
   });
 
@@ -605,6 +606,7 @@ describe("mattermost ack reactions", () => {
         post_id: "post-record-failed",
         emoji_name: "eyes",
       }),
+      discardResponse: true,
     });
     expect(mockState.ingressOnFailed).toHaveBeenCalledWith(
       expect.objectContaining({

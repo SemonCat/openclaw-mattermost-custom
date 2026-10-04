@@ -48,15 +48,22 @@ export function createMattermostReactionHandler(monitor: MattermostMonitorContex
     }
     const eventMonitor = pinMattermostMonitorConfig(monitor);
     const { cfg } = eventMonitor;
+    const reactedPost = await resources.resolvePostInfo(postId);
     const eventPlan = await buildMattermostEventPlan(eventMonitor, {
       channelId,
       senderId: userId,
+      ...(reactedPost
+        ? {
+            postId: reactedPost.id,
+            threadRootId: normalizeOptionalString(reactedPost.root_id),
+          }
+        : {}),
       dropLabel: "reaction",
     });
     if (!eventPlan) {
       return;
     }
-    const { kind, route } = eventPlan;
+    const { kind, thread } = eventPlan;
     const reactionAccess = await resolveMattermostMonitorInboundAccess({
       account,
       cfg,
@@ -82,7 +89,7 @@ export function createMattermostReactionHandler(monitor: MattermostMonitorContex
 
     const eventText = `Mattermost reaction ${action}: :${emojiName}: by @${senderName} on post ${postId} in channel ${channelId}`;
     core.system.enqueueSystemEvent(eventText, {
-      sessionKey: route.sessionKey,
+      sessionKey: thread.sessionKey,
       contextKey: `mattermost:reaction:${postId}:${emojiName}:${userId}:${action}`,
     });
     monitor.logVerboseMessage(

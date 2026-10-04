@@ -22,10 +22,12 @@ import {
   buildMattermostApiUrl,
   fetchMattermostChannel,
   fetchMattermostUser,
+  MattermostPostSchema,
   sendMattermostTyping,
   updateMattermostPost,
   type MattermostChannel,
   type MattermostClient,
+  type MattermostPost,
   type MattermostUser,
 } from "./client.js";
 import { buildButtonProps, type MattermostInteractionResponse } from "./interactions.js";
@@ -76,6 +78,7 @@ export function formatMattermostInboundMediaText(params: {
 
 const CHANNEL_CACHE_TTL_MS = 5 * 60_000;
 const USER_CACHE_TTL_MS = 10 * 60_000;
+const POST_CACHE_TTL_MS = 5 * 60_000;
 const MONITOR_RESOURCE_CACHE_MAX_ENTRIES = 1000;
 // Match Telegram/Tlon inbound media: header wait is independent of body idle.
 const MATTERMOST_MEDIA_RESPONSE_HEADER_TIMEOUT_MS = 120_000;
@@ -113,6 +116,7 @@ export function createMattermostMonitorResources(params: {
   // callbacks, or username-allowlisted senders for the full resource TTL.
   const channelCache = new Map<string, { value: MattermostChannel; expiresAt: number }>();
   const userCache = new Map<string, { value: MattermostUser; expiresAt: number }>();
+  const postCache = new Map<string, { value: MattermostPost; expiresAt: number }>();
 
   const getCachedValue = <T>(
     cache: Map<string, { value: T; expiresAt: number }>,
@@ -247,6 +251,27 @@ export function createMattermostMonitorResources(params: {
     }
   };
 
+  const resolvePostInfo = async (postId: string): Promise<MattermostPost | null> => {
+    const rawNow = Date.now();
+    const cached = getCachedValue(postCache, postId, asDateTimestampMs(rawNow));
+    if (cached !== undefined) {
+      return cached;
+    }
+    try {
+      const info = MattermostPostSchema.parse(
+        await client.request<unknown>(`/posts/${encodeURIComponent(postId)}`),
+      );
+      if (info.id !== postId) {
+        throw new Error("Mattermost post lookup returned a different post id");
+      }
+      setCachedValue(postCache, postId, info, POST_CACHE_TTL_MS, rawNow);
+      return info;
+    } catch (err) {
+      logger.debug?.(`mattermost: post lookup failed: ${String(err)}`);
+      return null;
+    }
+  };
+
   const buildModelPickerProps = (
     channelId: string,
     buttons: Array<unknown>,
@@ -279,6 +304,7 @@ export function createMattermostMonitorResources(params: {
     sendTypingIndicator,
     resolveChannelInfo,
     resolveUserInfo,
+    resolvePostInfo,
     updateModelPickerPost,
   };
 }
