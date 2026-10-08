@@ -179,7 +179,7 @@ function describeMattermostMessageTool({
   if (hasMessageCapableAccount) {
     actions.push("read");
   }
-  if (enabledAccounts.some((account) => account.config.actions?.search ?? actionsConfig?.search ?? false)) {
+  if (enabledAccounts.some((account) => account.config.actions?.search ?? actionsConfig?.search ?? true)) {
     actions.push("search");
   }
   const hasActionCapableAccount = (key: "edit" | "delete" | "pins") =>
@@ -568,7 +568,7 @@ const mattermostMessageActions: ChannelMessageActionAdapter = {
 
     if (action === "search") {
       const { resolvedAccountId, account, channelActions } = resolveMattermostActionAccount({ cfg, accountId });
-      if (!isMattermostActionEnabled({ account, channelActions, key: "search", defaultValue: false })) {
+      if (!isMattermostActionEnabled({ account, channelActions, key: "search", defaultValue: true })) {
         throw new Error("Mattermost message search is disabled in config");
       }
       const rawTarget = readStringParam(params, "to") ?? readStringParam(params, "channelId") ??

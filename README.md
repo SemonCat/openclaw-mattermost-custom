@@ -97,8 +97,8 @@ Compared with the official plugin, this build preserves:
 - Immediate recovery from transient channel/user lookup failures instead of negative caching.
 - Live `messages.inbound` debounce updates without replacing the Mattermost connection.
 
-Mutable message-tool actions are enabled by default for this personal downstream
-plugin. Each gate can still be disabled globally or per account:
+Mutable message-tool actions and bounded search are enabled by default for this
+personal downstream plugin. Each gate can still be disabled globally or per account:
 
 ```json
 {
@@ -117,7 +117,7 @@ plugin. Each gate can still be disabled globally or per account:
 }
 ```
 
-`messages` remains opt-in for channel reads, `search` is independently opt-in,
+`messages` remains opt-in for channel reads, `search` defaults to enabled independently,
 `reactions` enables add/remove/list, and action gates can be overridden per account.
 
 Set `channels.mattermost.requireMentionInBotThreads: false` to accept unmentioned
@@ -173,10 +173,13 @@ using other tools. Existing sender and command authorization still applies.
 
 ### Bounded message search
 
-Set `channels.mattermost.actions.search: true` to expose the `search` message
-action. It defaults to `false` and does not require or enable `actions.messages`.
+The `search` message action is enabled by default. Set
+`channels.mattermost.actions.search: false` to disable it. Search does not require
+or enable `actions.messages`, which remains `false` by default.
 Per-account action settings override the channel-wide value; discovery advertises
 search when an enabled account permits it, and dispatch checks the selected account.
+Omitted per-account action fields inherit the channel-wide setting, including
+when the account has an empty `actions` object.
 
 Example action arguments (the target can be omitted when the tool supplies the
 current Mattermost channel):
@@ -219,21 +222,24 @@ as errors, rather than represented as an empty successful search.
 
 ### Referenced attachment content
 
-Referenced files stay metadata-only by default. To let an admitted inbound turn
-materialize attachment content from one same-channel reference, set:
+Admitted inbound turns materialize attachment content from one same-channel
+reference by default. To keep referenced files metadata-only, set:
 
 ```json
 {
   "channels": {
     "mattermost": {
-      "referenceMedia": { "enabled": true }
+      "referenceMedia": { "enabled": false }
     }
   }
 }
 ```
 
-Accounts inherit this setting and can override it with
-`accounts.<accountId>.referenceMedia.enabled: false`. Disabling
+Accounts inherit this setting, including when `referenceMedia` is empty or its
+`enabled` field is omitted. Set `accounts.<accountId>.referenceMedia.enabled`
+to `false` to disable it for that account, or `true` to override a global opt-out.
+Omitting the configuration object or `enabled` field defaults to enabled when
+no global setting is inherited. Disabling
 `permalinkHydration.enabled` also disables reference media. The plugin chooses
 one explicit same-instance post permalink/preview reference, otherwise the native
 thread root. It checks post identity, channel, deletion state, file ownership when

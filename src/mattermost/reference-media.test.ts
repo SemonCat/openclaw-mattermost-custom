@@ -34,7 +34,7 @@ async function setup(config: Partial<MattermostAccountConfig> = {}) {
     channels: {
       mattermost: {
         baseUrl: "https://mm.example", botToken: "fixture", enabled: true, groupPolicy: "open", historyLimit: 0,
-        requireMention: false, referenceMedia: { enabled: true }, ...config,
+        requireMention: false, ...config,
       }
     }
   } as unknown as OpenClawConfig;
@@ -74,20 +74,55 @@ async function setup(config: Partial<MattermostAccountConfig> = {}) {
 }
 
 describe("lazy authorized referenced attachment content", () => {
-  it("defaults off, validates account opt-in and honors hydration disabled", async () => {
-    for (const config of [{ referenceMedia: undefined }, { referenceMedia: { enabled: false } }, { permalinkHydration: { enabled: false } }]) {
-      const fixture = await setup(config);
-      expect(await fixture.resolve()).toEqual([]);
-      expect(fixture.request).not.toHaveBeenCalled(); expect(fixture.save).not.toHaveBeenCalled();
+  it.each([undefined, {}, { enabled: true }])("defaults on for referenceMedia=%s and materializes content", async (referenceMedia) => {
+    const fixture = await setup(referenceMedia === undefined ? {} : { referenceMedia });
+    expect(await fixture.resolve()).toHaveLength(1);
+    expect(fixture.request.mock.calls.map(call => call[0])).toEqual([`/posts/${R}`, `/files/${F(1)}/info`]);
+    expect(fixture.save).toHaveBeenCalledOnce();
+  });
+  it.each([
+    { referenceMedia: { enabled: false } },
+    { permalinkHydration: { enabled: false } },
+    { referenceMedia: { enabled: true }, permalinkHydration: { enabled: false } },
+  ])("retains the no-fetch/no-save kill switch for %s", async (config) => {
+    const fixture = await setup(config);
+    expect(await fixture.resolve()).toEqual([]);
+    expect(fixture.request).not.toHaveBeenCalled(); expect(fixture.save).not.toHaveBeenCalled();
+  });
+  it.each([true, false, undefined])("preserves named account overrides and empty-field inheritance with root enabled=%s", async (enabled) => {
+    const fixture = await setup(enabled === undefined ? {} : { referenceMedia: { enabled } });
+    const accounts: Record<string, MattermostAccountConfig> = {
+      off: { referenceMedia: { enabled: false } },
+      on: { referenceMedia: { enabled: true } },
+      inherited: {},
+      empty: { referenceMedia: {} },
+    };
+    Object.assign(fixture.cfg.channels!.mattermost!, { accounts });
+    for (const accountId of Object.keys(accounts)) {
+      fixture.monitor.account.accountId = accountId;
+      fixture.request.mockClear(); fixture.save.mockClear();
+      const effectiveEnabled = accounts[accountId].referenceMedia?.enabled ?? enabled ?? true;
+      const account = resolveMattermostAccount({ cfg: fixture.cfg, accountId });
+      expect(account.config.referenceMedia?.enabled ?? true).toBe(effectiveEnabled);
+      if (effectiveEnabled) {
+        expect(await fixture.resolve()).toHaveLength(1);
+        expect(fixture.save).toHaveBeenCalledOnce();
+      } else {
+        expect(await fixture.resolve()).toEqual([]);
+        expect(fixture.request).not.toHaveBeenCalled(); expect(fixture.save).not.toHaveBeenCalled();
+      }
     }
+  });
+  it("inherits the global permalink hydration kill switch for a named account with reference media enabled", async () => {
+    const fixture = await setup({ permalinkHydration: { enabled: false } });
+    Object.assign(fixture.cfg.channels!.mattermost!, { accounts: { work: { referenceMedia: { enabled: true } } } });
+    fixture.monitor.account.accountId = "work";
+    expect(await fixture.resolve()).toEqual([]);
+    expect(fixture.request).not.toHaveBeenCalled(); expect(fixture.save).not.toHaveBeenCalled();
+  });
+  it("validates reference media settings", () => {
     expect(MattermostConfigSchema.safeParse({ referenceMedia: { enabled: true }, accounts: { off: { referenceMedia: { enabled: false } } } }).success).toBe(true);
     expect(MattermostConfigSchema.safeParse({ referenceMedia: { enabled: null } }).success).toBe(false);
-    const fixture = await setup();
-    Object.assign(fixture.cfg.channels!.mattermost!, { accounts: { off: { referenceMedia: { enabled: false } }, inherited: {} } });
-    fixture.monitor.account.accountId = "off";
-    expect(await fixture.resolve()).toEqual([]);
-    fixture.monitor.account.accountId = "inherited";
-    expect(await fixture.resolve()).toHaveLength(1);
   });
   it("materializes an attachment root for a fresh text-only inbound reply with actual paths/facts", async () => {
     const fixture = await setup();

@@ -192,7 +192,7 @@ export const MattermostAccountSchemaBase = z
     textChunkLimit: z.number().int().positive().optional(),
     historyLimit: z.number().int().min(0).optional(),
     mediaMaxMb: z.number().positive().optional(),
-    /** Materialize one authorized referenced post/root lazily; disabled unless explicitly enabled. */
+    /** Materialize one authorized referenced post/root lazily; enabled unless explicitly disabled. */
     referenceMedia: z.object({ enabled: z.boolean().optional() }).strict().optional(),
     streaming: MattermostStreamingSchema.optional(),
     replyToMode: MattermostReplyToModeSchema.optional(),

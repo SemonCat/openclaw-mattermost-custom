@@ -959,7 +959,7 @@ describe("mattermostPlugin", () => {
         },
       };
 
-      expect(getDescribedActions(cfg)).toEqual(["send", "react", "reactions"]);
+      expect(getDescribedActions(cfg)).toEqual(["send", "react", "reactions", "search"]);
     });
 
     it.each([
@@ -1047,6 +1047,7 @@ describe("mattermostPlugin", () => {
 
       expect(getDescribedActions(cfg, "default")).toEqual([
         "send",
+        "search",
         "edit",
         "delete",
         "pin",
@@ -1057,6 +1058,7 @@ describe("mattermostPlugin", () => {
         "send",
         "react",
         "reactions",
+        "search",
         "edit",
         "delete",
         "pin",

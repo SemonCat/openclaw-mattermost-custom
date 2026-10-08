@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mattermostPlugin } from "../channel.js";
 import { searchMattermostMessages } from "./search.js";
+import type { MattermostAccountConfig } from "../types.js";
 import type { OpenClawConfig } from "./runtime-api.js";
 
 const C = "c".repeat(26), O = "o".repeat(26), T = "t".repeat(26), U = "u".repeat(26), V = "v".repeat(26);
@@ -27,26 +28,66 @@ vi.mock("openclaw/plugin-sdk/ssrf-runtime", async (original) => ({
 }));
 
 describe("public bounded Mattermost search", () => {
-  it("requires its own opt-in gate in discovery and dispatch", async () => {
+  it.each([
+    ["omitted actions", undefined, true],
+    ["empty actions", {}, true],
+    ["omitted search with reads off", { messages: false }, true],
+    ["explicit search on", { search: true }, true],
+    ["explicit search off with reads on", { search: false, messages: true }, false],
+  ] as [string, MattermostAccountConfig["actions"], boolean][])("keeps discovery, dispatch and direct provider gates aligned for %s", async (_name, actions, enabled) => {
     expect(mattermostPlugin.actions!.supportsAction!({ action: "search" })).toBe(true);
-    for (const config of [cfg(), cfg(false)]) {
-      expect(discover(config)).not.toContain("search");
-      const fetchImpl = provider();
-      await expect(dispatch(config, fetchImpl)).rejects.toThrow("search is disabled");
+    const config = cfg();
+    config.channels!.mattermost!.actions = actions;
+    expect(discover(config).includes("search")).toBe(enabled);
+    expect(discover(config).includes("read")).toBe(actions?.messages === true);
+    const fetchImpl = provider();
+    const dispatched = dispatch(config, fetchImpl);
+    const direct = () => searchMattermostMessages({ cfg: config, channelId: C, query: "deployment", context, fetchImpl });
+    if (enabled) {
+      await expect(dispatched).resolves.toMatchObject({ details: { messages: [{ id: pid(1) }] } });
+      await expect(direct()).resolves.toMatchObject({ messages: [{ id: pid(1) }] });
+      expect(fetchImpl).toHaveBeenCalledTimes(4);
+    } else {
+      await expect(dispatched).rejects.toThrow("search is disabled");
+      await expect(direct()).rejects.toThrow("search is disabled");
       expect(fetchImpl).not.toHaveBeenCalled();
     }
-    expect(discover(cfg(true))).toContain("search");
-    expect(discover(cfg(true))).not.toContain("read");
   });
-  it("uses selected account gates and preserves per-field root action inheritance", async () => {
-    const config = cfg(true);
-    Object.assign(config.channels!.mattermost!, { accounts: { off: { actions: { search: false } }, work: { actions: { messages: false } } } });
-    expect(discover(config, "off")).not.toContain("search");
-    expect(discover(config, "work")).toContain("search");
+  it.each([true, false, undefined])("preserves named account overrides and per-field inheritance with root search=%s", async (rootSearch) => {
+    const config = cfg(rootSearch);
+    const accounts: Record<string, MattermostAccountConfig> = {
+      off: { actions: { search: false } },
+      on: { actions: { search: true } },
+      inherited: {},
+      empty: { actions: {} },
+      work: { actions: { messages: false } },
+    };
+    Object.assign(config.channels!.mattermost!, { accounts });
+    for (const accountId of Object.keys(accounts)) {
+      const enabled = accounts[accountId].actions?.search ?? rootSearch ?? true;
+      expect(discover(config, accountId).includes("search")).toBe(enabled);
+      expect(discover(config, accountId)).not.toContain("read");
+      const fetchImpl = provider();
+      const selectedContext = { ...context, requesterAccountId: accountId };
+      const dispatched = dispatch(config, fetchImpl, {}, { accountId, ...selectedContext });
+      const direct = () => searchMattermostMessages({ cfg: config, accountId, channelId: C, query: "deployment", context: selectedContext, fetchImpl });
+      if (enabled) {
+        await expect(dispatched).resolves.toMatchObject({ details: { messages: [{ id: pid(1) }] } });
+        await expect(direct()).resolves.toMatchObject({ messages: [{ id: pid(1) }] });
+        expect(fetchImpl).toHaveBeenCalledTimes(4);
+      } else {
+        await expect(dispatched).rejects.toThrow("search is disabled");
+        await expect(direct()).rejects.toThrow("search is disabled");
+        expect(fetchImpl).not.toHaveBeenCalled();
+      }
+    }
+    expect(mattermostPlugin.actions!.describeMessageTool!({ cfg: config })!.actions).toContain("search");
+  });
+  it("keeps channel reads disabled independently of default-on search", async () => {
     const fetchImpl = provider();
-    await expect(dispatch(config, fetchImpl, {}, { accountId: "off" })).rejects.toThrow("search is disabled");
+    vi.stubGlobal("fetch", fetchImpl);
+    await expect(mattermostPlugin.actions!.handleAction!({ cfg: cfg(), action: "read", params: { target: `channel:${C}` }, accountId: "default", ...context } as never)).rejects.toThrow("message reads are disabled");
     expect(fetchImpl).not.toHaveBeenCalled();
-    await expect(dispatch(config, fetchImpl, {}, { accountId: "work", requesterAccountId: "work" })).resolves.toMatchObject({ details: { messages: [{ id: pid(1) }] } });
   });
   it("dispatches an authorized current channel query using channel NAME and required AND body", async () => {
     const fetchImpl = provider();

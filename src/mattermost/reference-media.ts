@@ -20,7 +20,7 @@ export async function resolveMattermostReferenceMedia(params: {
 }): Promise<MattermostMediaInfo[]> {
   const { monitor, post, kind } = params;
   const account = resolveMattermostAccount({ cfg: monitor.cfg, accountId: monitor.account.accountId });
-  if (account.config.referenceMedia?.enabled !== true || account.config.permalinkHydration?.enabled === false ||
+  if (account.config.referenceMedia?.enabled === false || account.config.permalinkHydration?.enabled === false ||
     !account.baseUrl || monitor.abortSignal?.aborted) return [];
   const explicit = collectMattermostPermalinkReferences({
     text: post.message ?? "", props: post.props,

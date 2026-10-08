@@ -135,6 +135,31 @@ describe("MattermostConfigSchema", () => {
     expect(result.success).toBe(true);
   });
 
+  it("preserves omitted search and reference media fields for runtime inheritance", () => {
+    const omitted = MattermostConfigSchema.parse({});
+    expect(omitted).not.toHaveProperty("actions");
+    expect(omitted).not.toHaveProperty("referenceMedia");
+    const parsed = MattermostConfigSchema.parse({
+      actions: { search: false },
+      referenceMedia: { enabled: false },
+      accounts: {
+        inherited: {},
+        empty: { actions: {}, referenceMedia: {} },
+        partial: { actions: { messages: false } },
+        on: { actions: { search: true }, referenceMedia: { enabled: true } },
+      },
+    });
+    expect(parsed.actions).toEqual({ search: false });
+    expect(parsed.referenceMedia).toEqual({ enabled: false });
+    expect(parsed.accounts?.inherited).not.toHaveProperty("actions");
+    expect(parsed.accounts?.inherited).not.toHaveProperty("referenceMedia");
+    expect(parsed.accounts?.empty).toMatchObject({ actions: {}, referenceMedia: {} });
+    expect(parsed.accounts?.empty?.actions).not.toHaveProperty("search");
+    expect(parsed.accounts?.empty?.referenceMedia).not.toHaveProperty("enabled");
+    expect(parsed.accounts?.partial?.actions).toEqual({ messages: false });
+    expect(parsed.accounts?.on).toMatchObject({ actions: { search: true }, referenceMedia: { enabled: true } });
+  });
+
   it("accepts explicitly enabled or disabled native Mattermost Blocks rendering", () => {
     expect(
       MattermostConfigSchema.safeParse({ interactions: { blocks: true } }).success,

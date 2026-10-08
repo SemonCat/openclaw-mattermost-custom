@@ -23,7 +23,7 @@ export async function searchMattermostMessages(params: {
   if (params.senderId !== undefined && !/^[a-z0-9]{26}$/.test(params.senderId)) throw new Error("Mattermost search senderId must be a stable user id.");
   const account = resolveMattermostAccount({ cfg: params.cfg, accountId: params.accountId });
   if (!account.enabled) throw new Error(`Mattermost account "${account.accountId}" is disabled`);
-  if (!(account.config.actions?.search ?? (params.cfg.channels?.mattermost as MattermostConfig | undefined)?.actions?.search ?? false)) throw new Error("Mattermost message search is disabled in config");
+  if (!(account.config.actions?.search ?? (params.cfg.channels?.mattermost as MattermostConfig | undefined)?.actions?.search ?? true)) throw new Error("Mattermost message search is disabled in config");
   if (!account.baseUrl || !account.botToken) throw new Error("Mattermost botToken/baseUrl missing.");
   const client = createMattermostClient({ baseUrl: account.baseUrl, botToken: account.botToken, fetchImpl: params.fetchImpl, allowPrivateNetwork: isPrivateNetworkOptInEnabled(account.config) });
   const authorized = await authorizeMattermostReadTarget({ ...params, account, client, publicCrossChannelOnly: true });
