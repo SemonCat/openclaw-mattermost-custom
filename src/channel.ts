@@ -85,7 +85,7 @@ const loadMattermostChannelRuntime = createLazyRuntimeModule(() => import("./cha
 const MATTERMOST_PRESENTATION_CAPABILITIES = {
   supported: true,
   buttons: true,
-  selects: false,
+  selects: true,
   context: true,
   divider: false,
   limits: {
@@ -178,6 +178,9 @@ function describeMattermostMessageTool({
   );
   if (hasMessageCapableAccount) {
     actions.push("read");
+  }
+  if (enabledAccounts.some((account) => account.config.actions?.search ?? actionsConfig?.search ?? false)) {
+    actions.push("search");
   }
   const hasActionCapableAccount = (key: "edit" | "delete" | "pins") =>
     enabledAccounts.some((account) => {
@@ -447,6 +450,7 @@ const mattermostMessageActions: ChannelMessageActionAdapter = {
       "react",
       "reactions",
       "read",
+      "search",
       "edit",
       "delete",
       "pin",
@@ -560,6 +564,27 @@ const mattermostMessageActions: ChannelMessageActionAdapter = {
         conversationReadOrigin,
       });
       return jsonResult({ ok: true, channelId, posts });
+    }
+
+    if (action === "search") {
+      const { resolvedAccountId, account, channelActions } = resolveMattermostActionAccount({ cfg, accountId });
+      if (!isMattermostActionEnabled({ account, channelActions, key: "search", defaultValue: false })) {
+        throw new Error("Mattermost message search is disabled in config");
+      }
+      const rawTarget = readStringParam(params, "to") ?? readStringParam(params, "channelId") ??
+        readStringParam(params, "target") ?? normalizeOptionalString(toolContext?.currentChannelId);
+      if (!rawTarget) throw new Error("Mattermost search requires one channel target.");
+      const normalized = normalizeMattermostMessagingTarget(rawTarget);
+      const channelId = normalized?.startsWith("channel:") ? normalized.slice(8) : !rawTarget.includes(":") ? rawTarget : "";
+      if (!channelId) throw new Error("Mattermost search requires one channel target.");
+      const result = await (await loadMattermostChannelRuntime()).searchMattermostMessages({
+        cfg, accountId: resolvedAccountId, channelId,
+        query: readStringParam(params, "query", { required: true }),
+        senderId: readStringParam(params, "senderId"),
+        limit: readPositiveIntegerParam(params, "limit", { message: "limit must be a positive integer." }),
+        context: { conversationReadOrigin, requesterAccountId, toolContext },
+      });
+      return jsonResult({ ok: true, channelId, ...result });
     }
 
     if (action === "read") {

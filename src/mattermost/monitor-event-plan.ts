@@ -1,5 +1,6 @@
 // Mattermost plugin module prepares shared routing and reply facts for monitor events.
 import { finalizeInboundContext } from "openclaw/plugin-sdk/reply-runtime";
+import { resolveMattermostGroupContext } from "../group-context.js";
 import { resolveMattermostReplyToMode } from "./accounts.js";
 import type { MattermostChannel } from "./client.js";
 import { resolveMattermostTrustedChatKind } from "./monitor-auth.js";
@@ -59,6 +60,9 @@ export async function buildMattermostEventPlan(
     threadRootId: params.threadRootId,
   });
   const to = kind === "direct" ? `user:${params.senderId}` : `channel:${params.channelId}`;
+  const groupContext = resolveMattermostGroupContext({
+    cfg: monitor.cfg, accountId: monitor.account.accountId, channelId: params.channelId, kind,
+  });
 
   return {
     channelId: params.channelId,
@@ -91,6 +95,7 @@ export async function buildMattermostEventPlan(
         ConversationRoutePeerId: kind === "direct" ? params.senderId : params.channelId,
         GroupChannel: channelName ? `#${channelName}` : undefined,
         GroupSpace: teamId,
+        GroupSystemPrompt: groupContext.systemPrompt,
         SenderId: params.senderId,
         Provider: "mattermost" as const,
         Surface: "mattermost" as const,
@@ -134,6 +139,7 @@ export async function buildMattermostEventPlan(
           },
         },
         replyOptions: {
+          skillFilter: groupContext.skillFilter,
           disableBlockStreaming:
             typeof monitor.account.blockStreaming === "boolean"
               ? !monitor.account.blockStreaming

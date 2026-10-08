@@ -18,7 +18,8 @@ import type { ResolvedMattermostAccount } from "./accounts.js";
 
 type DispatchCallRecord = {
   cfg: OpenClawConfig;
-  ctxPayload: { SessionKey: string; ReplyToId?: string; MessageSid?: string };
+  ctxPayload: { SessionKey: string; ReplyToId?: string; MessageSid?: string; GroupSystemPrompt?: string };
+  replyOptions?: { skillFilter?: string[] };
   route: { agentId: string; sessionKey: string };
   delivery: {
     deliver: (payload: unknown) => Promise<unknown>;
@@ -27,6 +28,7 @@ type DispatchCallRecord = {
 
 const mockState = vi.hoisted(() => ({
   configVersion: 0,
+  groups: undefined as Record<string, { systemPrompt?: string; skills?: string[] }> | undefined,
   dispatchFailCount: 0,
   deliverThenFailWithRace: false,
   dispatchCalls: [] as DispatchCallRecord[],
@@ -70,7 +72,7 @@ function resolveAgentRouteMock(params: { cfg: OpenClawConfig }) {
 vi.mock("../runtime.js", () => ({
   getMattermostRuntime: () => ({
     config: {
-      current: () => ({ version: mockState.configVersion }) as OpenClawConfig,
+      current: () => ({ version: mockState.configVersion, channels: { mattermost: { groups: mockState.groups } } }) as OpenClawConfig,
     },
     channel: {
       commands: {
@@ -120,6 +122,7 @@ vi.mock("./runtime-api.js", () => ({
   buildModelsProviderData: vi.fn(async () => ({ providers: [], modelNames: new Map() })),
   isRequestBodyLimitError: vi.fn(() => false),
   logTypingFailure: vi.fn(),
+  listSkillCommandsForAgents: vi.fn(() => [{ name: "review_code", skillName: "code-review" }]),
   readRequestBodyWithLimit: vi.fn(async () => "token=valid-token"),
 }));
 
@@ -287,6 +290,7 @@ describe("slash-http session-admission race retry and fallback", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     mockState.configVersion = 0;
+    mockState.groups = undefined;
     mockState.dispatchFailCount = 0;
     mockState.deliverThenFailWithRace = false;
     mockState.dispatchCalls = [];
@@ -337,6 +341,29 @@ describe("slash-http session-admission race retry and fallback", () => {
     expect(mockState.dispatchCalls).toHaveLength(1);
     expect(mockState.deliverMattermostReplyPayload).toHaveBeenCalledTimes(1);
     expect(mockState.sendMessageMattermost).not.toHaveBeenCalled();
+  });
+
+  it("denies named and /skill alias invocations before dispatch but allows ordinary commands with an empty filter", async () => {
+    mockState.groups = { "chan-1": { skills: [], systemPrompt: "Channel instructions" } };
+    for (const text of ["/review_code file", "/skill CODE_REVIEW file"]) {
+      const response = await runHandler({ text });
+      expect(response.getBody()).toContain("skill");
+      expect(mockState.dispatchCalls).toHaveLength(0);
+      expect(mockState.deliverMattermostReplyPayload).not.toHaveBeenCalled();
+    }
+    await runHandler({ text: "/status" });
+    expect(mockState.dispatchCalls).toHaveLength(1);
+    expect(mockState.dispatchCalls[0]).toMatchObject({
+      ctxPayload: { GroupSystemPrompt: "Channel instructions" }, replyOptions: { skillFilter: [] },
+    });
+  });
+
+  it("allows a configured /skill alias and applies the target channel's settings to actual dispatch", async () => {
+    mockState.groups = { "*": { systemPrompt: "Shared", skills: [] }, "chan-1": { skills: ["code-review"] }, "chan-2": { systemPrompt: "Other" } };
+    await runHandler({ text: "/skill CODE_REVIEW file" });
+    expect(mockState.dispatchCalls[0]).toMatchObject({
+      ctxPayload: { GroupSystemPrompt: "Shared" }, replyOptions: { skillFilter: ["code-review"] },
+    });
   });
 
   it("pins an explicitly named global default to the resolved thread session", async () => {

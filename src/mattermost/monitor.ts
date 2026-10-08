@@ -238,6 +238,7 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
     logDebugMessage: (message) => logger.debug?.(message),
     logVerboseMessage,
     statusSink: opts.statusSink,
+    abortSignal: opts.abortSignal,
   };
   const interactions = registerMattermostInteractions({
     monitor,

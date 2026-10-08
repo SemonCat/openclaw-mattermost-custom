@@ -18,6 +18,7 @@ import {
 import { sanitizeUntrustedFileName } from "openclaw/plugin-sdk/security-runtime";
 import { normalizeStringEntries } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
+import type { SsrFPolicy } from "openclaw/plugin-sdk/ssrf-runtime";
 import {
   buildMattermostApiUrl,
   fetchMattermostChannel,
@@ -32,7 +33,7 @@ import {
 } from "./client.js";
 import { buildButtonProps, type MattermostInteractionResponse } from "./interactions.js";
 
-type MattermostMediaInfo = Pick<ChannelInboundMediaInput, "contentType" | "fileName" | "path"> & {
+export type MattermostMediaInfo = Pick<ChannelInboundMediaInput, "contentType" | "fileName" | "path"> & {
   kind: MediaKind;
 };
 
@@ -89,7 +90,7 @@ type SaveRemoteMedia = (params: {
   requestInit?: RequestInit;
   filePathHint?: string;
   maxBytes: number;
-  ssrfPolicy?: { allowedHostnames?: string[] };
+  ssrfPolicy?: SsrFPolicy;
   responseHeaderTimeoutMs?: number;
   readIdleTimeoutMs?: number;
 }) => Promise<Pick<SavedRemoteMedia, "contentType" | "fileName" | "path">>;
@@ -153,6 +154,7 @@ export function createMattermostMonitorResources(params: {
 
   const resolveMattermostMedia = async (
     fileIds?: string[] | null,
+    options?: { signal: AbortSignal; maxBytes: number; timeoutMs: number; allowPrivateNetwork: boolean },
   ): Promise<MattermostMediaInfo[]> => {
     const ids = normalizeStringEntries(fileIds ?? []);
     if (ids.length === 0) {
@@ -160,6 +162,7 @@ export function createMattermostMonitorResources(params: {
     }
     const out: MattermostMediaInfo[] = [];
     for (const fileId of ids) {
+      if (options?.signal.aborted) break;
       let downloadUrl: string;
       try {
         downloadUrl = buildMattermostApiUrl(client.baseUrl, `/files/${fileId}`);
@@ -177,15 +180,19 @@ export function createMattermostMonitorResources(params: {
             headers: {
               Authorization: `Bearer ${client.token}`,
             },
+            ...(options ? { signal: options.signal } : {}),
           },
           filePathHint: fileId,
-          maxBytes: mediaMaxBytes,
-          ssrfPolicy: { allowedHostnames: [new URL(client.baseUrl).hostname] },
+          maxBytes: Math.min(options?.maxBytes ?? mediaMaxBytes, mediaMaxBytes),
+          ssrfPolicy: options
+            ? { hostnameAllowlist: [new URL(client.baseUrl).hostname], allowPrivateNetwork: options.allowPrivateNetwork }
+            : { allowedHostnames: [new URL(client.baseUrl).hostname] },
           // Without these, a Mattermost host that never returns headers can stall
           // inbound preprocessing indefinitely (idle timeout never starts).
-          responseHeaderTimeoutMs: MATTERMOST_MEDIA_RESPONSE_HEADER_TIMEOUT_MS,
-          readIdleTimeoutMs: MATTERMOST_MEDIA_READ_IDLE_TIMEOUT_MS,
+          responseHeaderTimeoutMs: options?.timeoutMs ?? MATTERMOST_MEDIA_RESPONSE_HEADER_TIMEOUT_MS,
+          readIdleTimeoutMs: options?.timeoutMs ?? MATTERMOST_MEDIA_READ_IDLE_TIMEOUT_MS,
         });
+        if (options?.signal.aborted) break;
         const contentType = saved.contentType ?? undefined;
         out.push({
           path: saved.path,
@@ -194,10 +201,11 @@ export function createMattermostMonitorResources(params: {
           kind: mediaKindFromMime(contentType) ?? "unknown",
         });
       } catch (err) {
+        if (options?.signal.aborted) break;
         logger.debug?.(`mattermost: failed to download file ${fileId}: ${String(err)}`);
         let info: { mime_type?: string | null; name?: string | null } | undefined;
         try {
-          info = await client.request(`/files/${fileId}/info`);
+          info = await client.request(`/files/${fileId}/info`, options ? { signal: options.signal, timeoutMs: options.timeoutMs } : undefined);
         } catch (infoErr) {
           logger.debug?.(
             `mattermost: failed to resolve metadata for file ${fileId}: ${String(infoErr)}`,

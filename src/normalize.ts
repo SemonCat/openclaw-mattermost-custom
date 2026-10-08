@@ -21,6 +21,8 @@ type MattermostPresentationButton = {
   callback_data?: string;
   context: Record<string, unknown>;
   style?: MessagePresentationButton["style"];
+  type?: "select";
+  options?: Array<{ text: string; value: string; context: Record<string, unknown> }>;
 };
 
 export function parseMattermostQuestionContext(
@@ -100,6 +102,30 @@ export function resolveMattermostPresentation(params: {
         )
         .filter((row) => row.length > 0)
     : [];
+  for (const [blockIndex, block] of (presentation?.blocks ?? []).entries()) {
+    if (block.type !== "select" || block.options.length > 25) continue;
+    const questionId = questionOptionIndices?.keys().next().value;
+    const options = block.options.map(option => {
+      // Typed command/plugin callbacks need their own routing contract; menus are values only.
+      if (option.action) return null;
+      const value = resolveMessagePresentationControlValue(option);
+      if (!value || value.length > 200 || option.label.length > 100 || /[\x00-\x1f\x7f]/.test(value)) return null;
+      const optionIndex = questionId === undefined ? undefined : resolveAskUserQuestionOptionIndex({ questionOptionIndices, questionId, optionValue: value });
+      if (questionId !== undefined && optionIndex === undefined) return null;
+      return {
+        text: option.label, value, context: questionId !== undefined
+          ? { [MATTERMOST_QUESTION_CONTEXT_KEY]: true, question_id: questionId, option_index: optionIndex }
+          : { callback_data: value }
+      };
+    });
+    if (options.length === 0 || options.some(option => option === null)) continue;
+    const choices = options.filter(option => option !== null);
+    if (new Set(choices.map(option => option.value)).size !== choices.length) continue;
+    buttons.push([{
+      id: `select${blockIndex}`, type: "select", text: (block.placeholder || "Choose one").slice(0, 100),
+      context: {}, options: choices,
+    }]);
+  }
   return { text, buttons };
 }
 

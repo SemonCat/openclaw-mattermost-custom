@@ -50,8 +50,9 @@ export function buildMattermostModelPickerSelectMessageSid(params: {
 export function buildMattermostButtonInteractionMessageSid(params: {
   postId: string;
   actionId: string;
+  selectedValue?: string;
 }): string {
-  return `interaction:${params.postId}:${params.actionId}`;
+  return `interaction:${params.postId}:${params.actionId}${params.selectedValue === undefined ? "" : `:choice:${encodeURIComponent(params.selectedValue)}`}`;
 }
 
 export function resolveMattermostReplyRootId(params: {

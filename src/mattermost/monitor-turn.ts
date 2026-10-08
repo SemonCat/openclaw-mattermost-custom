@@ -781,6 +781,7 @@ export async function dispatchMattermostInboundTurn(
               dispatcherOptions,
               delivery,
               replyOptions: {
+                skillFilter: replyOptions.skillFilter,
                 progressPreambleEnabled: draftToolProgressEnabled,
                 commentaryProgressEnabled: progressDraft.commentaryProgressEnabled,
                 ...(deferredTurnAdoptionLifecycle

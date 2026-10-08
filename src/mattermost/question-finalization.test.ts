@@ -31,6 +31,7 @@ describe("Mattermost question finalization", () => {
 
     expect(request).toHaveBeenCalledWith("/posts/post-1/patch", {
       method: "PUT",
+      retryRateLimit: true,
       body: JSON.stringify({ id: "post-1", message: "Credential requested\n\nAnswered", props: {} }),
     });
   });
@@ -66,6 +67,7 @@ describe("Mattermost question finalization", () => {
 
     expect(request).toHaveBeenCalledWith("/posts/post-1/patch", {
       method: "PUT",
+      retryRateLimit: true,
       body: JSON.stringify({
         id: "post-1",
         message: "Question for you:\n\nWhich release?",
@@ -108,6 +110,7 @@ describe("Mattermost question finalization", () => {
 
     expect(request).toHaveBeenCalledWith("/posts/post-1/patch", {
       method: "PUT",
+      retryRateLimit: true,
       body: JSON.stringify({
         id: "post-1",
         message: "Question for you:\n\nWhich release?",

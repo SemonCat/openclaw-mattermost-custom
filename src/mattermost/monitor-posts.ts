@@ -13,6 +13,8 @@ import {
   uniqueStrings,
 } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { resolvePromptHistoryLimit } from "openclaw/plugin-sdk/number-runtime";
+import { resolveMattermostGroupContext } from "../group-context.js";
+import { isMattermostNativeSkillAllowed } from "./native-commands.js";
 import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
 import { MattermostPostSchema, type MattermostPost } from "./client.js";
 import { waitForMattermostChannelModelTransition } from "./channel-model-transition.js";
@@ -37,6 +39,7 @@ import {
 import type { MattermostIngressLifecycle } from "./monitor-ingress.js";
 import { resolveOncharPrefixes, stripOncharPrefix } from "./monitor-onchar.js";
 import { hydrateMattermostPermalinks } from "./permalink-hydration.js";
+import { resolveMattermostReferenceMedia } from "./reference-media.js";
 import {
   buildMattermostInboundMediaPayload,
   formatMattermostInboundMediaText,
@@ -144,6 +147,11 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
     // A mention addresses the bot; the remainder can still be a text command.
     // Normalize before both command detection and command-context construction.
     const commandBody = normalizeMention(rawText, botUsername).trim();
+    const groupContext = resolveMattermostGroupContext({ cfg, accountId: account.accountId, channelId, kind });
+    if (!isMattermostNativeSkillAllowed({ cfg, commandText: commandBody, skillFilter: groupContext.skillFilter })) {
+      monitor.logVerboseMessage("mattermost: drop unavailable channel skill invocation");
+      return;
+    }
     const { effectiveReplyToId, sessionKey } = thread;
     const { envelopeOptions, previousTimestamp } = resolveInboundSessionEnvelopeContext({
       cfg,
@@ -409,6 +417,7 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
         threadRootId && !threadAlreadyEngaged ? [threadRootId] : undefined,
       log: monitor.logVerboseMessage,
     });
+    const referenceMedia = await resolveMattermostReferenceMedia({ monitor: eventMonitor, post, kind });
     // Mention-only turns need non-empty agent text; the shared reply runner rejects empty
     // bodies before model invocation. The guard above ensures this fallback is a bot mention.
     const bodyForAgent = [bodyText || rawText.trim(), permalinkContext].filter(Boolean).join("\n\n");
@@ -529,7 +538,7 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
       // exception in source-reply-delivery-mode.ts surfaces their acknowledgements under
       // message_tool_only delivery modes (e.g. Codex harness DMs). Mirrors iMessage #82642.
       CommandSource: commandAuthorized && isControlCommand ? ("text" as const) : undefined,
-      ...(await buildMattermostInboundMediaPayload(mediaList)),
+      ...(await buildMattermostInboundMediaPayload([...mediaList, ...referenceMedia])),
     });
     const pinnedMainDmOwner =
       kind === "direct"

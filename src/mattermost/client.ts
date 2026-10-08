@@ -43,6 +43,8 @@ const MATTERMOST_TEXT_RESPONSE_LIMIT_BYTES = 64 * 1024;
 export type MattermostFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 type MattermostRequestInit = RequestInit & {
   timeoutMs?: number;
+  /** Only for explicitly idempotent operations with non-GET provider methods. */
+  retryRateLimit?: boolean;
   /**
    * The caller discards the success receipt of this mutation. Once Mattermost
    * accepted it, a lost or unreadable body must not report the mutation failed.
@@ -122,6 +124,7 @@ const MattermostPostListSchema = z
 
 export type MattermostFileInfo = {
   id: string;
+  post_id?: string | null;
   name?: string | null;
   mime_type?: string | null;
   size?: number | null;
@@ -141,13 +144,61 @@ const MattermostUserSchema = z
 const MattermostFileInfoSchema = z
   .object({
     id: z.string(),
+    post_id: z.string().nullable().optional(),
     name: z.string().nullable().optional(),
     mime_type: z.string().nullable().optional(),
     size: z.number().nullable().optional(),
   })
   .passthrough();
 
+export class MattermostApiError extends Error {
+  constructor(message: string, readonly status: number, readonly retryAfterMs?: number) {
+    super(message);
+    this.name = "MattermostApiError";
+  }
+}
+
+/** Mattermost Reset is a duration in seconds, not an epoch (app/ratelimit.go). */
+export function resolveMattermostRateLimitDelay(headers: Headers, now = Date.now()): number | undefined {
+  const raw = headers.get("Retry-After") ?? headers.get("X-RateLimit-Reset");
+  if (raw === null) {
+    return undefined;
+  }
+  let delay: number;
+  if (/^\d{1,10}$/.test(raw)) {
+    delay = Number(raw) * 1000;
+  } else if (headers.has("Retry-After") && /^[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT$/.test(raw)) {
+    const date = Date.parse(raw);
+    if (!Number.isFinite(date) || new Date(date).toUTCString() !== raw) {
+      return undefined;
+    }
+    delay = Math.max(0, date - now);
+  } else {
+    return undefined;
+  }
+  return Number.isSafeInteger(delay) && delay <= 30_000 ? delay : undefined;
+}
+
+function waitForRateLimit(delayMs: number, signal?: AbortSignal | null): Promise<void> {
+  signal?.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(signal?.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 export function parseMattermostApiStatus(error: unknown): number | undefined {
+  if (error instanceof MattermostApiError) {
+    return error.status;
+  }
   if (!error || typeof error !== "object") {
     return undefined;
   }
@@ -340,18 +391,45 @@ export function createMattermostClient(params: {
 
   const request = async <T>(path: string, init?: MattermostRequestInit): Promise<T> => {
     const url = buildMattermostApiUrl(baseUrl, path);
-    const { discardResponse, ...requestInit } = init ?? {};
+    const { discardResponse, retryRateLimit, ...requestInit } = init ?? {};
     const headers = new Headers(requestInit.headers);
     headers.set("Authorization", `Bearer ${token}`);
     if (typeof requestInit.body === "string" && !headers.has("Content-Type")) {
       headers.set("Content-Type", "application/json");
     }
     const isMessagePost = path === "/posts" && requestInit.method?.toUpperCase() === "POST";
-    const res = await fetchImpl(url, { ...requestInit, headers, isMessagePost });
-    if (!res.ok) {
+    const safeRetry = (requestInit.method ?? "GET").toUpperCase() === "GET" || retryRateLimit === true;
+    const budgetMs = Math.min(30_000, resolveTimerTimeoutMs(requestInit.timeoutMs, requestTimeoutMs));
+    const startedAt = Date.now();
+    let res: Response;
+    for (let attempt = 1; ; attempt += 1) {
+      requestInit.signal?.throwIfAborted();
+      res = await fetchImpl(url, {
+        ...requestInit,
+        ...(safeRetry ? { timeoutMs: Math.max(1, budgetMs - (Date.now() - startedAt)) } : {}),
+        headers,
+        isMessagePost,
+      });
+      if (res.ok) {
+        break;
+      }
+      const delay = res.status === 429 ? resolveMattermostRateLimitDelay(res.headers) : undefined;
+      const retry = safeRetry && res.status === 429 && attempt < 3 && delay !== undefined &&
+        delay < budgetMs - (Date.now() - startedAt);
+      if (retry) {
+        // Release the response before waiting; a throttled body may never end.
+        try { await res.body?.cancel(); } catch { /* best-effort release */ }
+        await waitForRateLimit(delay, requestInit.signal);
+        if (Date.now() - startedAt >= budgetMs) {
+          throw new MattermostApiError("Mattermost API 429: rate-limit budget exhausted", 429, delay);
+        }
+        continue;
+      }
       const detail = await readMattermostError(res, headers);
-      throw new Error(
+      throw new MattermostApiError(
         `Mattermost API ${res.status} ${res.statusText}: ${detail || "unknown error"}`,
+        res.status,
+        delay,
       );
     }
 
@@ -579,6 +657,46 @@ export async function fetchMattermostChannelByName(
   return await client.request<MattermostChannel>(
     `/teams/${teamId}/channels/name/${encodeURIComponent(channelName)}`,
   );
+}
+
+export function normalizeMattermostSearchQuery(query: string): string {
+  if (typeof query !== "string" || query.length > 200 || !query.trim() ||
+    !/^[\p{L}\p{N} ]+$/u.test(query) || /\b(?:OR|AND|NOT)\b/i.test(query)) {
+    throw new Error("Mattermost search query must be 1–200 characters of plain words; operators are not supported.");
+  }
+  return query.trim().replace(/ +/g, " ");
+}
+
+/** One response only: SQL search ignores requested pagination and may cap matches. */
+export async function searchMattermostChannelPosts(client: MattermostClient, params: {
+  teamId: string; channelId: string; channelName: string; query: string;
+}): Promise<{ messages: MattermostPost[]; sourceCount: number; orderedCount: number }> {
+  const id = /^[a-z0-9]{26}$/;
+  if (!id.test(params.teamId) || !id.test(params.channelId) || !/^[a-z0-9_-]{1,64}$/.test(params.channelName)) {
+    throw new Error("Mattermost search requires valid team/channel identity and channel name.");
+  }
+  const query = normalizeMattermostSearchQuery(params.query);
+  const response = await client.request<unknown>(`/teams/${params.teamId}/posts/search`, {
+    method: "POST", retryRateLimit: true,
+    body: JSON.stringify({ terms: `${query} in:${params.channelName}`, is_or_search: false, include_deleted_channels: false }),
+  });
+  const postSchema = z.object({
+    id: z.string().regex(id), channel_id: z.string().regex(id), user_id: z.string().regex(id),
+    message: z.string(), root_id: z.union([z.literal(""), z.string().regex(id)]).optional(),
+    create_at: z.number().int().nonnegative().optional(), delete_at: z.number().int().nonnegative().optional(),
+  });
+  const parsed = z.object({ order: z.array(z.string().regex(id)).max(1000), posts: z.record(z.string(), postSchema) }).safeParse(response);
+  if (!parsed.success || Object.keys(parsed.data.posts).length > 1000) throw new Error("Unexpected Mattermost search response.");
+  // Inspect ALL source rows (including unordered/off-window rows) before filtering or limiting.
+  if (Object.entries(parsed.data.posts).some(([key, post]) => key !== post.id || post.channel_id !== params.channelId) ||
+    new Set(parsed.data.order).size !== parsed.data.order.length || parsed.data.order.some(key => !parsed.data.posts[key])) {
+    throw new Error("Unexpected Mattermost search response identity or channel.");
+  }
+  return {
+    messages: parsed.data.order.map(key => parsed.data.posts[key]!),
+    sourceCount: Object.keys(parsed.data.posts).length,
+    orderedCount: parsed.data.order.length,
+  };
 }
 
 export async function sendMattermostTyping(
@@ -946,6 +1064,7 @@ export async function updateMattermostPost(
   }
   return await client.request<MattermostPost>(`/posts/${postId}/patch`, {
     method: "PUT",
+    retryRateLimit: true,
     body: JSON.stringify(payload),
   });
 }

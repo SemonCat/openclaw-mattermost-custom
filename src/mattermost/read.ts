@@ -16,7 +16,7 @@ import {
 } from "./client.js";
 import type { OpenClawConfig } from "./runtime-api.js";
 
-type ReadContext = Pick<
+export type ReadContext = Pick<
   ChannelMessageActionContext,
   "conversationReadOrigin" | "requesterAccountId" | "toolContext"
 >;
@@ -30,7 +30,7 @@ function parseMattermostChannelTarget(rawTarget: string): string | undefined {
   return trimmed && !trimmed.includes(":") ? trimmed : undefined;
 }
 
-function isCurrentMattermostReadTarget(params: {
+export function isCurrentMattermostReadTarget(params: {
   accountId: string;
   channelId: string;
   context: ReadContext;
@@ -127,6 +127,25 @@ export async function readMattermostMessages(params: {
     fetchImpl: params.fetchImpl,
     allowPrivateNetwork: isPrivateNetworkOptInEnabled(account.config),
   });
+  await authorizeMattermostReadTarget({ ...params, account, client });
+
+  return await fetchMattermostChannelPosts(client, params.channelId, {
+    limit: params.limit,
+    before: params.before,
+    after: params.after,
+  });
+}
+
+/** Shared authority boundary for history and search; provider membership alone is insufficient. */
+export async function authorizeMattermostReadTarget(params: {
+  cfg: OpenClawConfig;
+  account: ReturnType<typeof resolveMattermostAccount>;
+  client: ReturnType<typeof createMattermostClient>;
+  channelId: string;
+  context: ReadContext;
+  publicCrossChannelOnly?: boolean;
+}): Promise<MattermostChannel | undefined> {
+  const { account, client } = params;
   const directOperator = params.context.conversationReadOrigin === "direct-operator";
   const currentConversation = isCurrentMattermostReadTarget({
     accountId: account.accountId,
@@ -147,16 +166,13 @@ export async function readMattermostMessages(params: {
 
     const channel = await fetchMattermostChannel(client, params.channelId);
     if (
-      (channel.type !== "O" && channel.type !== "P") ||
+      channel.id !== params.channelId ||
+      (channel.type !== "O" && (params.publicCrossChannelOnly || channel.type !== "P")) ||
       !isConfiguredMattermostReadTarget({ cfg: params.cfg, account, channelId: params.channelId })
     ) {
       throw new Error("Mattermost read target channel is not allowed.");
     }
+    return channel;
   }
-
-  return await fetchMattermostChannelPosts(client, params.channelId, {
-    limit: params.limit,
-    before: params.before,
-    after: params.after,
-  });
+  return undefined;
 }

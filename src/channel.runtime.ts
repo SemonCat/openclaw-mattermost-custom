@@ -14,5 +14,6 @@ export {
   setMattermostMessagePinnedAction,
 } from "./mattermost/message-actions.js";
 export { readMattermostMessages } from "./mattermost/read.js";
+export { searchMattermostMessages } from "./mattermost/search.js";
 export { reconcileMattermostUnknownSend, sendMessageMattermost } from "./mattermost/send.js";
 export { resolveMattermostOpaqueTarget } from "./mattermost/target-resolution.js";

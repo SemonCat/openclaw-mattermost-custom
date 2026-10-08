@@ -15,8 +15,23 @@ vi.mock("./runtime-api.js", async (importOriginal) => ({
   listSkillCommandsForAgents: mockState.listSkillCommandsForAgents,
 }));
 
-const { buildMattermostNativeCommandSpecs, sanitizeMattermostCommandTrigger } =
+const { buildMattermostNativeCommandSpecs, sanitizeMattermostCommandTrigger, isMattermostNativeSkillAllowed } =
   await import("./native-commands.js");
+
+it("filters native skill invocation before dispatch while preserving ordinary commands", () => {
+  mockState.listSkillCommandsForAgents.mockReturnValue([{ name: "review_code", skillName: "code-review" }]);
+  const allowed = (commandText: string, skillFilter?: string[]) => isMattermostNativeSkillAllowed({ cfg: {}, commandText, skillFilter });
+  expect(allowed("/review_code file")).toBe(true);
+  expect(allowed("/review_code file", [])).toBe(false);
+  expect(allowed("/review_code file", ["other"])).toBe(false);
+  expect(allowed("/review_code file", ["code-review"])).toBe(true);
+  expect(allowed("/skill code-review file", [])).toBe(false);
+  expect(allowed("/skill CODE_REVIEW file", ["other"])).toBe(false);
+  expect(allowed("/skill review-code file", ["code-review"])).toBe(true);
+  expect(allowed("/skill code-review file", ["code-review"])).toBe(true);
+  expect(allowed("/status", [])).toBe(true);
+  mockState.listSkillCommandsForAgents.mockReset();
+});
 
 function testRuntime(): RuntimeEnv {
   return {

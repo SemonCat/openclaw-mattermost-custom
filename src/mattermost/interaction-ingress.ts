@@ -46,7 +46,7 @@ export function buildMattermostInteractionEventId(
   interaction: MattermostValidatedInteraction,
 ): string {
   const identity = {
-    accountAgnosticTriggerId: interaction.payload.trigger_id,
+    accountAgnosticTriggerId: interaction.context.oc_select === true ? undefined : interaction.payload.trigger_id,
     channelId: interaction.payload.channel_id,
     postId: interaction.payload.post_id,
     userId: interaction.payload.user_id,

@@ -106,6 +106,7 @@ plugin. Each gate can still be disabled globally or per account:
     "mattermost": {
       "actions": {
         "messages": false,
+        "search": false,
         "reactions": true,
         "edit": true,
         "delete": true,
@@ -116,8 +117,8 @@ plugin. Each gate can still be disabled globally or per account:
 }
 ```
 
-`messages` remains opt-in for channel reads, `reactions` enables add/remove/list,
-and the three mutation gates can be overridden per account.
+`messages` remains opt-in for channel reads, `search` is independently opt-in,
+`reactions` enables add/remove/list, and action gates can be overridden per account.
 
 Set `channels.mattermost.requireMentionInBotThreads: false` to accept unmentioned
 follow-ups in threads whose root post was sent by the receiving bot. Set it to
@@ -130,6 +131,136 @@ Account settings override the channel-wide value. For an individual channel,
 deleted, cross-channel, or non-root posts retain the existing mention behavior;
 sender and channel access restrictions still apply.
 
+### Channel instructions and skill availability
+
+Configure trusted instructions and available skills by stable Mattermost channel
+ID, using the same effective account `groups` map as mention gating:
+
+```json
+{
+  "channels": {
+    "mattermost": {
+      "groups": {
+        "*": { "systemPrompt": "Explain assumptions before proposing changes." },
+        "cccccccccccccccccccccccccc": {
+          "systemPrompt": "Use this channel for engineering support.",
+          "skills": ["code-review"]
+        },
+        "ssssssssssssssssssssssssss": { "skills": [] }
+      }
+    }
+  }
+}
+```
+
+Each exact-channel field inherits its omitted value from `groups["*"]`. An
+account without its own `groups` inherits the channel-wide map; an account that
+defines `groups` replaces that map, then applies its own exact/wildcard rules.
+Omitted `skills` preserves core behavior; `skills: []` makes no skills available.
+Use canonical skill names, rather than slash-command aliases. Native named skill
+commands and `/skill <name-or-alias>` check this filter before starting work.
+Ordinary native commands remain available under their existing authorization.
+
+Configured instructions and skill filters follow inbound posts, native slash
+turns, and generic interaction turns through their normal channel/thread route.
+Reaction session events retain that route; reactions do not gain a new independent
+agent-turn trigger. DMs receive neither group field. Channel headers, purposes,
+quoted posts, and menu values do not become configured instructions.
+
+**A skill filter is not a security sandbox.** It controls skill availability and
+named skill invocation, not tool permissions or what an agent can accomplish
+using other tools. Existing sender and command authorization still applies.
+
+### Bounded message search
+
+Set `channels.mattermost.actions.search: true` to expose the `search` message
+action. It defaults to `false` and does not require or enable `actions.messages`.
+Per-account action settings override the channel-wide value; discovery advertises
+search when an enabled account permits it, and dispatch checks the selected account.
+
+Example action arguments (the target can be omitted when the tool supplies the
+current Mattermost channel):
+
+```json
+{
+  "action": "search",
+  "channel": "mattermost",
+  "target": "channel:cccccccccccccccccccccccccc",
+  "query": "deployment rollback",
+  "limit": 20,
+  "senderId": "uuuuuuuuuuuuuuuuuuuuuuuuuu"
+}
+```
+
+The installed host restricts agent search from this standalone plugin to the
+exact current conversation/account. Direct operator/provider calls still undergo
+the existing read authorization; provider bot membership alone grants no delegated
+read authority. Search requires one team-backed channel and never offers team-wide,
+cross-DM, or delegated cross-private-channel search.
+
+Queries accept 1–200 characters of letters, numbers, and spaces. Operators such as
+`in:`, `from:`, `OR`, `AND`, and `NOT` are rejected; the plugin constructs the
+channel-name scope internally. The optional stable `senderId` filter is local to
+the response. `limit` defaults to 20 and accepts 1–50. Results contain post and
+thread IDs, safe snippets, timestamps when available, and same-instance permalinks,
+without raw post properties. Snippets are capped at 500 characters each and 12,000
+characters in total.
+
+One provider response is read. Both its full posts record and order list are
+capped at 1,000 entries; every source row is validated before any filtering or
+output limiting. Malformed or foreign-channel rows reject the whole response,
+including rows outside the requested output window. `sourceCount` counts the
+full validated posts record, `orderedCount` counts its order list, `eligibleCount`
+counts ordered posts after deleted/sender filtering, and `outputCount` counts
+returned snippets. `truncated` reports local result/text truncation.
+`completeness` is always `"unknown"`: Mattermost SQL ignores pagination controls,
+and provider caps and index freshness are unknown. API/index errors are reported
+as errors, rather than represented as an empty successful search.
+
+### Referenced attachment content
+
+Referenced files stay metadata-only by default. To let an admitted inbound turn
+materialize attachment content from one same-channel reference, set:
+
+```json
+{
+  "channels": {
+    "mattermost": {
+      "referenceMedia": { "enabled": true }
+    }
+  }
+}
+```
+
+Accounts inherit this setting and can override it with
+`accounts.<accountId>.referenceMedia.enabled: false`. Disabling
+`permalinkHydration.enabled` also disables reference media. The plugin chooses
+one explicit same-instance post permalink/preview reference, otherwise the native
+thread root. It checks post identity, channel, deletion state, file ownership when
+available, and sender visibility before fetching files. A reference in another
+channel is never downloaded, including private channels and DMs.
+
+Downloads deduplicate current-post files and stop at four referenced files, ten
+seconds total, or an aggregate budget capped at 8 MiB and reduced by the configured
+Mattermost/agent media limit. Each attempted transfer reserves its validated file
+size (one byte for a zero-size declaration); failed transfers do not refund their
+allowance, and saved files must fit it. Cancellation skips supplemental media.
+The existing trusted media saver and private-network opt-in apply. Deleted, denied,
+or unavailable files preserve text/metadata context. Ordinary history/tool reads
+do not download attachments, and supplemental content does not classify commands.
+
+### REST throttling recovery
+
+Idempotent reads, scoped search, and post updates can retry explicit HTTP 429
+rejections, with at most three attempts and a total budget of the shorter of the
+request timeout and 30 seconds. The plugin strictly validates provider
+`Retry-After` seconds/HTTP dates or Mattermost `X-RateLimit-Reset` duration seconds.
+Missing, invalid, excessive, or over-budget delays fail without an early retry;
+waiting can be aborted. Updates keep the original post identity.
+Authentication failures, server/network errors, creates, uploads, deletes, and
+commands do not gain REST replay. Existing create reconciliation remains
+authoritative for ambiguous sends and accepted responses without a usable post ID.
+
 Interactive buttons automatically use native Mattermost Blocks on Mattermost
 11.10 and newer, based on the server's `X-Version-ID` response header. Older
 servers use legacy interactive attachments because they may accept `mm_blocks`
@@ -138,6 +269,34 @@ props without rendering them. Set `channels.mattermost.interactions.blocks` to
 the existing Blocks default is preserved. An explicit HTTP 400 rejection falls
 back once to legacy attachments; transport failures are not retried because the
 first post may already have been accepted.
+
+SDK single-select presentations use the same detection/override/fallback rules:
+legacy attachment `select` menus on older servers and Blocks `static_select` on
+supported servers. Menus support 1–25 distinct SDK value choices (values up to
+200 characters, labels up to 100), including canonical question option mappings.
+Unsupported typed actions, mixed menus, and invalid menus fall back to presentation
+text. For example, a reply presentation can contain:
+
+```json
+{
+  "blocks": [{
+    "type": "select",
+    "placeholder": "Choose environment",
+    "options": [
+      { "label": "Staging", "value": "staging" },
+      { "label": "Production", "value": "production" }
+    ]
+  }]
+}
+```
+
+Selections are checked against the current signed, bot-authored post control and
+existing user/channel authorization. Controls expire after 24 hours. Different
+choices have different durable identities; retrying the same choice replays once.
+Generic values become descriptive agent input, including values resembling slash
+commands or callback namespaces. They do not execute privileged commands.
+Question menus resolve the original Gateway question and retire the control after
+an answer; terminal clicks and replay cannot create an extra agent turn.
 
 Native approval cards enable automatically when a stable 26-character
 Mattermost user id is available in `execApprovals.approvers`, `allowFrom`, or

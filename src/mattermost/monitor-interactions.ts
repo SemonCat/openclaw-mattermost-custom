@@ -201,6 +201,7 @@ export function registerMattermostInteractions(params: {
       const interactionMessageSid = buildMattermostButtonInteractionMessageSid({
         postId: button.postId,
         actionId: button.actionId,
+        selectedValue: button.selectedValue,
       });
       const eventPlan = await buildMattermostEventPlan(eventMonitor, {
         channelId: button.channelId,
@@ -213,7 +214,9 @@ export function registerMattermostInteractions(params: {
         return;
       }
       const { channelDisplay, channelId, kind, route, thread, to } = eventPlan;
-      const bodyText = `[Button click: user @${button.userName} selected "${button.actionName}"]`;
+      const bodyText = button.selectedValue === undefined
+        ? `[Button click: user @${button.userName} selected "${button.actionName}"]`
+        : `[Menu selection: user @${button.userName} selected ${JSON.stringify(button.actionName)}; value ${JSON.stringify(button.selectedValue)}]`;
       const ctxPayload = eventPlan.finalizeContext({
         Body: bodyText,
         BodyForAgent: bodyText,

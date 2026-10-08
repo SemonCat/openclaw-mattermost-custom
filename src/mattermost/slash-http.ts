@@ -16,6 +16,7 @@ import { safeEqualSecret } from "openclaw/plugin-sdk/security-runtime";
 import { getSessionEntry, resolveStorePath } from "openclaw/plugin-sdk/session-store-runtime";
 import { isPrivateNetworkOptInEnabled } from "openclaw/plugin-sdk/ssrf-runtime";
 import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
+import { resolveMattermostGroupContext } from "../group-context.js";
 import {
   resolveMattermostReplyToMode,
   type ResolvedMattermostAccount,
@@ -43,6 +44,7 @@ import {
   normalizeMattermostAllowList,
 } from "./monitor-auth.js";
 import { resolveMattermostThreadSessionContext } from "./monitor-context.js";
+import { isMattermostNativeSkillAllowed } from "./native-commands.js";
 import {
   createMattermostReplyDeliveryBarrier,
   deliverMattermostReplyPayload,
@@ -731,6 +733,14 @@ export function createSlashCommandHttpHandler(params: SlashHttpHandlerParams) {
       return;
     }
 
+    const groupContext = resolveMattermostGroupContext({
+      cfg: currentCfg, accountId: account.accountId, channelId, kind: auth.kind,
+    });
+    if (!isMattermostNativeSkillAllowed({ cfg: currentCfg, commandText, skillFilter: groupContext.skillFilter })) {
+      sendJsonResponse(res, 200, { response_type: "ephemeral", text: "This skill is not available in this Mattermost channel." });
+      return;
+    }
+
     log?.(
       `mattermost: slash command /${sanitizeMattermostLogValue(trigger)} from ${sanitizeMattermostLogValue(senderName)} in ${sanitizeMattermostLogValue(channelId)}`,
     );
@@ -918,6 +928,12 @@ async function handleSlashCommandAsync(params: {
 
   const resolveDispatchAttempt = () => {
     const attemptCfg = getMattermostRuntime().config.current() as OpenClawConfig;
+    const groupContext = resolveMattermostGroupContext({
+      cfg: attemptCfg, accountId: account.accountId, channelId, kind,
+    });
+    if (!isMattermostNativeSkillAllowed({ cfg: attemptCfg, commandText, skillFilter: groupContext.skillFilter })) {
+      throw new Error("This skill is not available in this Mattermost channel.");
+    }
     const attemptRoute = core.channel.routing.resolveAgentRoute({
       cfg: attemptCfg,
       channel: "mattermost",
@@ -956,6 +972,7 @@ async function handleSlashCommandAsync(params: {
       ConversationRoutePeerId: kind === "direct" ? senderId : channelId,
       ConversationLabel: fromLabel,
       GroupSpace: teamId,
+      GroupSystemPrompt: groupContext.systemPrompt,
       GroupSubject: kind !== "direct" ? channelDisplay || roomLabel : undefined,
       SenderName: senderName,
       SenderId: senderId,
@@ -977,6 +994,7 @@ async function handleSlashCommandAsync(params: {
       route: attemptRoute,
       thread: attemptThread,
       ctxPayload: attemptCtxPayload,
+      skillFilter: groupContext.skillFilter,
     };
   };
 
@@ -1097,6 +1115,7 @@ async function handleSlashCommandAsync(params: {
             humanDelay,
           },
           replyOptions: {
+            skillFilter: attempt.skillFilter,
             disableBlockStreaming:
               typeof account.blockStreaming === "boolean" ? !account.blockStreaming : undefined,
           },

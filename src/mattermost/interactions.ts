@@ -1,5 +1,5 @@
 // Mattermost plugin module implements interactions behavior.
-import { createHmac } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { safeEqualSecret } from "openclaw/plugin-sdk/security-runtime";
 import {
@@ -37,6 +37,7 @@ export type MattermostInteractionPayload = {
   type?: string;
   data_source?: string;
   context?: Record<string, unknown>;
+  selected_option?: unknown;
 };
 
 export type MattermostDialogSubmissionPayload = {
@@ -75,6 +76,8 @@ export type MattermostInteractiveButtonInput = {
   label?: string;
   style?: "default" | "primary" | "danger";
   context?: Record<string, unknown>;
+  type?: "select";
+  options?: Array<{ text: string; value: string; context: Record<string, unknown> }>;
 };
 
 export type MattermostValidatedInteraction = {
@@ -131,6 +134,7 @@ type MattermostInteractionHandlerOptions = {
     userName: string;
     actionId: string;
     actionName: string;
+    selectedValue?: string;
     postId: string;
     post: MattermostPost;
   }) => Promise<void>;
@@ -336,6 +340,7 @@ type MattermostButton = {
   type: "button" | "select";
   name: string;
   style?: "default" | "primary" | "danger";
+  options?: Array<{ text: string; value: string }>;
   integration: {
     url: string;
     context: Record<string, unknown>;
@@ -373,6 +378,8 @@ export function buildButtonAttachments(params: {
     name: string;
     style?: "default" | "primary" | "danger";
     context?: Record<string, unknown>;
+    type?: "select";
+    options?: Array<{ text: string; value: string }>;
   }>;
   text?: string;
 }): MattermostAttachment[] {
@@ -385,7 +392,8 @@ export function buildButtonAttachments(params: {
     const token = generateInteractionToken(context, params.accountId);
     return {
       id: safeId,
-      type: "button" as const,
+      type: btn.type ?? "button",
+      ...(btn.options ? { options: btn.options.map(({ text, value }) => ({ text, value })) } : {}),
       name: btn.name,
       style: btn.style,
       integration: {
@@ -423,18 +431,44 @@ export function buildButtonProps(params: {
       id: normalizeStringifiedOptionalString(btn.id ?? btn.callback_data) ?? "",
       name: normalizeStringifiedOptionalString(btn.text ?? btn.name ?? btn.label) ?? "",
       style: btn.style ?? "default",
-      context:
+      type: btn.type,
+      options: btn.options,
+      context: (
         typeof btn.context === "object" && btn.context !== null
           ? {
               ...btn.context,
               [SIGNED_CHANNEL_ID_CONTEXT_KEY]: params.channelId,
             }
-          : { [SIGNED_CHANNEL_ID_CONTEXT_KEY]: params.channelId },
+          : { [SIGNED_CHANNEL_ID_CONTEXT_KEY]: params.channelId }) as Record<string, unknown>,
     }))
     .filter((btn) => btn.id && btn.name);
 
   if (buttons.length === 0) {
     return undefined;
+  }
+
+  for (const button of buttons) {
+    if (button.type !== "select") continue;
+    const choices = button.options;
+    if (!Array.isArray(choices) || choices.length < 1 || choices.length > 25 ||
+      choices.some(choice => typeof choice.value !== "string" || !choice.value || choice.value.length > 200 || /[\x00-\x1f\x7f]/.test(choice.value) ||
+        typeof choice.text !== "string" || !choice.text || choice.text.length > 100) ||
+      new Set(choices.map(choice => choice.value)).size !== choices.length) {
+      throw new Error("Mattermost select requires 1–25 distinct bounded choices.");
+    }
+    button.context = {
+      [SIGNED_CHANNEL_ID_CONTEXT_KEY]: params.channelId,
+      oc_select: true,
+      select_nonce: randomUUID(),
+      select_expires: Date.now() + 24 * 60 * 60 * 1000,
+      // Only necessary SDK choice data; never arbitrary callback context.
+      select_choices: choices.map(choice => ({
+        text: choice.text, value: choice.value,
+        ...choice.context?.oc_question === true ? {
+          question_id: choice.context.question_id, option_index: choice.context.option_index,
+        } : {},
+      })),
+    };
   }
 
   if (params.format === "blocks") {
@@ -451,9 +485,10 @@ export function buildButtonProps(params: {
         },
       };
       return {
-        type: "button",
-        text: button.name,
-        style: button.style,
+        ...(button.type === "select" ? {
+          type: "static_select", placeholder: button.name,
+          options: button.options!.map(choice => ({ text: choice.text, value: choice.value })),
+        } : { type: "button", text: button.name, style: button.style }),
         action_id: actionId,
       };
     });
@@ -493,6 +528,12 @@ function readInteractionBody(req: IncomingMessage): Promise<string> {
 }
 
 function findMattermostBlockActionName(blocks: unknown, actionId: string): string | null {
+  const block = findMattermostBlockControl(blocks, actionId);
+  const label = block?.text ?? block?.placeholder;
+  return typeof label === "string" && label.trim() ? label.trim() : null;
+}
+
+function findMattermostBlockControl(blocks: unknown, actionId: string): Record<string, unknown> | null {
   if (!Array.isArray(blocks)) {
     return null;
   }
@@ -505,9 +546,7 @@ function findMattermostBlockActionName(blocks: unknown, actionId: string): strin
       continue;
     }
     const block = raw as Record<string, unknown>;
-    if (block.action_id === actionId && typeof block.text === "string" && block.text.trim()) {
-      return block.text.trim();
-    }
+    if (block.action_id === actionId) return block;
     for (const key of ["content", "header", "columns", "items"] as const) {
       if (Array.isArray(block[key])) {
         pending.push(...block[key]);
@@ -515,6 +554,58 @@ function findMattermostBlockActionName(blocks: unknown, actionId: string): strin
     }
   }
   return null;
+}
+
+function readSelectControl(post: MattermostPost, actionId: string): {
+  options: unknown; context: Record<string, unknown>;
+} | null {
+  const attachments = post.props?.attachments;
+  if (Array.isArray(attachments)) {
+    for (const attachment of attachments) {
+      const action = attachment?.actions?.find((item: { id?: string }) => item?.id === actionId);
+      if (action?.type === "select" && action.integration?.context) {
+        return { options: action.options, context: action.integration.context };
+      }
+    }
+  }
+  const block = findMattermostBlockControl(post.props?.mm_blocks, actionId);
+  const actions = post.props?.mm_blocks_actions as Record<string, { context?: Record<string, unknown> }> | undefined;
+  const context = actions?.[actionId]?.context;
+  return block?.type === "static_select" && context ? { options: block.options, context } : null;
+}
+
+/** Validate the mutable choice against the currently signed, bot-authored post control. */
+function resolveSelectChoice(params: {
+  post: MattermostPost; payload: MattermostInteractionPayload; actionId: string;
+  accountId: string; botUserId: string; selected: unknown; nonce?: unknown;
+}) {
+  const { post, payload, actionId, selected } = params;
+  if (post.id !== payload.post_id || post.channel_id !== payload.channel_id || post.user_id !== params.botUserId ||
+    post.delete_at || !payload.user_id?.trim() || typeof selected !== "string" || !selected || selected.length > 200 || /[\x00-\x1f\x7f]/.test(selected)) return null;
+  const control = readSelectControl(post, actionId);
+  if (!control) return null;
+  const { _token, ...staticContext } = control.context;
+  if (staticContext.oc_select !== true || staticContext.action_id !== actionId ||
+    staticContext[SIGNED_CHANNEL_ID_CONTEXT_KEY] !== payload.channel_id ||
+    typeof staticContext.select_nonce !== "string" || (params.nonce !== undefined && params.nonce !== staticContext.select_nonce) ||
+    typeof staticContext.select_expires !== "number" || !Number.isSafeInteger(staticContext.select_expires) || staticContext.select_expires <= Date.now() ||
+    typeof _token !== "string" || !verifyInteractionToken(staticContext, _token, params.accountId)) return null;
+  const choices = staticContext.select_choices;
+  if (!Array.isArray(choices) || choices.length < 1 || choices.length > 25 || !Array.isArray(control.options) || choices.length !== control.options.length) return null;
+  if (choices.some((choice, index) => !choice || typeof choice.value !== "string" || typeof choice.text !== "string" ||
+    choice.value !== (control.options as Array<{ value?: unknown }>)[index]?.value ||
+    choice.text !== (control.options as Array<{ text?: unknown }>)[index]?.text)) return null;
+  const choice = choices.find(item => item.value === selected);
+  if (!choice) return null;
+  const isQuestion = typeof choice.question_id === "string" && Number.isInteger(choice.option_index) && choice.option_index >= 0;
+  return {
+    staticContext, token: _token, actionName: choice.text as string,
+    context: {
+      action_id: actionId, oc_select: true, select_nonce: staticContext.select_nonce,
+      selected_option: selected,
+      ...(isQuestion ? { oc_question: true, question_id: choice.question_id, option_index: choice.option_index } : { callback_data: selected }),
+    } as Record<string, unknown>,
+  };
 }
 
 async function deliverInteractionResponse(params: {
@@ -552,6 +643,15 @@ export function createMattermostInteractionProcessor(
   const { accountId, client, log } = params;
   const core = getMattermostRuntime();
   return async (interaction) => {
+    if (interaction.context.oc_select === true) {
+      const currentPost = await client.request<MattermostPost>(`/posts/${encodeURIComponent(interaction.payload.post_id)}`);
+      const choice = resolveSelectChoice({
+        post: currentPost, payload: interaction.payload, actionId: interaction.actionId,
+        accountId, botUserId: params.botUserId, selected: interaction.context.selected_option, nonce: interaction.context.select_nonce
+      });
+      if (!choice) return; // stale or replaced controls cannot start a replayed turn
+      interaction = { ...interaction, actionName: choice.actionName, context: choice.context };
+    }
     const payload: MattermostInteractionPayload = {
       ...interaction.payload,
       context: interaction.context,
@@ -601,13 +701,14 @@ export function createMattermostInteractionProcessor(
         : `agent:main:mattermost:${accountId}:${payload.channel_id}`;
       core.system.enqueueSystemEvent(eventLabel, {
         sessionKey,
-        contextKey: `mattermost:interaction:${payload.post_id}:${interaction.actionId}`,
+        contextKey: `mattermost:interaction:${payload.post_id}:${interaction.actionId}${interaction.context.oc_select === true ? `:choice:${encodeURIComponent(String(interaction.context.selected_option))}` : ""}`,
       });
     } catch (error) {
       log?.(`mattermost interaction: system event dispatch failed: ${String(error)}`);
     }
 
     try {
+      if (interaction.context.oc_select !== true) {
       await updateMattermostPost(client, payload.post_id, {
         message: interaction.originalMessage,
         props: {
@@ -618,6 +719,7 @@ export function createMattermostInteractionProcessor(
           ],
         },
       });
+      }
     } catch (error) {
       log?.(`mattermost interaction: failed to update post ${payload.post_id}: ${String(error)}`);
     }
@@ -630,6 +732,7 @@ export function createMattermostInteractionProcessor(
           userName: interaction.userName,
           actionId: interaction.actionId,
           actionName: interaction.actionName,
+          ...(typeof interaction.context.selected_option === "string" ? { selectedValue: interaction.context.selected_option } : {}),
           postId: payload.post_id,
           post,
         });
@@ -753,7 +856,7 @@ export function createMattermostInteractionHandler(
     const payload = parsedPayload as MattermostInteractionPayload;
 
     const context = payload.context;
-    if (!context) {
+    if (!context || typeof context !== "object" || Array.isArray(context)) {
       res.statusCode = 400;
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify({ error: "Missing context" }));
@@ -771,8 +874,9 @@ export function createMattermostInteractionHandler(
     }
 
     // Strip _token before verification (it wasn't in the original context)
-    const { _token, ...contextWithoutToken } = context;
-    if (!verifyInteractionToken(contextWithoutToken, token, accountId)) {
+    let { _token, ...contextWithoutToken } = context;
+    const hasSelection = context.selected_option !== undefined || payload.selected_option !== undefined;
+    if (!hasSelection && !verifyInteractionToken(contextWithoutToken, token, accountId)) {
       log?.("mattermost interaction: invalid _token");
       res.statusCode = 403;
       res.setHeader("Content-Type", "application/json");
@@ -820,6 +924,25 @@ export function createMattermostInteractionHandler(
       }
       originalMessage = originalPost.message ?? "";
 
+      if (hasSelection || context.oc_select === true) {
+        const selected = context.selected_option ?? payload.selected_option;
+        const choice = resolveSelectChoice({ post: originalPost, payload, actionId, accountId, botUserId: params.botUserId, selected });
+        const { selected_option: _selected, ...submittedStatic } = contextWithoutToken;
+        if (!choice || (context.selected_option !== undefined && payload.selected_option !== undefined && context.selected_option !== payload.selected_option) ||
+          !safeEqualSecret(token, choice.token) ||
+          JSON.stringify(canonicalizeInteractionContext(submittedStatic)) !== JSON.stringify(canonicalizeInteractionContext(choice.staticContext)) ||
+          !verifyInteractionToken(submittedStatic, token, accountId)) {
+          res.statusCode = 403;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: "Invalid select choice or control" }));
+          return;
+        }
+        // Persist only authenticated choice identity, never the token or all offered options.
+        contextWithoutToken = choice.context;
+        payload.context = choice.context;
+        clickedButtonName = choice.actionName;
+      }
+
       // Ensure the callback can only target an action that exists on the original post.
       const postAttachments = Array.isArray(originalPost?.props?.attachments)
         ? (originalPost.props.attachments as Array<{
@@ -829,7 +952,7 @@ export function createMattermostInteractionHandler(
       for (const att of postAttachments) {
         const match = att.actions?.find((a) => a.id === actionId);
         if (match?.name) {
-          clickedButtonName = match.name;
+          clickedButtonName ??= match.name;
           break;
         }
       }
@@ -919,7 +1042,11 @@ export function createMattermostInteractionHandler(
     }
 
     if (params.admitInteraction) {
-      const { context: _context, ...payloadWithoutContext } = payload;
+      const payloadWithoutContext = {
+        user_id: payload.user_id, user_name: payload.user_name, channel_id: payload.channel_id,
+        post_id: payload.post_id, team_id: payload.team_id,
+        ...(contextWithoutToken.oc_select === true ? {} : { trigger_id: payload.trigger_id }),
+      };
       const interaction: MattermostValidatedInteraction = {
         payload: payloadWithoutContext,
         userName,
@@ -999,7 +1126,7 @@ export function createMattermostInteractionHandler(
 
       core.system.enqueueSystemEvent(eventLabel, {
         sessionKey,
-        contextKey: `mattermost:interaction:${payload.post_id}:${actionId}`,
+        contextKey: `mattermost:interaction:${payload.post_id}:${actionId}${contextWithoutToken.oc_select === true ? `:choice:${encodeURIComponent(String(contextWithoutToken.selected_option))}` : ""}`,
       });
     } catch (err) {
       log?.(`mattermost interaction: system event dispatch failed: ${String(err)}`);
@@ -1007,6 +1134,7 @@ export function createMattermostInteractionHandler(
 
     // Update the post via API to replace buttons with a completion indicator.
     try {
+      if (contextWithoutToken.oc_select !== true) {
       await updateMattermostPost(client, payload.post_id, {
         message: originalMessage,
         props: {
@@ -1017,6 +1145,7 @@ export function createMattermostInteractionHandler(
           ],
         },
       });
+      }
     } catch (err) {
       log?.(`mattermost interaction: failed to update post ${payload.post_id}: ${String(err)}`);
     }
@@ -1035,6 +1164,7 @@ export function createMattermostInteractionHandler(
           userName,
           actionId,
           actionName: clickedButtonName,
+          ...(typeof contextWithoutToken.selected_option === "string" ? { selectedValue: contextWithoutToken.selected_option } : {}),
           postId: payload.post_id,
           post: originalPost,
         });

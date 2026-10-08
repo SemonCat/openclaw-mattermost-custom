@@ -1,4 +1,5 @@
 // Mattermost plugin module dynamically enumerates OpenClaw's native command set for Mattermost.
+import { resolveSkillCommandInvocation } from "openclaw/plugin-sdk/command-auth";
 import {
   listNativeCommandSpecsForConfig,
   listProviderPluginCommandSpecs,
@@ -8,6 +9,21 @@ import {
   type RuntimeEnv,
 } from "./runtime-api.js";
 import type { MattermostCommandSpec } from "./slash-commands.js";
+
+/** Check invocation, not the globally registered command catalog. No command execution here. */
+export function isMattermostNativeSkillAllowed(params: {
+  cfg: OpenClawConfig;
+  commandText: string;
+  skillFilter?: string[];
+}): boolean {
+  if (params.skillFilter === undefined) return true;
+  if (!params.commandText.trimStart().startsWith("/")) return true;
+  const invocation = resolveSkillCommandInvocation({
+    commandBodyNormalized: params.commandText,
+    skillCommands: listSkillCommandsForAgents({ cfg: params.cfg }),
+  });
+  return !invocation || params.skillFilter.includes(invocation.command.skillName);
+}
 
 const MATTERMOST_PROVIDER = "mattermost";
 const TRIGGER_FALLBACK_PREFIX = "oc_";

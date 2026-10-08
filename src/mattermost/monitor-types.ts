@@ -24,4 +24,5 @@ export type MattermostMonitorContext = {
   logDebugMessage: (message: string) => void;
   logVerboseMessage: (message: string) => void;
   statusSink?: (patch: Partial<ChannelAccountSnapshot>) => void;
+  abortSignal?: AbortSignal;
 };

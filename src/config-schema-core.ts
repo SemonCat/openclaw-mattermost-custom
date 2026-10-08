@@ -18,10 +18,8 @@ const MattermostGroupSchema = buildGroupEntrySchema({
 }).omit({
   tools: true,
   toolsBySender: true,
-  skills: true,
   enabled: true,
   allowFrom: true,
-  systemPrompt: true,
 });
 
 function requireMattermostOpenAllowFrom(params: {
@@ -194,6 +192,8 @@ export const MattermostAccountSchemaBase = z
     textChunkLimit: z.number().int().positive().optional(),
     historyLimit: z.number().int().min(0).optional(),
     mediaMaxMb: z.number().positive().optional(),
+    /** Materialize one authorized referenced post/root lazily; disabled unless explicitly enabled. */
+    referenceMedia: z.object({ enabled: z.boolean().optional() }).strict().optional(),
     streaming: MattermostStreamingSchema.optional(),
     replyToMode: MattermostReplyToModeSchema.optional(),
     replyToModeByChatType: MattermostReplyToModeByChatTypeSchema.optional(),
@@ -201,6 +201,7 @@ export const MattermostAccountSchemaBase = z
     actions: z
       .object({
         messages: z.boolean().optional(),
+        search: z.boolean().optional(),
         reactions: z.boolean().optional(),
         edit: z.boolean().optional(),
         delete: z.boolean().optional(),
