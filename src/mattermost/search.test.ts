@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { mattermostPlugin } from "../channel.js";
 import { searchMattermostMessages } from "./search.js";
 import type { MattermostAccountConfig } from "../types.js";
@@ -28,6 +28,12 @@ vi.mock("openclaw/plugin-sdk/ssrf-runtime", async (original) => ({
 }));
 
 describe("public bounded Mattermost search", () => {
+  beforeAll(async () => {
+    // Keep the published SDK's cold runtime import outside timed action cases.
+    // Otherwise a timed-out import continues into later tests' fetch fixtures.
+    await import("../channel.runtime.js");
+  });
+
   it.each([
     ["omitted actions", undefined, true],
     ["empty actions", {}, true],

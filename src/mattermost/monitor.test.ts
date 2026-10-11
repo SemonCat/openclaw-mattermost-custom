@@ -56,13 +56,6 @@ describe("buildMattermostInboundMediaPayload", () => {
         { kind: "audio" },
       ]),
     ).resolves.toEqual({
-      MediaPath: "/tmp/image.png",
-      MediaUrl: "/tmp/image.png",
-      MediaType: "image/png",
-      MediaPaths: ["/tmp/image.png", ""],
-      MediaUrls: ["/tmp/image.png", ""],
-      MediaTypes: ["image/png", "audio"],
-      MediaTranscribedIndexes: undefined,
       media: [
         {
           path: "/tmp/image.png",
@@ -91,13 +84,6 @@ describe("buildMattermostInboundMediaPayload", () => {
         { contentType: "application/pdf", kind: "document" },
       ]),
     ).resolves.toEqual({
-      MediaPath: undefined,
-      MediaUrl: undefined,
-      MediaType: "video",
-      MediaPaths: undefined,
-      MediaUrls: undefined,
-      MediaTypes: ["video", "application/pdf"],
-      MediaTranscribedIndexes: undefined,
       media: [
         {
           path: undefined,

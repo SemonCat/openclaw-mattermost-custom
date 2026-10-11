@@ -41,7 +41,7 @@ mkdir -p /tmp/openclaw/mattermost-custom
 npm run build
 npm pack --omit=dev --pack-destination /tmp/openclaw/mattermost-custom
 openclaw plugins install \
-  /tmp/openclaw/mattermost-custom/openclaw-mattermost-custom-2026.9.8.tgz --force
+  /tmp/openclaw/mattermost-custom/openclaw-mattermost-custom-2026.10.1.tgz --force
 ```
 
 Do not use `plugins install --link` or add this source checkout to
@@ -130,6 +130,35 @@ Account settings override the channel-wide value. For an individual channel,
 `groups["*"].requireMentionInBotThreads`, then the account value. Unavailable,
 deleted, cross-channel, or non-root posts retain the existing mention behavior;
 sender and channel access restrictions still apply.
+
+### Ingress and conversation origin links
+
+Deferred Mattermost ingress releases its lane so later input in that channel/thread
+can reach core while the earlier claim remains in the durable SQLite spool. Release
+is not completion: existing heartbeat, adoption, cancellation, retry and restart
+recovery still own the earlier input. Core decides follow-up/steer ordering.
+
+Admitted messages and verified bot-post interactions supply a Mattermost source
+permalink; threads use their native root. Thread slash callbacks use `root_id`.
+Flat slash invocations without a native source do not fabricate a link from their
+synthetic command ID. Links use the configured instance URL, including its subpath.
+
+The host retains the **first session launch link**, including across reset and real
+provider switches; this is not a latest-message link. The Control UI header shows
+it only for a current Mattermost session whose explicit account has an enabled,
+configured `channels.status` row and whose launch link matches that instance's exact
+permalink path. Missing/denied status, invalid identities and foreign links hide it.
+Accounts sharing the same instance cannot be distinguished by a permalink alone.
+No session state is rewritten to rotate inherited launch links. Task-card child
+session links keep their existing purpose and behavior.
+
+The accessory uses read-only status (no config/credential RPC or provider probe).
+It refreshes on session/account changes, reconnect/read-access transitions, and
+presentation resume. It uses that status snapshot while continuously presented;
+a same-scope configuration change becomes visible at the next such boundary,
+not immediately. It does not poll or refetch on token-stream updates. The browser
+entry is a self-contained generated `dist/control-ui/index.js` with the public
+Control UI SDK bundled, and has no Node or bare SDK imports.
 
 ### Channel instructions and skill availability
 
@@ -378,10 +407,36 @@ When an agent emits a structured plan update, the plugin lazily creates one
 Mattermost task card in the same channel or thread and edits that post for the
 rest of the turn. Tool/reasoning streaming keeps its existing preview post, and
 the final answer keeps its existing delivery path; neither reuses or deletes the
-task-card post. Successful runs mark the card completed, while failed or aborted
-runs retain a truthful failed or cancelled terminal state. Turns without a plan
+task-card post. Successful runs mark the card completed only when the explicit
+parent checklist is complete; completed subtasks alone leave outstanding parent
+steps incomplete. A native successful yielded end (`yielded`, paused liveness,
+and `end_turn`, without failure or cancellation) keeps the parent In progress,
+even when all children or checklist steps are complete. Yielded children remain
+active until their real terminal. Failed or aborted runs retain a truthful failed or cancelled
+terminal state. Turns without a plan
 do not create an extra post. Card API failures are isolated from final-answer
 delivery and use bounded create fallback to avoid duplicate posts.
+
+A native automatic parent continuation can update that same card when committed
+transcript provenance identifies `subagent_settle` from a child recorded by the
+original task, with the exact parent session incarnation and a committed successor
+run. Requester-settle wakes use this same `subagent_settle` provenance; run-id
+spelling grants no authority. Only matching successful native `progress_card` calls updating the original
+checklist are applied. A successful terminal with all parent steps completed leaves
+that card Completed; a partial plan remains Incomplete. Continuation finalization
+requires both a committed terminal assistant and its native lifecycle receipt,
+so repeated yields remain In progress. Receipts arriving before committed rows
+are buffered within the existing bounded continuation ownership.
+New inbound or Web UI input,
+a session reset, failure/cancellation, or account stop retires continuation ownership.
+Ownership is in memory with a 24-hour absolute lifetime, at most 100 retained tasks,
+and a bounded 32-row successor buffer; ordinary original-run transcript volume does
+not consume that buffer. Existing cards and ownership lost on restart are not adopted,
+and a continuation never creates a card for a planless turn or an accepted post with
+no usable identity. Final answers keep their separate delivery path.
+An unprovenanced human correction also retires continuation ownership, including
+during the original run: the published transcript API does not prove same-run
+steer adoption on user rows. Later original-run tools alone cannot establish it.
 
 ### Task-card ordering and late-plan handoff
 
@@ -410,7 +465,7 @@ OpenClaw 2026.9.4 restart-recovery runs also reconnect channel/group session
 events to the original Mattermost thread. Recovery keeps the typing indicator
 alive and restores tool progress in a temporary preview post; terminal recovery
 clears that preview and leaves core's durable final-answer delivery unchanged.
-Ordinary (non-recovery) turns continue to use only their existing inbound-turn
+Ordinary typing and tool previews continue to use their existing inbound-turn
 callbacks, so they are not double-rendered.
 
 Inbound WebSocket posts are persisted through a plugin-owned SQLite ingress
@@ -427,6 +482,12 @@ The package build bundles plugin-owned TypeScript only. OpenClaw Plugin SDK,
 `ws`, and `zod` imports remain external and resolve from the installed host or
 the plugin's declared runtime dependencies. This keeps OpenClaw core code and
 state migrations out of the plugin artifact.
+
+This release targets the published OpenClaw `2026.10.1` SDK and requires host
+and plugin API `>=2026.10.1`. Earlier hosts are not covered by this build's
+compatibility checks. The build verifies every emitted SDK subpath and named
+binding against the exact dev dependency in this checkout's `node_modules`;
+linked host checkouts and Gateway host overrides are not used.
 
 Build before installing or packing the plugin:
 
@@ -445,6 +506,22 @@ changes in this repo's `src/`. Recheck the downstream command, callback,
 reaction, and trigger-cap behavior when upstream touches the corresponding
 files.
 
+### OpenClaw 2026.10.1 adaptation
+
+This build replaces the removed `command-auth` SDK invocation helper with local
+skill-invocation matching while retaining host-owned command discovery. It also
+ports the official plugin's shared callback-path discovery, canonical ordered
+inbound media facts, and account-scoped interaction-secret registration.
+
+Callback registration and the legacy Gateway auth-bypass artifact now use the
+same path discovery. The custom public default remains `/mattermost/command`.
+Inbound attachment facts preserve failed-file positions and referenced media;
+the host owns compatibility-field projection. Interaction secrets are registered
+per account, with no global default secret shared across multiple accounts.
+
+The source comparison, existing features, core-owned improvements, and deferred
+items are recorded in [the upstream review](docs/upstream-2026.10.1.md).
+
 From this standalone checkout, the focused proof is:
 
 ```bash
@@ -459,7 +536,7 @@ shared Mattermost contract tests and the downstream behavior tests.
 ### Test status against the published npm SDK
 
 This repo builds and tests against the published `openclaw` npm package
-(`2026.9.8`), not the OpenClaw monorepo checkout. One category of tests
+(`2026.10.1`), not the OpenClaw monorepo checkout. One category of tests
 behaves differently from the monorepo for that reason:
 
 - Ten suites import test-only Plugin SDK subpaths (`channel-test-helpers`,
@@ -473,6 +550,12 @@ The Mattermost ack/status integration suite uses a minimal local test-only shim
 for its one debounce helper and therefore does run in the standalone checkout.
 
 All included suites run green via `vitest run`.
+
+`npx tsc --noEmit` is an additional diagnostic, not a passing standalone gate:
+the published SDK omits declarations for several exported runtime subpaths, and
+this checkout also has existing type errors, including a task-card reader of
+the non-public `SessionEntry.lastRunId`. The runtime build checks actual SDK
+exports; tests and build success do not imply a clean TypeScript check.
 
 ## Docs
 

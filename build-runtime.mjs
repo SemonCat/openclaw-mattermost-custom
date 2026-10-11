@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "tsdown";
 
@@ -51,6 +52,23 @@ await build({
   platform: "node",
 });
 
+// Preserve an externalized browser probe for the same named SDK binding gate.
+// The shipped browser build below then bundles that validated public DOM SDK.
+const browserProbeDir = fs.mkdtempSync(
+  path.join(os.tmpdir(), "mattermost-browser-sdk-"),
+);
+await build({
+  clean: false,
+  config: false,
+  dts: false,
+  deps: { neverBundle },
+  entry: { index: path.join(pluginDir, "browser/index.ts") },
+  format: "esm",
+  platform: "browser",
+  outDir: browserProbeDir,
+  logLevel: "warn",
+});
+
 // tsdown/rolldown splits shared code used by 2+ entries into hashed chunk
 // files (e.g. `channel.runtime-X1qGRmcs.js`) alongside the entry-named
 // outputs. Most Plugin SDK imports live in those chunks, not the entries, so
@@ -71,7 +89,7 @@ function listEmittedJsFiles(dir) {
   return results;
 }
 
-const emittedJsFiles = listEmittedJsFiles(outDir).toSorted((left, right) =>
+const emittedJsFiles = [...listEmittedJsFiles(outDir), ...listEmittedJsFiles(browserProbeDir)].toSorted((left, right) =>
   left.localeCompare(right),
 );
 if (emittedJsFiles.length === 0) {
@@ -157,45 +175,18 @@ if (namedImportsBySpecifier.size === 0) {
   throw new Error("runtime output does not preserve any external OpenClaw Plugin SDK imports");
 }
 
-function findWorkspaceHostRoot(startDir) {
-  let currentDir = startDir;
-  while (true) {
-    const installedDir = path.join(currentDir, "node_modules", "openclaw");
-    if (fs.existsSync(path.join(installedDir, "package.json"))) {
-      return installedDir;
-    }
-    const workspacePackageJsonPath = path.join(currentDir, "package.json");
-    if (fs.existsSync(workspacePackageJsonPath)) {
-      const candidate = JSON.parse(fs.readFileSync(workspacePackageJsonPath, "utf8"));
-      if (candidate.name === "openclaw") {
-        return currentDir;
-      }
-    }
-    const parentDir = path.dirname(currentDir);
-    if (parentDir === currentDir) {
-      throw new Error(
-        "cannot find the OpenClaw host used for the runtime build; " +
-          "set MATTERMOST_CUSTOM_HOST_ROOT to an OpenClaw checkout or install",
-      );
-    }
-    currentDir = parentDir;
-  }
+// The standalone gate must validate the published dependency used by this
+// checkout, never a source checkout or a separately installed Gateway.
+const hostRoot = path.join(pluginDir, "node_modules", "openclaw");
+if (fs.realpathSync(hostRoot) !== hostRoot) {
+  throw new Error("standalone build requires an installed OpenClaw npm package, not a linked checkout");
 }
-
-function resolveHostRoot() {
-  const override = process.env.MATTERMOST_CUSTOM_HOST_ROOT?.trim();
-  if (!override) {
-    return findWorkspaceHostRoot(pluginDir);
-  }
-  const overridePackageJsonPath = path.join(override, "package.json");
-  if (!fs.existsSync(overridePackageJsonPath)) {
-    throw new Error(`MATTERMOST_CUSTOM_HOST_ROOT does not contain a package.json: ${override}`);
-  }
-  return path.resolve(override);
-}
-
-const hostRoot = resolveHostRoot();
+const pluginPackageJson = JSON.parse(fs.readFileSync(path.join(pluginDir, "package.json"), "utf8"));
 const hostPackageJson = JSON.parse(fs.readFileSync(path.join(hostRoot, "package.json"), "utf8"));
+const expectedHostVersion = pluginPackageJson.devDependencies.openclaw;
+if (hostPackageJson.name !== "openclaw" || hostPackageJson.version !== expectedHostVersion) {
+  throw new Error(`standalone build requires openclaw@${expectedHostVersion}; found ${hostPackageJson.version}`);
+}
 const hostExports = hostPackageJson.exports ?? {};
 
 const missingHostExports = [...namedImportsBySpecifier.keys()].filter(
@@ -219,9 +210,6 @@ function resolveHostSubpathFile(specifier) {
 
 const missingNamedExports = [];
 for (const [specifier, names] of namedImportsBySpecifier) {
-  if (names.size === 0) {
-    continue;
-  }
   const hostFilePath = resolveHostSubpathFile(specifier);
   if (!fs.existsSync(hostFilePath)) {
     throw new Error(
@@ -251,5 +239,35 @@ const totalNamedExports = [...namedImportsBySpecifier.values()].reduce(
 console.error(
   `[mattermost-custom] built ${sourceEntries.length} standalone runtime entries across ` +
     `${emittedJsFiles.length} emitted files; verified ${totalNamedExports} named Plugin SDK ` +
-    `exports across ${namedImportsBySpecifier.size} subpaths against host ${hostRoot}`,
+    `exports across ${namedImportsBySpecifier.size} subpaths against openclaw@${hostPackageJson.version} at ${hostRoot}`,
 );
+
+await build({
+  clean: false,
+  config: false,
+  dts: false,
+  deps: { alwaysBundle: ["openclaw/plugin-sdk/control-ui"] },
+  entry: { index: path.join(pluginDir, "browser/index.ts") },
+  format: "esm",
+  platform: "browser",
+  outDir: path.join(outDir, "control-ui"),
+  logLevel: "info",
+});
+const browserFiles = listEmittedJsFiles(path.join(outDir, "control-ui"));
+if (
+  browserFiles.length !== 1 ||
+  path.basename(browserFiles[0]) !== "index.js"
+) {
+  throw new Error("browser entry must be one self-contained index.js artifact");
+}
+const browserOutput = fs.readFileSync(browserFiles[0], "utf8");
+if (
+  /\b(?:import\s*(?:["'({*]|[\w$]+)|export\s*[^;]*?\bfrom\s*["'])|\b(?:require\s*\(|process\.|Buffer\b)|node:/u.test(
+    browserOutput,
+  )
+) {
+  throw new Error(
+    "browser artifact contains an import or Node runtime dependency",
+  );
+}
+fs.rmSync(browserProbeDir, { recursive: true, force: true });

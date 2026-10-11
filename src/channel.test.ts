@@ -1,5 +1,5 @@
 // Mattermost tests cover channel plugin behavior.
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderMessagePresentationFallbackText } from "openclaw/plugin-sdk/interactive-runtime";
 import type { OpenClawConfig } from "../runtime-api.js";
 import { createChannelMessageReplyPipeline } from "../runtime-api.js";
@@ -241,6 +241,11 @@ describe("mattermostPlugin", () => {
         approvalKind: "exec",
       }),
     ).toEqual({ authorized: true });
+  });
+
+  beforeAll(async () => {
+    // Exercise provider sends after the SDK's cold channel-runtime import settles.
+    await import("./channel.runtime.js");
   });
 
   beforeEach(() => {

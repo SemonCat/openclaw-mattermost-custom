@@ -1,5 +1,4 @@
 // Mattermost plugin module dynamically enumerates OpenClaw's native command set for Mattermost.
-import { resolveSkillCommandInvocation } from "openclaw/plugin-sdk/command-auth";
 import {
   listNativeCommandSpecsForConfig,
   listProviderPluginCommandSpecs,
@@ -18,11 +17,25 @@ export function isMattermostNativeSkillAllowed(params: {
 }): boolean {
   if (params.skillFilter === undefined) return true;
   if (!params.commandText.trimStart().startsWith("/")) return true;
-  const invocation = resolveSkillCommandInvocation({
-    commandBodyNormalized: params.commandText,
-    skillCommands: listSkillCommandsForAgents({ cfg: params.cfg }),
-  });
-  return !invocation || params.skillFilter.includes(invocation.command.skillName);
+  // 2026.10.1 no longer publishes the command-auth invocation resolver.
+  // Match the host's native-name and /skill alias rules locally; discovery
+  // remains host-owned through the published command-auth-native contract.
+  const match = params.commandText.trim().match(/^\/([^\s]+)(?:\s+([\s\S]+))?$/);
+  if (!match) return true;
+  const commandName = match[1]?.trim().toLowerCase();
+  const skillCommands = listSkillCommandsForAgents({ cfg: params.cfg });
+  const normalizeLookup = (value: string) => value.trim().toLowerCase().replace(/[\s_]+/g, "-");
+  const skillName = commandName === "skill" ? match[2]?.trim().match(/^([^\s]+)/)?.[1] : undefined;
+  const command =
+    commandName === "skill"
+      ? skillCommands.find(
+          (entry) =>
+            skillName !== undefined &&
+            (normalizeLookup(entry.name) === normalizeLookup(skillName) ||
+              normalizeLookup(entry.skillName) === normalizeLookup(skillName)),
+        )
+      : skillCommands.find((entry) => entry.name.trim().toLowerCase() === commandName);
+  return !command || params.skillFilter.includes(command.skillName);
 }
 
 const MATTERMOST_PROVIDER = "mattermost";

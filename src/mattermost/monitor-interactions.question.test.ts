@@ -264,3 +264,56 @@ describe("Mattermost question interactions", () => {
     expect(mocks.resolveOption).not.toHaveBeenCalled();
   });
 });
+
+it.each(["bot", "foreign", undefined])(
+  "generic interaction source link requires verified bot post author %s",
+  async (author) => {
+    vi.clearAllMocks();
+    mocks.createHandler.mockImplementation(() => async () => {});
+    mocks.createProcessor.mockImplementation(() => vi.fn());
+    const dispatch = vi.fn(async () => {});
+    const postId = "a".repeat(26);
+    const rootId = "b".repeat(26);
+    captureOptions(undefined, {
+      account: { accountId: "main", baseUrl: "https://chat.example/mm", config: {} },
+      logVerboseMessage: vi.fn(),
+      logDebugMessage: vi.fn(),
+      core: {
+        config: { current: () => cfg },
+        channel: {
+          commands: { shouldHandleTextCommands: () => true },
+          routing: {
+            resolveAgentRoute: () => ({
+              sessionKey: "agent:main:mattermost:channel:chan-1",
+              accountId: "main",
+              agentId: "main",
+            }),
+          },
+          text: { resolveTextChunkLimit: () => 4000, resolveMarkdownTableMode: () => "off" },
+          inbound: { dispatch },
+        },
+      },
+    });
+    const options = mocks.createHandler.mock.calls[0]![0];
+    await options.dispatchButtonClick({
+      channelId: "chan-1",
+      userId: "user-1",
+      userName: "ada",
+      actionId: "custom",
+      actionName: "Continue",
+      postId,
+      post: { id: postId, channel_id: "chan-1", user_id: author, root_id: rootId },
+    });
+    expect(dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ctxPayload: expect.objectContaining({
+          MessageSid: `interaction:${postId}:custom`,
+          ConversationLink:
+            author === "bot"
+              ? { url: `https://chat.example/mm/_redirect/pl/${rootId}`, label: "Mattermost" }
+              : undefined,
+        }),
+      }),
+    );
+  },
+);

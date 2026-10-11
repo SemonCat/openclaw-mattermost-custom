@@ -168,6 +168,7 @@ const mockState = vi.hoisted(() => ({
     message?: unknown;
     messageId?: string;
     messageSeq?: number;
+    runId?: string;
   }) => void>,
   progressDrafts: [] as Array<{ getSnapshot: () => { lines: readonly unknown[] } }>,
   registerMattermostMonitorSlashCommands: vi.fn(),
@@ -1985,6 +1986,7 @@ describe("mattermost inbound user posts", () => {
     await vi.waitFor(() => expect(socket.openListenerCount).toBeGreaterThan(0));
     socket.emitOpen();
     const baselineAgentEventListenerCount = mockState.agentEventListeners.length;
+    const baselineTranscriptListenerCount = mockState.sessionTranscriptListeners.length;
     await emitMattermostChannelPost(socket, {
       id: "post-visible-work-session",
       rootId: "thread-visible-work-session",
@@ -1997,7 +1999,7 @@ describe("mattermost inbound user posts", () => {
       );
     });
     expect(mockState.agentEventListeners).toHaveLength(baselineAgentEventListenerCount + 1);
-    expect(mockState.sessionTranscriptListeners).toHaveLength(0);
+    expect(mockState.sessionTranscriptListeners).toHaveLength(baselineTranscriptListenerCount);
 
     for (const listener of [...mockState.agentEventListeners]) {
       listener({
@@ -2044,7 +2046,139 @@ describe("mattermost inbound user posts", () => {
     abortController.abort();
     socket.emitClose(1000);
     await monitor;
+    expect(mockState.sessionTranscriptListeners).toHaveLength(0);
   });
+
+  it.each([[false, false], [true, false], [false, true], [true, true]] as const)(
+    "completes the original task card across automatic parent continuation, children before return=%s, one successor=%s",
+    async (childrenBeforeReturn, singleSuccessor) => {
+      const socket = new FakeWebSocket();
+      const abortController = new AbortController();
+      const parentSessionKey = "agent:main:mattermost:channel:chan-1:thread:thread-continuation";
+      const target = { agentId: "main", sessionId: "parent-incarnation", sessionKey: parentSessionKey };
+      const planSteps = [
+        "Collect full May/September PO and replies",
+        "Verify roles, gaps, and monthly statistics",
+        "Update concise HTML and source links",
+      ];
+      const childLabels = ["May first half", "May second half", "September first half", "September second half"];
+      const children = childLabels.map((label, index) => ({ sessionKey: `child-${index}`, label }));
+      mockState.getSessionEntry.mockImplementation(({ sessionKey }) => ({
+        sessionId: sessionKey === parentSessionKey ? target.sessionId : `incarnation-${sessionKey}`,
+        lastRunId: `${sessionKey}-run`, status: "running",
+      }));
+      mockState.runtimeCore = createRuntimeCore(testConfig, { sessionKey: "agent:main:mattermost:channel:chan-1" });
+      mockState.sendMessageMattermost.mockImplementation(async (_to, text) => ({
+        messageId: "separate-result-post", channelId: "chan-1", content: text,
+        receipt: createMessageReceiptFromOutboundResults({
+          results: [{ messageId: "separate-result-post", channelId: "chan-1" }], kind: "text",
+        }),
+      }));
+      const endChildren = () => {
+        for (const child of children) for (const listener of [...mockState.agentEventListeners]) {
+          listener({ sessionKey: child.sessionKey, runId: `${child.sessionKey}-run`,
+            stream: "lifecycle", data: { phase: "end" } });
+        }
+      };
+      mockState.dispatchInboundMessage.mockImplementation(async (params) => {
+        expect(params.ctx.SessionKey).toBe(parentSessionKey);
+        params.replyOptions?.onAgentRunStart?.("parent-initial-run");
+        await params.replyOptions?.onPlanUpdate?.({
+          source: "openclaw", steps: planSteps.map((step) => ({ step, status: "pending" })),
+        });
+        params.replyOptions?.onVisibleWorkSessions?.(children);
+        if (childrenBeforeReturn) endChildren();
+        const delivery = mockState.deliveryPlanObserver.mock.calls.at(-1)?.[0];
+        await delivery.deliver({ text: "Continuing this work; result will follow" }, { kind: "final" });
+        for (const listener of [...mockState.agentEventListeners]) {
+          listener({ sessionKey: parentSessionKey, runId: "parent-initial-run",
+            stream: "lifecycle", data: { phase: "end", yielded: true,
+              livenessState: "paused", stopReason: "end_turn" } });
+        }
+        return withAgentRunTerminalOutcome({ counts: { final: 1 } }, "completed");
+      });
+      let seq = 0;
+      const emit = (message: unknown, runId?: string) => {
+        for (const listener of [...mockState.sessionTranscriptListeners]) {
+          listener({ target, message, messageSeq: ++seq, runId });
+        }
+      };
+      const continuePlan = (allCompleted: boolean) => {
+        const runId = singleSuccessor ? "one-parent-successor" : `parent-continuation-${allCompleted}`;
+        const toolCallId = `continued-plan-${allCompleted}`;
+        if (!singleSuccessor || !allCompleted) emit({ role: "user", provenance: { kind: "inter_session", sourceChannel: "internal",
+          sourceTool: "subagent_settle", sourceSessionKey: children[0].sessionKey }, content: [] });
+        emit({ role: "assistant", __openclaw: { runId }, stopReason: "toolUse",
+          content: [{ type: "toolCall", id: toolCallId, name: "tool_call", arguments: {
+            id: "openclaw:core:progress_card", args: { plan: planSteps.map((step, index) => ({
+              step, status: !allCompleted && index === 2 ? "in_progress" : "completed",
+            })) },
+          } }] });
+        emit({ role: "toolResult", __openclaw: { runId }, toolName: "tool_call", toolCallId, isError: false,
+          content: [{ type: "text", text: JSON.stringify({
+            tool: { id: "openclaw:core:progress_card", name: "progress_card", source: "openclaw" },
+            result: { content: [], details: { revision: allCompleted ? 3 : 2,
+              steps: { completed: allCompleted ? 3 : 2, total: 3 } } },
+          }) }] });
+        if (!singleSuccessor || allCompleted) {
+          emit({ role: "assistant", __openclaw: { runId }, stopReason: "stop", content: [] }, runId);
+          for (const listener of [...mockState.agentEventListeners]) {
+            listener({ sessionKey: parentSessionKey, runId, stream: "lifecycle",
+              data: { phase: "end", ...(!allCompleted
+                ? { yielded: true, livenessState: "paused", stopReason: "end_turn" } : {}) } });
+          }
+        }
+      };
+      const monitor = monitorMattermostProvider({
+        config: testConfig, runtime: testRuntime(), abortSignal: abortController.signal,
+        webSocketFactory: () => socket,
+      });
+      try {
+        await vi.waitFor(() => expect(socket.openListenerCount).toBeGreaterThan(0));
+        socket.emitOpen();
+        const transcriptBaseline = mockState.sessionTranscriptListeners.length;
+        await emitMattermostChannelPost(socket, {
+          id: "post-continuation", rootId: "thread-continuation", message: "Analyze the two months",
+        });
+        await vi.waitFor(() => expect(mockState.sessionTranscriptListeners).toHaveLength(transcriptBaseline));
+        if (!childrenBeforeReturn) endChildren();
+        await vi.waitFor(() => {
+          const message = String(mockState.updateMattermostPost.mock.calls.at(-1)?.[2].message);
+          expect(message).toContain("Task progress · In progress");
+          for (const label of childLabels) expect(message).toContain(`${label} · Completed`);
+        });
+        continuePlan(false);
+        await vi.waitFor(() => {
+          const message = String(mockState.updateMattermostPost.mock.calls.at(-1)?.[2].message);
+          expect(message).toContain("Task progress · In progress");
+          expect(message).toContain(`- [x] ${planSteps[0]}`);
+          expect(message).toContain(`- [ ] **${planSteps[2]}**`);
+        });
+        continuePlan(true);
+        await vi.waitFor(() => {
+          const message = String(mockState.updateMattermostPost.mock.calls.at(-1)?.[2].message);
+          expect(message).toContain("Task progress · Completed");
+          for (const step of planSteps) expect(message).toContain(`- [x] ${step}`);
+        });
+        const delivery = mockState.deliveryPlanObserver.mock.calls.at(-1)?.[0];
+        await delivery.deliver({ text: "Both months analyzed; original HTML updated and validated" }, { kind: "final" });
+        expect(mockState.dispatchInboundMessage).toHaveBeenCalledOnce();
+        expect(mockState.createMattermostPost).toHaveBeenCalledOnce();
+        expect(mockState.createMattermostPost.mock.invocationCallOrder[0]).toBeLessThan(
+          mockState.sendMessageMattermost.mock.invocationCallOrder[0],
+        );
+        expect(mockState.updateMattermostPost.mock.calls.every((call) => call[1] === "task-card-post")).toBe(true);
+        expect(mockState.sendMessageMattermost).toHaveBeenLastCalledWith(
+          "channel:chan-1", "Both months analyzed; original HTML updated and validated",
+          expect.objectContaining({ replyToId: "thread-continuation" }),
+        );
+      } finally {
+        abortController.abort(); socket.emitClose(1000); await monitor;
+      }
+      expect(mockState.sessionTranscriptListeners).toHaveLength(0);
+      expect(mockState.agentEventListeners).toHaveLength(0);
+    },
+  );
 
   it("discovers a hidden child session from this turn and keeps the task card live", async () => {
     const socket = new FakeWebSocket();

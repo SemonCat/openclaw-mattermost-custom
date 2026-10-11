@@ -129,13 +129,14 @@ describe("lazy authorized referenced attachment content", () => {
     await createMattermostPostHandler(fixture.monitor)(fixture.post, { data: { sender_name: "ada" } });
     expect(dispatch).toHaveBeenCalledOnce();
     const context = dispatch.mock.calls[0][1].ctxPayload;
-    expect(context.MediaPath).toBe(path.join(fixture.dir, F(1)));
+    expect(context.media[0].path).toBe(path.join(fixture.dir, F(1)));
+    // The host's finalizer still supplies compatibility fields from canonical facts.
     expect(context.MediaPaths).toEqual([path.join(fixture.dir, F(1))]);
     expect(context.media).toHaveLength(1);
     expect(context.BodyForAgent).toContain("[existing attachment metadata]");
     expect(context.CommandBody).toBe("analyze this file");
     expect(context.MessageThreadId).toBe(R);
-    expect((await stat(context.MediaPath)).size).toBe(4);
+    expect((await stat(context.media[0].path)).size).toBe(4);
   });
   it("uses only one explicit same-instance permalink and deduplicates current files", async () => {
     const fixture = await setup();
@@ -145,7 +146,26 @@ describe("lazy authorized referenced attachment content", () => {
     const media = await fixture.resolve();
     expect(media).toHaveLength(1);
     expect(fixture.save.mock.calls[0][0].filePathHint).toBe(F(2));
-    expect(await buildMattermostInboundMediaPayload(media)).toMatchObject({ MediaPath: path.join(fixture.dir, F(2)), media: [expect.objectContaining({ contentType: "text/plain" })] });
+    expect(await buildMattermostInboundMediaPayload(media)).toMatchObject({ media: [expect.objectContaining({ path: path.join(fixture.dir, F(2)), contentType: "text/plain" })] });
+  });
+  it("keeps a failed current attachment before a materialized reference through host finalization", async () => {
+    const fixture = await setup();
+    fixture.post.file_ids = [F(2)];
+    fixture.save.mockRejectedValueOnce(new Error("current file unavailable"));
+
+    await createMattermostPostHandler(fixture.monitor)(fixture.post, { data: { sender_name: "ada" } });
+
+    const context = dispatch.mock.calls[0][1].ctxPayload;
+    expect(context.media).toHaveLength(2);
+    expect(context.media[0]).toMatchObject({ path: undefined, contentType: "text/plain" });
+    expect(context.media[1]).toMatchObject({
+      path: path.join(fixture.dir, F(1)),
+      contentType: "text/plain",
+    });
+    expect(context.MediaPaths).toEqual(["", path.join(fixture.dir, F(1))]);
+    expect(context.BodyForAgent).toContain("attachment unavailable");
+    expect(context.CommandBody).toBe("analyze this file");
+    expect(fixture.save.mock.calls.map(([options]) => options.filePathHint)).toEqual([F(2), F(1)]);
   });
   it("does not fetch files for foreign/private-channel, denied sender, deleted or mismatched references", async () => {
     for (const change of [{ channel_id: O }, { id: O }, { delete_at: 1 }, { root_id: O }, { file_ids: ["invalid"] }]) {
@@ -169,7 +189,7 @@ describe("lazy authorized referenced attachment content", () => {
     fixture.info.clear(); fixture.save.mockRejectedValue(new Error("file deleted or forbidden"));
     await createMattermostPostHandler(fixture.monitor)(fixture.post, { data: { sender_name: "ada" } });
     expect(dispatch.mock.calls[0][1].ctxPayload.BodyForAgent).toContain("analyze this file");
-    expect(dispatch.mock.calls[0][1].ctxPayload.MediaPath).toBeUndefined();
+    expect(dispatch.mock.calls[0][1].ctxPayload.media).toEqual([]);
   });
   it("caps file count and grants at most the aggregate configured byte budget across failures", async () => {
     const fixture = await setup({ mediaMaxMb: 8 / (1024 * 1024) });

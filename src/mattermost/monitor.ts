@@ -1,3 +1,4 @@
+import { createMattermostTaskCardContinuation } from "./task-card-continuation.js";
 // Mattermost plugin module orchestrates monitor setup, ingress, and teardown.
 import { isLoopbackHost } from "openclaw/plugin-sdk/gateway-runtime";
 import { CHANNEL_APPROVAL_NATIVE_RUNTIME_CONTEXT_CAPABILITY } from "openclaw/plugin-sdk/approval-handler-adapter-runtime";
@@ -398,6 +399,12 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
     onReaction: handleReactionEvent,
   });
 
+  monitor.taskCardContinuation = createMattermostTaskCardContinuation({
+    events: core.events,
+    log: logVerboseMessage,
+  });
+  opts.abortSignal?.addEventListener("abort", monitor.taskCardContinuation.stop, { once: true });
+
   try {
     await runWithReconnect(connectOnce, {
       abortSignal: opts.abortSignal,
@@ -411,6 +418,8 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
       },
     });
   } finally {
+    opts.abortSignal?.removeEventListener("abort", monitor.taskCardContinuation.stop);
+    monitor.taskCardContinuation.stop();
     await ingress.stop();
     await restartRecoveryProgress.stop();
     await interactions.stop();

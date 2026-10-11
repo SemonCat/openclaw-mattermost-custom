@@ -76,6 +76,14 @@ type PendingNativeProgressCard = {
   markdown?: string;
 };
 
+// Mirrors core's strict parent-waiting classification; not exported by this SDK.
+function isYieldedWaiting(data: Record<string, unknown>): boolean {
+  return data.phase === "end" && data.yielded === true &&
+    data.livenessState === "paused" && data.stopReason === "end_turn" &&
+    data.aborted !== true && data.status !== "cancelled" && data.status !== "timed_out" &&
+    data.timeoutPhase == null && data.error == null;
+}
+
 function normalizeSingleLine(value?: string): string | undefined {
   const normalized = value?.replace(/\s+/g, " ").trim();
   return normalized || undefined;
@@ -328,7 +336,7 @@ export function createMattermostTaskProgressCard(params: {
   let settled = false;
   let latestSnapshot: MattermostTaskProgressSnapshot | undefined;
   let lastNativeProgressMarkdown: string | undefined;
-  let lifecycleTerminal: Exclude<MattermostTaskProgressStatus, "in_progress"> | undefined;
+  let lifecycleTerminal: Exclude<MattermostTaskProgressStatus, "in_progress"> | "yielded" | undefined;
   let nextRevision = 0;
   const pendingNativeProgressCards: PendingNativeProgressCard[] = [];
   let publishedMessage: string | undefined;
@@ -416,8 +424,9 @@ export function createMattermostTaskProgressCard(params: {
     }
   };
 
-  const schedulePublish = (): Promise<boolean> => {
-    const operation = writeTail.then(publishLatest, publishLatest);
+  const schedulePublish = (isCurrent?: () => boolean): Promise<boolean> => {
+    const publish = () => isCurrent && !isCurrent() ? false : publishLatest();
+    const operation = writeTail.then(publish, publish);
     writeTail = operation;
     return operation;
   };
@@ -441,11 +450,11 @@ export function createMattermostTaskProgressCard(params: {
     [...workSessions.values()].some((session) => isActiveWorkSession(session.status));
 
   const resolveTerminalStatus = () => {
-    if (hasActiveWorkSessions()) {
-      return undefined;
-    }
     if (parentTerminalStatus === "failed" || parentTerminalStatus === "cancelled") {
       return parentTerminalStatus;
+    }
+    if (hasActiveWorkSessions()) {
+      return undefined;
     }
     if ([...workSessions.values()].some((session) => session.status === "failed")) {
       return "failed" as const;
@@ -506,6 +515,39 @@ export function createMattermostTaskProgressCard(params: {
 
   return {
     postId: () => taskPostId,
+    hasWorkSession: (sessionKey: string) => workSessions.has(sessionKey),
+    canContinue: () => Boolean(taskPostId && latestSnapshot?.steps.length &&
+      parentTerminalStatus !== "failed" && parentTerminalStatus !== "cancelled" &&
+      latestSnapshot.status !== "failed" && latestSnapshot.status !== "cancelled" &&
+      (lifecycleTerminal === "yielded" ||
+        latestSnapshot.steps.some((step) => step.status !== "completed"))),
+    beginContinuation: async (runId: string, isCurrent: () => boolean): Promise<boolean> => {
+      // Only the monitor's proven committed continuation may reopen this card.
+      await writeTail;
+      if (!isCurrent() || !taskPostId || !latestSnapshot?.steps.length || !parentFinished ||
+          latestSnapshot.status === "failed" || latestSnapshot.status === "cancelled" ||
+          parentTerminalStatus === "failed" || parentTerminalStatus === "cancelled" ||
+          lifecycleTerminal !== "yielded" &&
+          !latestSnapshot.steps.some((step) => step.status !== "completed")) return false;
+      activeRunId = runId;
+      lifecycleTerminal = undefined;
+      parentFinished = false;
+      parentTerminalStatus = undefined;
+      settled = false;
+      return true;
+    },
+    updateContinuationPlan: async (
+      runId: string, plan: MattermostTaskProgressPlan, isCurrent: () => boolean,
+    ): Promise<boolean> => {
+      await writeTail;
+      if (!isCurrent() || parentFinished || activeRunId !== runId || !taskPostId || !latestSnapshot) return false;
+      const steps = normalizeSteps(plan.steps);
+      if (steps.length !== latestSnapshot.steps.length ||
+          steps.some((step, index) => step.step !== latestSnapshot!.steps[index].step)) return false;
+      latestSnapshot = { ...latestSnapshot, revision: ++nextRevision, steps,
+        status: "in_progress", workSessions: listWorkSessions() };
+      return await schedulePublish(isCurrent);
+    },
     noteToolStart: (payload: {
       toolCallId?: string;
       name?: string;
@@ -541,12 +583,20 @@ export function createMattermostTaskProgressCard(params: {
       ) {
         const phase = event.data.phase;
         if (phase === "end" || phase === "error") {
-          lifecycleTerminal =
+          const terminal =
             event.data.aborted === true
               ? "cancelled"
-              : phase === "error"
+              : phase === "error" || event.data.error != null ||
+                  event.data.status === "timed_out" || event.data.timeoutPhase != null
                 ? "failed"
-                : "completed";
+                : event.data.status === "cancelled"
+                  ? "cancelled"
+                  : isYieldedWaiting(event.data)
+                    ? "yielded"
+                    : "completed";
+          if (lifecycleTerminal !== "failed" && lifecycleTerminal !== "cancelled") {
+            lifecycleTerminal = terminal;
+          }
         }
       }
       if (settled || !event.sessionKey) {
@@ -576,9 +626,14 @@ export function createMattermostTaskProgressCard(params: {
           workSession.status =
             event.data.aborted === true
               ? "cancelled"
-              : phase === "error"
+              : phase === "error" || event.data.error != null ||
+                  event.data.status === "timed_out" || event.data.timeoutPhase != null
                 ? "failed"
-                : "completed";
+                : event.data.status === "cancelled"
+                  ? "cancelled"
+                  : isYieldedWaiting(event.data)
+                    ? "running"
+                    : "completed";
           workSession.progress = undefined;
         } else {
           return;
@@ -694,38 +749,22 @@ export function createMattermostTaskProgressCard(params: {
           ? "cancelled"
           : result.deliveryFailed || result.outcome === "failed" || lifecycleTerminal === "failed"
             ? "failed"
-            : nominallyCompleted
+            : lifecycleTerminal === "yielded"
+              ? undefined
+              : nominallyCompleted
               ? latestSnapshot.steps.some((step) => step.status !== "completed")
                 ? "incomplete"
                 : "completed"
               : undefined;
-      if (hasActiveWorkSessions()) {
-        if (latestSnapshot.status !== "in_progress") {
-          latestSnapshot = {
-            ...latestSnapshot,
-            revision: ++nextRevision,
-            status: "in_progress",
-            workSessions: listWorkSessions(),
-          };
-          await schedulePublish();
-        } else {
-          await writeTail;
-        }
-        return;
-      }
       const status = resolveTerminalStatus();
-      if (status) {
-        latestSnapshot = {
-          ...latestSnapshot,
-          revision: ++nextRevision,
-          status,
-          workSessions: listWorkSessions(),
-        };
-        await schedulePublish();
-      } else {
-        await writeTail;
-      }
-      settle();
+      latestSnapshot = {
+        ...latestSnapshot,
+        revision: ++nextRevision,
+        status: status ?? "in_progress",
+        workSessions: listWorkSessions(),
+      };
+      await schedulePublish();
+      if (!hasActiveWorkSessions()) settle();
     },
   };
 }

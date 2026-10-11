@@ -41,6 +41,7 @@ function buildButtonAttachmentsForTest(params: ButtonPropsInput): ButtonAttachme
   const signedChannelId = params.buttons[0]?.context?.["__openclaw_channel_id"];
   const props = buildButtonProps({
     ...params,
+    accountId: params.accountId ?? "test",
     channelId: typeof signedChannelId === "string" ? signedChannelId : "test-channel",
   });
   const attachments = props?.attachments;
@@ -100,21 +101,21 @@ function verifyInteractionToken(
 
 describe("setInteractionSecret / getInteractionSecret", () => {
   beforeEach(() => {
-    setInteractionSecret("test-bot-token");
+    setInteractionSecret("test", "test-bot-token");
   });
 
   it("derives a deterministic secret from the bot token", () => {
-    setInteractionSecret("token-a");
+    setInteractionSecret("test", "token-a");
     const secretA = getInteractionSecret();
-    setInteractionSecret("token-a");
+    setInteractionSecret("test", "token-a");
     const secretA2 = getInteractionSecret();
     expect(secretA).toBe(secretA2);
   });
 
   it("produces different secrets for different tokens", () => {
-    setInteractionSecret("token-a");
+    setInteractionSecret("test", "token-a");
     const secretA = getInteractionSecret();
-    setInteractionSecret("token-b");
+    setInteractionSecret("test", "token-b");
     const secretB = getInteractionSecret();
     expect(secretA).not.toBe(secretB);
   });
@@ -128,7 +129,7 @@ describe("setInteractionSecret / getInteractionSecret", () => {
 
 describe("generateInteractionToken / verifyInteractionToken", () => {
   beforeEach(() => {
-    setInteractionSecret("test-bot-token");
+    setInteractionSecret("test", "test-bot-token");
   });
 
   it("generates a hex token", () => {
@@ -244,6 +245,25 @@ describe("generateInteractionToken / verifyInteractionToken", () => {
     expect(verifyInteractionToken(context, tokenA, "acct-a")).toBe(true);
     expect(verifyInteractionToken(context, tokenA, "acct-b")).toBe(false);
   });
+
+  it("keeps existing account tokens valid when another account rotates its secret", () => {
+    setInteractionSecret("acct-a", "bot-token-a");
+    setInteractionSecret("acct-b", "bot-token-b");
+    const context = { action_id: "do_now", item_id: "123" };
+    const tokenA = generateInteractionToken(context, "acct-a");
+    setInteractionSecret("acct-b", "rotated-bot-token-b");
+
+    expect(verifyInteractionToken(context, tokenA, "acct-a")).toBe(true);
+    expect(verifyInteractionToken(context, tokenA, "acct-b")).toBe(false);
+    expect(() => buildButtonProps({
+      callbackUrl: "https://gateway.example.com/mattermost/interactions/test",
+      channelId: "test-channel",
+      buttons: [{ id: "test", name: "Test" }],
+    })).toThrow("Interaction secret not initialized");
+    expect(() => generateInteractionToken(context, "unregistered-account")).toThrow(
+      "Interaction secret not initialized",
+    );
+  });
 });
 
 describe("resolveInteractionCallbackUrl", () => {
@@ -357,7 +377,8 @@ describe("resolveInteractionCallbackPath", () => {
 
 describe("buildButtonProps attachments", () => {
   beforeEach(() => {
-    setInteractionSecret("test-bot-token");
+    setInteractionSecret("test", "test-bot-token");
+    setInteractionSecret("acct", "test-bot-token");
   });
 
   it("returns an array with one attachment containing all buttons", () => {

@@ -2,6 +2,7 @@
 import { finalizeInboundContext } from "openclaw/plugin-sdk/reply-runtime";
 import { resolveMattermostGroupContext } from "../group-context.js";
 import { resolveMattermostReplyToMode } from "./accounts.js";
+import { resolveMattermostConversationLink } from "./conversation-link.js";
 import type { MattermostChannel } from "./client.js";
 import { resolveMattermostTrustedChatKind } from "./monitor-auth.js";
 import { resolveMattermostThreadSessionContext } from "./monitor-context.js";
@@ -13,6 +14,7 @@ type MattermostEventPlanParams = {
   channelId: string;
   senderId: string;
   postId?: string | null;
+  suppressConversationLink?: boolean;
   threadRootId?: string | null;
   channelInfo?: MattermostChannel | null;
   channelTypeFallback?: string | null;
@@ -100,6 +102,13 @@ export async function buildMattermostEventPlan(
         Provider: "mattermost" as const,
         Surface: "mattermost" as const,
         NativeChannelId: params.channelId,
+        ConversationLink: params.suppressConversationLink
+          ? undefined
+          : resolveMattermostConversationLink({
+              baseUrl: monitor.account.baseUrl,
+              postId: params.postId,
+              threadRootId: params.threadRootId,
+            }),
         InboundAccessAuthorized: true,
         ReplyToId: thread.effectiveReplyToId,
         MessageThreadId: thread.effectiveReplyToId,

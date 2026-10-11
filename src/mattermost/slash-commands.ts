@@ -1,7 +1,7 @@
 import { sleepWithAbort } from "openclaw/plugin-sdk/runtime-env";
 // Mattermost plugin module implements slash commands behavior.
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
-import { isWildcardBindHost } from "./callback-host.js";
+import { isWildcardBindHost, normalizeCallbackPath } from "./callback-host.js";
 import type { MattermostClient } from "./client.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -604,33 +604,13 @@ export function normalizeSlashCommandTrigger(command: string): string {
 
 // ─── Config resolution ───────────────────────────────────────────────────────
 
-// Keep the default outside the Gateway's protected `/api/**` namespace. Mattermost
-// authenticates callbacks with the per-command token, and the route handler validates
-// that token against both startup state and the current Mattermost command record.
-// Replacement channel plugins cannot rely on the bundled plugin's pre-plugin Gateway
-// auth-bypass artifact being selected, so an `/api/**` default can be rejected before
-// this handler gets a chance to authenticate it.
-const DEFAULT_CALLBACK_PATH = "/mattermost/command";
-
-/**
- * Ensure the callback path starts with a leading `/` to prevent
- * malformed URLs like `http://host:portapi/...`.
- */
-function normalizeCallbackPath(path: string): string {
-  const trimmed = path.trim();
-  if (!trimmed) {
-    return DEFAULT_CALLBACK_PATH;
-  }
-  return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
-}
-
 export function resolveSlashCommandConfig(
   raw?: Partial<MattermostSlashCommandConfig>,
 ): MattermostSlashCommandConfig {
   return {
     native: raw?.native ?? "auto",
     nativeSkills: raw?.nativeSkills ?? "auto",
-    callbackPath: normalizeCallbackPath(raw?.callbackPath ?? DEFAULT_CALLBACK_PATH),
+    callbackPath: normalizeCallbackPath(raw?.callbackPath),
     callbackUrl: normalizeOptionalString(raw?.callbackUrl),
   };
 }

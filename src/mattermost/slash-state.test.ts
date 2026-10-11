@@ -4,6 +4,8 @@ import { Socket } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig, RuntimeEnv } from "../runtime-api.js";
 import type { ResolvedMattermostAccount } from "./accounts.js";
+import { resolveMattermostGatewayAuthBypassPaths } from "../gateway-auth-bypass.js";
+import { resolveSlashCommandConfig } from "./slash-commands.js";
 import type { MattermostRegisteredCommand } from "./slash-commands.js";
 import {
   activateSlashCommands,
@@ -135,6 +137,73 @@ function activate(params: {
   });
   replaceAccountHandler(params.accountId);
 }
+
+describe("slash callback route discovery", () => {
+  it("keeps the downstream public default registered without a Gateway bypass", () => {
+    const cfg = { channels: { mattermost: {} } };
+    const registerHttpRoute = vi.fn();
+    registerSlashCommandRoute({ config: cfg, registerHttpRoute } as never);
+
+    expect(registerHttpRoute.mock.calls.map(([route]) => route.path)).toEqual([
+      "/mattermost/command",
+    ]);
+    expect(resolveSlashCommandConfig().callbackPath).toBe("/mattermost/command");
+    expect(resolveMattermostGatewayAuthBypassPaths({ cfg })).toEqual([]);
+  });
+
+  it("registers normalized account/URL paths and bypasses only legacy Mattermost routes", () => {
+    const cfg = {
+      channels: {
+        mattermost: {
+          commands: { callbackPath: " api/channels/mattermost/command " },
+          accounts: {
+            work: {
+              commands: {
+                callbackPath: "mattermost/work",
+                callbackUrl: "https://gateway.example/api/channels/mattermost/work",
+              },
+            },
+            duplicate: { commands: { callbackPath: "/api/channels/mattermost/command" } },
+            other: { commands: { callbackUrl: "https://gateway.example/api/other" } },
+          },
+        },
+      },
+    };
+    const registerHttpRoute = vi.fn();
+    registerSlashCommandRoute({ config: cfg, registerHttpRoute } as never);
+
+    expect(registerHttpRoute.mock.calls.map(([route]) => route.path)).toEqual([
+      "/api/channels/mattermost/command",
+      "/mattermost/work",
+      "/api/channels/mattermost/work",
+      "/mattermost/command",
+      "/api/other",
+    ]);
+    expect(resolveMattermostGatewayAuthBypassPaths({ cfg })).toEqual([
+      "/api/channels/mattermost/command",
+      "/api/channels/mattermost/work",
+    ]);
+    expect(registerHttpRoute.mock.calls.every(([route]) => route.auth === "plugin")).toBe(true);
+  });
+
+  it("keeps fallback routes for malformed config and callback URLs", () => {
+    const cfg = {
+      channels: {
+        mattermost: {
+          commands: { callbackPath: 42, callbackUrl: "invalid URL" },
+          accounts: { work: null, other: { commands: [] } },
+        },
+      },
+    };
+    const registerHttpRoute = vi.fn();
+    registerSlashCommandRoute({ config: cfg, registerHttpRoute } as never);
+
+    expect(registerHttpRoute.mock.calls.map(([route]) => route.path)).toEqual([
+      "/mattermost/command",
+    ]);
+    expect(resolveMattermostGatewayAuthBypassPaths({ cfg })).toEqual([]);
+  });
+});
 
 describe("slash-state global singleton", () => {
   afterEach(() => {

@@ -33,6 +33,32 @@ it("filters native skill invocation before dispatch while preserving ordinary co
   mockState.listSkillCommandsForAgents.mockReset();
 });
 
+it.each([
+  [" /REVIEW_CODE file\nmore input ", false],
+  ["/skill REVIEW-CODE file", false],
+  ["/SKILL Code_Review file\nmore input", false],
+  ["/skill release_notes", false],
+  ["/review-code file", true],
+  ["/code-review file", true],
+  ["/skill", true],
+  ["/skill unknown file", true],
+  ["/status", true],
+  ["prose /review_code file", true],
+])("preserves host invocation matching for %j", (commandText, expected) => {
+  mockState.listSkillCommandsForAgents.mockReturnValue([
+    { name: "review_code", skillName: "code-review" },
+    { name: "release_notes", skillName: "Release Notes" },
+  ]);
+  try {
+    expect(isMattermostNativeSkillAllowed({ cfg: {}, commandText, skillFilter: [] })).toBe(expected);
+    expect(isMattermostNativeSkillAllowed({
+      cfg: {}, commandText, skillFilter: ["code-review", "Release Notes"],
+    })).toBe(true);
+  } finally {
+    mockState.listSkillCommandsForAgents.mockReset();
+  }
+});
+
 function testRuntime(): RuntimeEnv {
   return {
     log: vi.fn(),

@@ -1,11 +1,9 @@
 // Mattermost plugin module implements monitor resources behavior.
 import {
-  buildChannelInboundMediaPayload,
   formatInboundMediaUnavailableText,
   formatMediaPlaceholderText,
   toInboundMediaFactsWithMetadata,
   type ChannelInboundMediaInput,
-  type ChannelInboundMediaPayload,
   type InboundMediaFacts,
   type MediaPlaceholderTextFact,
 } from "openclaw/plugin-sdk/channel-inbound";
@@ -39,9 +37,10 @@ export type MattermostMediaInfo = Pick<ChannelInboundMediaInput, "contentType" |
 
 export async function buildMattermostInboundMediaPayload(
   media: readonly MattermostMediaInfo[],
-): Promise<ChannelInboundMediaPayload & { media: InboundMediaFacts[] }> {
+): Promise<{ media: InboundMediaFacts[] }> {
   const facts = await toInboundMediaFactsWithMetadata(media);
-  return { ...buildChannelInboundMediaPayload(facts), media: facts };
+  // Core owns legacy field projection; ordered facts retain failed attachment slots.
+  return { media: facts };
 }
 
 export function formatMattermostPendingMediaText(params: {

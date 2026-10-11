@@ -3,7 +3,7 @@ import { Socket } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { mattermostPlugin } from "../channel.js";
 import { resolveMattermostPresentation } from "../normalize.js";
 import { setMattermostRuntime } from "../runtime.js";
@@ -76,6 +76,11 @@ function admission(fixture: Awaited<ReturnType<typeof sentMenu>>) {
 }
 
 describe("Mattermost single-select public delivery and admission", () => {
+  beforeAll(async () => {
+    // Load the published SDK runtime before timed sends share a mutable transport fixture.
+    await import("../channel.runtime.js");
+  });
+
   it.each(["legacy", "blocks"] as const)("renders %s controls and admits actual callback context.selected_option", async format => {
     const fixture = await sentMenu(format); await fixture.send();
     expect(fixture.creates).toHaveLength(1);

@@ -213,6 +213,10 @@ export async function dispatchMattermostInboundTurn(
     unsubscribeAgentEvents?.();
     unsubscribeAgentEvents = undefined;
   };
+  monitor.taskCardContinuation?.retireSession(thread.sessionKey);
+  let initialRunId: string | undefined;
+  let continuationRegistered = false;
+  let continuationOwner: ReturnType<NonNullable<MattermostMonitorContext["taskCardContinuation"]>["register"]>;
   const taskProgressCard = createMattermostTaskProgressCard({
     client,
     channelId,
@@ -709,6 +713,7 @@ export async function dispatchMattermostInboundTurn(
       outcome: readAgentRunTerminalOutcome(dispatchResult),
       deliveryFailed: dispatchError || finalDeliveryFailed || queuedFollowupDeliveryError,
     });
+    continuationOwner?.finishInitial();
     usageEventsActive = false;
     unsubscribeTranscriptUpdates();
     await reactions.finish({
@@ -809,6 +814,7 @@ export async function dispatchMattermostInboundTurn(
                   ? [{ begin: reactions.beginQueuedFollowup }]
                   : undefined,
                 onAgentRunStart: (runId) => {
+                  initialRunId ??= runId;
                   progressReceipt.noteRunStart(runId);
                   taskProgressCard.noteRunStart(runId);
                 },
@@ -843,6 +849,18 @@ export async function dispatchMattermostInboundTurn(
                 onModelSelected,
                 onPlanUpdate: async (planUpdate) => {
                   hasStartedWork = true;
+                  if (!continuationRegistered && initialRunId && monitor.taskCardContinuation) {
+                    continuationRegistered = true;
+                    try {
+                      const entry = core.agent.session.getSessionEntry({ sessionKey: thread.sessionKey });
+                      if (entry?.sessionId) continuationOwner = monitor.taskCardContinuation.register({
+                        agentId: route.agentId, sessionId: entry.sessionId,
+                        sessionKey: thread.sessionKey, initialRunId, card: taskProgressCard,
+                      });
+                    } catch (error: unknown) {
+                      monitor.logVerboseMessage(`mattermost continuation identity unavailable: ${String(error)}`);
+                    }
+                  }
                   try {
                     await taskProgressCard.updatePlan(planUpdate);
                   } catch (error: unknown) {

@@ -342,6 +342,7 @@ function createRuntimeCore(cfg: OpenClawConfig) {
     config: { current: () => cfg },
     events: {
       onAgentEvent: () => () => {},
+      onSessionTranscriptUpdate: () => () => {},
     },
     logging: {
       shouldLogVerbose: () => false,

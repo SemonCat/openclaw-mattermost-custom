@@ -102,6 +102,13 @@ vi.mock("./runtime-api.js", () => {
   };
 });
 
+vi.mock("openclaw/plugin-sdk/session-store-runtime", () => ({
+  // This suite verifies config/routing; session persistence belongs to the host.
+  getSessionEntry: vi.fn(() => undefined),
+  patchSessionEntry: vi.fn(),
+  resolveStorePath: vi.fn(() => "/tmp/mattermost-slash-test/sessions.json"),
+}));
+
 vi.mock("../runtime.js", () => ({
   getMattermostRuntime: () => ({
     config: {
@@ -456,6 +463,61 @@ describe("slash-http cfg threading", () => {
       }),
     );
   });
+
+  it.each([undefined, "a".repeat(26)])(
+    "links only native slash root %s, never synthetic invocation SID",
+    async (rootId) => {
+      mockState.resolveMattermostModelPickerEntry.mockReturnValueOnce(null);
+      mockState.parseSlashCommandPayload.mockReturnValueOnce({
+        token: "valid-token",
+        command: "/oc_status",
+        text: "status",
+        channel_id: "chan-1",
+        user_id: "user-1",
+        user_name: "alice",
+        team_id: "team-1",
+        root_id: rootId,
+      });
+      mockState.getMattermostCommand.mockResolvedValueOnce({
+        id: "cmd-status",
+        token: "valid-token",
+        team_id: "team-1",
+        trigger: "oc_status",
+        method: "P",
+        url: callbackUrlFixture,
+        delete_at: 0,
+      });
+      const handler = createSlashCommandHttpHandler({
+        account: accountFixture,
+        cfg: {} as OpenClawConfig,
+        runtime: {} as RuntimeEnv,
+        registeredCommands: [
+          {
+            id: "cmd-status",
+            teamId: "team-1",
+            trigger: "oc_status",
+            token: "valid-token",
+            url: callbackUrlFixture,
+            managed: false,
+          },
+        ],
+      });
+      await handler(createRequest(), createResponse().res);
+      expect(mockState.dispatchInbound).toHaveBeenCalledWith(
+        expect.objectContaining({
+          ctxPayload: expect.objectContaining({
+            NativeChannelId: "chan-1",
+            ConversationLink: rootId
+              ? {
+                  url: `${accountFixture.baseUrl}/_redirect/pl/${rootId}`,
+                  label: "Mattermost",
+                }
+              : undefined,
+          }),
+        }),
+      );
+    },
+  );
 
   it("rejects a cached token that Mattermost has rotated", async () => {
     mockState.parseSlashCommandPayload.mockReturnValueOnce({

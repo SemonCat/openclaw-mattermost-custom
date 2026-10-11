@@ -11,6 +11,7 @@ import type {
 } from "./runtime-api.js";
 
 export type MattermostMonitorContext = {
+  taskCardContinuation?: ReturnType<typeof import("./task-card-continuation.js").createMattermostTaskCardContinuation>;
   core: ReturnType<typeof getMattermostRuntime>;
   runtime: RuntimeEnv;
   cfg: OpenClawConfig;

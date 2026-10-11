@@ -323,6 +323,8 @@ export function createMattermostIngressMonitor(options: {
     pollIntervalMs: options.pollIntervalMs ?? MATTERMOST_INGRESS_POLL_INTERVAL_MS,
     retention: "standard",
     drain: {
+      // Deferred keeps durable custody; core may admit/steer later same-lane input.
+      deferredLaneOccupancy: "release",
       resolveNonRetryableFailure: resolveMattermostIngressNonRetryableFailure,
       deriveLaneKey,
       reconcileStoredLaneKey: (_record, storedLaneKey, derivedLaneKey) =>
