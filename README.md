@@ -41,7 +41,7 @@ mkdir -p /tmp/openclaw/mattermost-custom
 npm run build
 npm pack --omit=dev --pack-destination /tmp/openclaw/mattermost-custom
 openclaw plugins install \
-  /tmp/openclaw/mattermost-custom/openclaw-mattermost-custom-2026.10.2.tgz --force
+  /tmp/openclaw/mattermost-custom/openclaw-mattermost-custom-2026.10.3.tgz --force
 ```
 
 Do not use `plugins install --link` or add this source checkout to
@@ -483,8 +483,8 @@ The package build bundles plugin-owned TypeScript only. OpenClaw Plugin SDK,
 the plugin's declared runtime dependencies. This keeps OpenClaw core code and
 state migrations out of the plugin artifact.
 
-This release targets the published OpenClaw `2026.10.2` SDK and requires host
-and plugin API `>=2026.10.2`. Earlier hosts are not covered by this build's
+This release targets the published OpenClaw `2026.10.3` SDK and requires host
+and plugin API `>=2026.10.3`. Earlier hosts are not covered by this build's
 compatibility checks. The build verifies every emitted SDK subpath and named
 binding against the exact dev dependency in this checkout's `node_modules`;
 linked host checkouts and Gateway host overrides are not used.
@@ -506,15 +506,30 @@ changes in this repo's `src/`. Recheck the downstream command, callback,
 reaction, and trigger-cap behavior when upstream touches the corresponding
 files.
 
-### OpenClaw 2026.10.2 adaptation
+### OpenClaw 2026.10.3 adaptation
 
-The official Mattermost 10.1-to-10.2 delta changes package version contracts
-only. This build updates the exact development SDK, minimum host, plugin API,
+The official Mattermost 10.2-to-10.3 delta changes package declarations only.
+This build updates the exact published development SDK, minimum host, plugin API,
+and build version to 2026.10.3. The official SDK and shared channel source trees
+and the published SDK export map are unchanged; the build validates emitted SDK
+subpaths and named bindings against the installed exact npm 10.3 dependency.
+
+No Mattermost lifecycle implementation changes are introduced. Custom commands,
+callbacks, approvals, protected secret dialogs, questions, reactions, threads,
+streaming, recovery, late-plan ordering, yielded progress, and provenance-based
+parent continuation retain their existing behavior. Core-owned fixes and the
+remaining fresh-inbound post-deployment acceptance are recorded in
+[the 10.3 upstream review](docs/upstream-2026.10.3.md).
+
+### Previous OpenClaw 2026.10.2 adaptation
+
+The official Mattermost 10.1-to-10.2 delta changed package version contracts
+only. That adaptation updated the exact development SDK, minimum host, plugin API,
 and build version to 2026.10.2. The public SDK export map and SDK source are
-unchanged between those releases; the build still checks every emitted SDK
+unchanged between those releases; its build checked every emitted SDK
 subpath and named binding against the published 10.2 package.
 
-No Mattermost lifecycle implementation changes are introduced. Existing
+No Mattermost lifecycle implementation changes were introduced. Existing
 commands, callbacks, recovery, planless turns, late-plan ordering, yielded task
 cards, and provenance-based parent continuation retain their current behavior.
 The source identities, carried behavior, core-owned changes, deferred work,
@@ -551,7 +566,7 @@ shared Mattermost contract tests and the downstream behavior tests.
 ### Test status against the published npm SDK
 
 This repo builds and tests against the published `openclaw` npm package
-(`2026.10.2`), not the OpenClaw monorepo checkout. One category of tests
+(`2026.10.3`), not the OpenClaw monorepo checkout. One category of tests
 behaves differently from the monorepo for that reason:
 
 - Ten suites import test-only Plugin SDK subpaths (`channel-test-helpers`,
