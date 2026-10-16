@@ -7,7 +7,7 @@ import {
   type SessionEntry,
   upsertSessionEntry,
 } from "openclaw/plugin-sdk/session-store-runtime";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenClawConfig } from "./runtime-api.js";
 import {
   pinMattermostExplicitDefaultModelSelection,
@@ -38,35 +38,51 @@ const modelsData = {
 };
 
 describe("Mattermost explicit default-model pin", () => {
-  it.each(["/model openai/gpt-5.6-sol", "/model openai-sol"])(
-    "pins an explicitly named global default to the targeted thread session: %s",
-    async (commandText) => {
-      const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "mm-model-pin-"));
-      const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+  describe("with the published session store", () => {
+    let testDir: string | undefined;
+    let previousStateDir: string | undefined;
+    let storePath: string;
+    let resolvedStorePath: string;
+    const sessionKey = "agent:main:mattermost:channel:chan-1:thread:root-1";
+
+    beforeEach(async () => {
+      previousStateDir = process.env.OPENCLAW_STATE_DIR;
+      testDir = fs.mkdtempSync(path.join(os.tmpdir(), "mm-model-pin-"));
       process.env.OPENCLAW_STATE_DIR = testDir;
-      try {
-        const storePath = path.join(testDir, "agents", "{agentId}", "sessions", "sessions.json");
-        const resolvedStorePath = path.join(
-          testDir,
-          "agents",
-          "main",
-          "sessions",
-          "sessions.json",
-        );
-        const sessionKey = "agent:main:mattermost:channel:chan-1:thread:root-1";
-        await upsertSessionEntry({
-          agentId: "main",
-          storePath: resolvedStorePath,
-          sessionKey,
-          entry: {
-            chatType: "channel",
-            delivery: normalizeSessionDeliveryState({ context: { channel: "chan-1" } }),
-            model: "deepseek-v4-flash",
-            modelProvider: "opencode-go",
-            sessionId: "thread-session",
-            updatedAt: 1,
-          },
-        });
+      storePath = path.join(testDir, "agents", "{agentId}", "sessions", "sessions.json");
+      resolvedStorePath = path.join(testDir, "agents", "main", "sessions", "sessions.json");
+      // Cold SDK store initialization belongs to the setup budget, not the model-pin assertion.
+      await upsertSessionEntry({
+        agentId: "main",
+        storePath: resolvedStorePath,
+        sessionKey,
+        entry: {
+          chatType: "channel",
+          delivery: normalizeSessionDeliveryState({ context: { channel: "chan-1" } }),
+          model: "deepseek-v4-flash",
+          modelProvider: "opencode-go",
+          agentRuntimeOverride: "openclaw",
+          sessionId: "thread-session",
+          updatedAt: 1,
+        },
+      });
+    });
+
+    afterEach(() => {
+      if (previousStateDir === undefined) {
+        delete process.env.OPENCLAW_STATE_DIR;
+      } else {
+        process.env.OPENCLAW_STATE_DIR = previousStateDir;
+      }
+      if (testDir) {
+        fs.rmSync(testDir, { recursive: true, force: true });
+        testDir = undefined;
+      }
+    });
+
+    it.each(["/model openai/gpt-5.6-sol", "/model openai-sol"])(
+      "pins an explicitly named global default to the targeted thread session: %s",
+      async (commandText) => {
         const cfg: OpenClawConfig = {
           session: { store: storePath },
           agents: {
@@ -104,17 +120,11 @@ describe("Mattermost explicit default-model pin", () => {
           modelOverrideRouteResolution: "resolved",
           modelOverrideSource: "user",
           providerOverride: "openai",
+          agentRuntimeOverride: "openclaw",
         });
-      } finally {
-        if (previousStateDir === undefined) {
-          delete process.env.OPENCLAW_STATE_DIR;
-        } else {
-          process.env.OPENCLAW_STATE_DIR = previousStateDir;
-        }
-        fs.rmSync(testDir, { recursive: true, force: true });
-      }
-    },
-  );
+      },
+    );
+  });
 
   it("leaves explicit reset commands and non-default selections to OpenClaw core", async () => {
     const cfg = {} as OpenClawConfig;

@@ -5,6 +5,10 @@ import {
   type ModelsProviderData,
 } from "openclaw/plugin-sdk/command-auth-native";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/core";
+import {
+  getModelsRuntimeChoices,
+  type ModelsRuntimeChoice,
+} from "openclaw/plugin-sdk/models-provider-runtime";
 import { parseStrictInteger } from "openclaw/plugin-sdk/number-runtime";
 import { normalizeProviderId } from "openclaw/plugin-sdk/provider-model-shared";
 import { getSessionEntry, resolveStorePath } from "openclaw/plugin-sdk/session-store-runtime";
@@ -20,6 +24,7 @@ const ACTION_IDS = {
   providers: "mdlprov",
   list: "mdllist",
   select: "mdlsel",
+  apply: "mdlapply",
   back: "mdlback",
 } as const;
 
@@ -32,7 +37,14 @@ type MattermostModelPickerState =
   | { action: "providers"; ownerUserId: string }
   | { action: "back"; ownerUserId: string }
   | { action: "list"; ownerUserId: string; provider: string; page: number }
-  | { action: "select"; ownerUserId: string; provider: string; page: number; model: string };
+  | {
+      action: "select" | "apply";
+      ownerUserId: string;
+      provider: string;
+      page: number;
+      model: string;
+      runtime?: string;
+    };
 
 type MattermostModelPickerRenderedView = {
   text: string;
@@ -114,6 +126,7 @@ function buildButton(params: {
   provider?: string;
   page?: number;
   model?: string;
+  runtime?: string;
   style?: "default" | "primary" | "danger";
 }): MattermostInteractiveButtonInput {
   const baseState =
@@ -130,11 +143,12 @@ function buildButton(params: {
             page: normalizePage(params.page),
           }
         : {
-            action: "select" as const,
+            action: params.action,
             ownerUserId: params.ownerUserId,
             provider: normalizeProviderId(params.provider ?? ""),
             page: normalizePage(params.page),
             model: normalizeStringifiedOptionalString(params.model) ?? "",
+            ...(params.runtime ? { runtime: params.runtime } : {}),
           };
 
   return {
@@ -210,17 +224,19 @@ export function parseMattermostModelPickerContext(
     };
   }
 
-  if (action === "select") {
+  if (action === "select" || action === "apply") {
     const model = normalizeOptionalString(readContextString(context, "model")) ?? "";
     if (!model) {
       return null;
     }
+    const runtime = normalizeOptionalString(readContextString(context, "runtime"));
     return {
       action,
       ownerUserId,
       provider,
       page: normalizePage(page),
       model,
+      ...(action === "apply" && runtime ? { runtime } : {}),
     };
   }
 
@@ -285,7 +301,8 @@ export function renderMattermostModelSummaryView(params: {
       "",
       "Tap below to browse models, or use:",
       "/oc_model <provider/model> to switch",
-      "Browse keeps the current runtime; use /oc_model <provider/model> --runtime <runtime> to switch runtime too",
+      "Choose a model, then confirm how to run it.",
+      "/oc_model <provider/model> --runtime <runtime> to switch directly",
       "/oc_model status for details",
     ].join("\n"),
     buttons: [
@@ -408,7 +425,70 @@ export function renderMattermostModelsPickerView(params: {
       `Models (${provider}) - ${page.totalItems} available`,
       formatCurrentModelLine(params.currentModel),
       `Page ${page.page}/${page.totalPages}`,
-      "Select a model to switch immediately.",
+      "Select a model to choose how to run it.",
+    ].join("\n"),
+    buttons: rows,
+  };
+}
+
+export function resolveMattermostModelPickerCurrentRuntime(params: {
+  cfg: OpenClawConfig;
+  route: { agentId: string; sessionKey: string };
+}): string {
+  const sessionEntry = getSessionEntry({
+    storePath: resolveStorePath(params.cfg.session?.store, { agentId: params.route.agentId }),
+    sessionKey: params.route.sessionKey,
+    readConsistency: "latest",
+  });
+  return normalizeOptionalString(sessionEntry?.agentRuntimeOverride) ?? "auto";
+}
+
+export function renderMattermostRuntimePickerView(params: {
+  ownerUserId: string;
+  data: ModelsProviderData;
+  provider: string;
+  model: string;
+  page: number;
+  currentRuntime: string;
+}): MattermostModelPickerRenderedView {
+  const choices = getModelsRuntimeChoices(params.data, params.provider, params.model);
+  const rows: MattermostInteractiveButtonInput[][] = [];
+  if (choices === undefined) {
+    rows.push([
+      buildButton({
+        ...params,
+        action: "apply",
+        text: "Apply model (keep runtime)",
+        style: "primary",
+      }),
+    ]);
+  } else {
+    for (const choice of choices) {
+      rows.push([
+        buildButton({
+          ...params,
+          action: "apply",
+          runtime: choice.id,
+          text: `Use ${choice.label}${choice.id === params.currentRuntime ? " [current]" : ""}`,
+          style: choice.id === params.currentRuntime ? "primary" : "default",
+        }),
+      ]);
+    }
+  }
+  rows.push([
+    buildButton({ ...params, action: "list", text: "Back to models" }),
+  ]);
+  return {
+    text: [
+      `Selected model: ${params.provider}/${params.model}`,
+      `Current runtime setting: ${params.currentRuntime}`,
+      "",
+      choices?.length === 0
+        ? "No runtime is currently available for this model. Reopen /models to refresh."
+        : "Confirm how to run this model:",
+      ...(choices ?? []).map(
+        (choice: ModelsRuntimeChoice) => `${choice.label}: ${choice.description}`,
+      ),
     ].join("\n"),
     buttons: rows,
   };

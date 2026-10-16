@@ -41,7 +41,7 @@ mkdir -p /tmp/openclaw/mattermost-custom
 npm run build
 npm pack --omit=dev --pack-destination /tmp/openclaw/mattermost-custom
 openclaw plugins install \
-  /tmp/openclaw/mattermost-custom/openclaw-mattermost-custom-2026.10.3.tgz --force
+  /tmp/openclaw/mattermost-custom/openclaw-mattermost-custom-2026.10.4.tgz --force
 ```
 
 Do not use `plugins install --link` or add this source checkout to
@@ -96,6 +96,8 @@ Compared with the official plugin, this build preserves:
 - Configurable mention gating for threads rooted in the receiving bot's own posts.
 - Immediate recovery from transient channel/user lookup failures instead of negative caching.
 - Live `messages.inbound` debounce updates without replacing the Mattermost connection.
+- Native model/runtime confirmation with host validation and persisted-selection readback.
+- Backlog-aware text debounce with sender/thread isolation and bounded batches.
 
 Mutable message-tool actions and bounded search are enabled by default for this
 personal downstream plugin. Each gate can still be disabled globally or per account:
@@ -137,6 +139,13 @@ Deferred Mattermost ingress releases its lane so later input in that channel/thr
 can reach core while the earlier claim remains in the durable SQLite spool. Release
 is not completion: existing heartbeat, adoption, cancellation, retry and restart
 recovery still own the earlier input. Core decides follow-up/steer ordering.
+
+When inbound debounce is enabled, a quiet text buffer checks the durable lane backlog
+before flushing. Compatible input from the same sender/channel/thread can join the
+batch; commands, system posts, attachments, other senders and other threads do not
+extend it. Batches stop at 12 posts or 50,000 text characters. The published SDK's
+maximum wait (five debounce windows) still applies even if the backlog reader stalls
+or input keeps arriving. This does not enable debounce when its configured delay is zero.
 
 Admitted messages and verified bot-post interactions supply a Mattermost source
 permalink; threads use their native root. Thread slash callbacks use `root_id`.
@@ -199,6 +208,25 @@ quoted posts, and menu values do not become configured instructions.
 **A skill filter is not a security sandbox.** It controls skill availability and
 named skill invocation, not tool permissions or what an agent can accomplish
 using other tools. Existing sender and command authorization still applies.
+
+### Native model and runtime picker
+
+`/model` and `/models` browse the host's available models. Selecting a model opens
+a confirmation view with the runtimes the host advertises for that exact model.
+Choosing a runtime applies the model/runtime pair to the routed session. Browsing
+does not mutate either setting, and only the user who opened the signed picker can
+confirm it. Direct `/oc_model <provider/model> --runtime <runtime>` commands remain
+available.
+
+Every confirmation rebuilds the session-aware catalog, checks that the model/runtime
+pair is still available, and delegates validation and persistence to the host.
+The confirmation reads back the persisted selection and reports a mismatch instead
+of claiming success when a newer update won. Explicit selections of the global
+default still retain their Mattermost session pin and selected runtime.
+
+An authoritative empty runtime list offers no apply button. If the host does not
+supply runtime choices for a model, the view offers a model-only confirmation;
+the host retains responsibility for validating the current runtime.
 
 ### Bounded message search
 
@@ -483,8 +511,8 @@ The package build bundles plugin-owned TypeScript only. OpenClaw Plugin SDK,
 the plugin's declared runtime dependencies. This keeps OpenClaw core code and
 state migrations out of the plugin artifact.
 
-This release targets the published OpenClaw `2026.10.3` SDK and requires host
-and plugin API `>=2026.10.3`. Earlier hosts are not covered by this build's
+This release targets the published OpenClaw `2026.10.4` SDK and requires host
+and plugin API `>=2026.10.4`. Earlier hosts are not covered by this build's
 compatibility checks. The build verifies every emitted SDK subpath and named
 binding against the exact dev dependency in this checkout's `node_modules`;
 linked host checkouts and Gateway host overrides are not used.
@@ -506,7 +534,23 @@ changes in this repo's `src/`. Recheck the downstream command, callback,
 reaction, and trigger-cap behavior when upstream touches the corresponding
 files.
 
-### OpenClaw 2026.10.3 adaptation
+### OpenClaw 2026.10.4 adaptation
+
+The official Mattermost 10.3-to-10.4 delta changes package declarations only.
+This build updates the exact published development SDK, minimum host, plugin API,
+and build version to 2026.10.4. The official SDK and shared channel source trees
+and the published SDK export map are unchanged; the build validates emitted SDK
+subpaths and named bindings against the installed exact npm 10.4 dependency.
+
+No Mattermost lifecycle implementation changes are introduced. Custom commands,
+callbacks, approvals, protected secret dialogs, questions, reactions, threads,
+streaming, recovery, late-plan ordering, yielded progress, and provenance-based
+parent continuation retain their existing behavior. Gateway startup/shutdown,
+transcript ownership, streaming performance, and update fixes belong to the host.
+The source comparison and post-deployment acceptance checks are recorded in
+[the 10.4 upstream review](docs/upstream-2026.10.4.md).
+
+### Previous OpenClaw 2026.10.3 adaptation
 
 The official Mattermost 10.2-to-10.3 delta changes package declarations only.
 This build updates the exact published development SDK, minimum host, plugin API,
@@ -566,7 +610,7 @@ shared Mattermost contract tests and the downstream behavior tests.
 ### Test status against the published npm SDK
 
 This repo builds and tests against the published `openclaw` npm package
-(`2026.10.3`), not the OpenClaw monorepo checkout. One category of tests
+(`2026.10.4`), not the OpenClaw monorepo checkout. One category of tests
 behaves differently from the monorepo for that reason:
 
 - Ten suites import test-only Plugin SDK subpaths (`channel-test-helpers`,

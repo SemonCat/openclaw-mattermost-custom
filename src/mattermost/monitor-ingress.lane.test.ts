@@ -3,6 +3,12 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
+import { createInboundDebouncer } from "openclaw/plugin-sdk/channel-inbound-debounce";
+import { fanInChannelIngressLifecycles } from "openclaw/plugin-sdk/channel-ingress-runtime";
+import {
+  createMattermostInboundBufferPolicy,
+  type MattermostDebounceEntry,
+} from "./inbound-buffer.js";
 import { createMattermostIngressQueue } from "./ingress-queue.js";
 import {
   createMattermostIngressMonitor,
@@ -207,4 +213,64 @@ it("recovers a released deferred claim on restart and fences the old owner", asy
   await restarted.waitForIdle();
   expect(calls).toEqual(["A"]);
   expect(await queue.listClaims()).toEqual([]);
+});
+
+it("holds a quiet buffer for an already claimed sibling, then adopts both together", async () => {
+  const batches: string[][] = [];
+  const policy = createMattermostInboundBufferPolicy({
+    accountId: "default",
+    botUsername: "bot",
+    resolveThreadId: (facts) => facts.rootId,
+    isControlCommand: (text) => text.startsWith("/"),
+  });
+  const debouncer = createInboundDebouncer<MattermostDebounceEntry>({
+    ...policy,
+    debounceMs: 100,
+    onFlush: (entries, createFlush) => {
+      const { lifecycle, settle } = fanInChannelIngressLifecycles(
+        entries.map((entry) => entry.turnAdoptionLifecycle),
+      );
+      return createFlush({
+        lifecycle,
+        dispatch: async (admission) => {
+          batches.push(entries.map((entry) => entry.post.id));
+          await admission.onAdopted();
+          await settle();
+        },
+      });
+    },
+  });
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const calls: string[] = [];
+  const { monitor, queue } = await setup(async (post, payload, lifecycle) => {
+    calls.push(post.id);
+    if (post.id === "B") await blocked;
+    await debouncer.enqueue({ post, payload, turnAdoptionLifecycle: lifecycle });
+    return { kind: "deferred" };
+  }, 5_000, 60_000);
+  vi.useFakeTimers();
+  try {
+    await monitor.receive(event("A"));
+    await vi.advanceTimersByTimeAsync(0);
+    await monitor.receive(event("B"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toEqual(["A", "B"]);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(batches).toEqual([]);
+    expect((await queue.listClaims()).map((claim) => claim.id).toSorted()).toEqual(["A", "B"]);
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(100);
+    await monitor.waitForIdle();
+    await debouncer.drain();
+    expect(batches).toEqual([["A", "B"]]);
+    expect(await queue.listClaims()).toEqual([]);
+    await monitor.receive(event("A"));
+    await monitor.receive(event("B"));
+    await monitor.waitForIdle();
+    expect(batches).toEqual([["A", "B"]]);
+  } finally {
+    release();
+  }
 });

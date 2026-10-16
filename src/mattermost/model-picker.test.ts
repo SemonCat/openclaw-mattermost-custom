@@ -14,6 +14,7 @@ import {
   renderMattermostModelSummaryView,
   renderMattermostModelsPickerView,
   renderMattermostProviderPickerView,
+  renderMattermostRuntimePickerView,
   resolveMattermostModelPickerCurrentModel,
   resolveMattermostModelPickerEntry,
 } from "./model-picker.js";
@@ -62,7 +63,7 @@ describe("Mattermost model picker", () => {
     expect(view.text).toContain("Current: openai/gpt-5");
     expect(view.text).toContain("Tap below to browse models");
     expect(view.text).toContain("/oc_model <provider/model> to switch");
-    expect(view.text).toContain("Browse keeps the current runtime");
+    expect(view.text).toContain("Choose a model, then confirm how to run it");
     expect(view.text).toContain("/oc_model <provider/model> --runtime <runtime>");
     const firstRow = view.buttons[0];
     if (!firstRow) {
@@ -119,6 +120,59 @@ describe("Mattermost model picker", () => {
     const ids = modelsView.buttons.flat().map((button) => button.id);
     expect(ids.every((id) => typeof id === "string" && /^[a-z0-9]+$/.test(id))).toBe(true);
     expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("keeps full model and runtime identities in confirmation callbacks", () => {
+    const model = `gpt-${"long-model/".repeat(20)}`;
+    const runtimeData = {
+      ...data,
+      runtimeChoicesByModel: new Map([
+        [`openai/${model}`, [
+          { id: "openclaw", label: "OpenClaw", description: "Built-in tools" },
+          { id: "codex", label: "Codex", description: "Codex runtime" },
+        ]],
+      ]),
+    };
+    const view = renderMattermostRuntimePickerView({
+      ownerUserId: "user-1",
+      data: runtimeData,
+      provider: "openai",
+      model,
+      page: 2,
+      currentRuntime: "codex",
+    });
+    expect(view.text).toContain(`Selected model: openai/${model}`);
+    const buttons = view.buttons.flat();
+    expect(buttons.map((button) => button.text)).toContain("Use Codex [current]");
+    expect(parseMattermostModelPickerContext(buttons[1]!.context!)).toEqual({
+      action: "apply",
+      ownerUserId: "user-1",
+      provider: "openai",
+      model,
+      page: 2,
+      runtime: "codex",
+    });
+    expect(buttons.every((button) => /^[a-z0-9]+$/.test(button.id!))).toBe(true);
+    expect(new Set(buttons.map((button) => button.id)).size).toBe(buttons.length);
+  });
+
+  it("distinguishes unknown runtime choices from an authoritative empty list", () => {
+    const params = {
+      ownerUserId: "user-1",
+      provider: "openai",
+      model: "gpt-5",
+      page: 1,
+      currentRuntime: "codex",
+    };
+    const unknown = renderMattermostRuntimePickerView({ ...params, data });
+    expect(unknown.buttons.flat().map((button) => button.text))
+      .toContain("Apply model (keep runtime)");
+    const unavailable = renderMattermostRuntimePickerView({
+      ...params,
+      data: { ...data, runtimeChoicesByModel: new Map([["openai/gpt-5", []]]) },
+    });
+    expect(unavailable.text).toContain("No runtime is currently available");
+    expect(unavailable.buttons.flat().map((button) => button.context?.action)).toEqual(["list"]);
   });
 
   it("parses signed picker contexts", () => {

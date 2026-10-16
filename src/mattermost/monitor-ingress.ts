@@ -4,6 +4,7 @@ import {
   createChannelIngressMonitor,
   type ChannelIngressQueue,
   type ChannelIngressMonitorDeliveryResult,
+  type ChannelIngressMonitorLifecycle,
 } from "openclaw/plugin-sdk/channel-outbound";
 import { isRecord } from "openclaw/plugin-sdk/channel-secret-basic-runtime";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
@@ -23,6 +24,7 @@ const MATTERMOST_PENDING_DISPATCH_HEARTBEAT_INTERVAL_MS = 60_000;
 
 export type MattermostIngressLifecycle = {
   abortSignal: AbortSignal;
+  readLaneBacklog?: ChannelIngressMonitorLifecycle["readLaneBacklog"];
   onAdopted: () => void | Promise<void>;
   onDeferred: () => boolean | void;
   onDeferredHeartbeat?: () => void;

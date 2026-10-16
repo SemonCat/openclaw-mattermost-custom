@@ -2,6 +2,7 @@
 import { randomUUID } from "node:crypto";
 import type { ModelsProviderData } from "openclaw/plugin-sdk/command-auth-native";
 import { applySessionModelSelection } from "openclaw/plugin-sdk/model-session-runtime";
+import { getModelsRuntimeChoices } from "openclaw/plugin-sdk/models-provider-runtime";
 import { getSessionEntry, resolveStorePath } from "openclaw/plugin-sdk/session-store-runtime";
 import type { MattermostPost } from "./client.js";
 import type { MattermostInteractionResponse } from "./interactions.js";
@@ -10,7 +11,9 @@ import {
   parseMattermostModelPickerContext,
   renderMattermostModelsPickerView,
   renderMattermostProviderPickerView,
+  renderMattermostRuntimePickerView,
   resolveMattermostModelPickerCurrentModel,
+  resolveMattermostModelPickerCurrentRuntime,
 } from "./model-picker.js";
 import { pinMattermostExplicitDefaultModelSelection } from "./model-session-pin.js";
 import { authorizeMattermostCommandInvocation } from "./monitor-auth.js";
@@ -50,6 +53,7 @@ export function createMattermostModelPickerInteractionHandler(
     eventPlan: MattermostEventPlan;
     model: string;
     provider: string;
+    selectedRuntime?: string;
   }): Promise<string> => {
     const { route, thread } = params.eventPlan;
     const storePath = resolveStorePath(params.cfg.session?.store, { agentId: route.agentId });
@@ -72,7 +76,7 @@ export function createMattermostModelPickerInteractionHandler(
     const separator = currentModelRef.indexOf("/");
     const currentProvider =
       separator > 0 ? currentModelRef.slice(0, separator) : params.data.resolvedDefault.provider;
-    const currentModel =
+    const currentModelId =
       separator > 0 ? currentModelRef.slice(separator + 1) : params.data.resolvedDefault.model;
     const modelCatalog = [...params.data.byProvider.entries()].flatMap(([provider, models]) =>
       [...models].map((model) => ({
@@ -93,7 +97,7 @@ export function createMattermostModelPickerInteractionHandler(
       defaultProvider: params.data.resolvedDefault.provider,
       defaultModel: params.data.resolvedDefault.model,
       currentProvider,
-      currentModel,
+      currentModel: currentModelId,
       modelCatalog,
       canPersistStickyModelSelection: false,
       request: {
@@ -102,7 +106,9 @@ export function createMattermostModelPickerInteractionHandler(
         isDefault:
           targetModelRef ===
           `${params.data.resolvedDefault.provider}/${params.data.resolvedDefault.model}`,
-        runtime: { kind: "unchanged" },
+        runtime: params.selectedRuntime
+          ? { kind: "set", runtime: params.selectedRuntime }
+          : { kind: "unchanged" },
       },
       markLiveSwitchPending: true,
     });
@@ -116,7 +122,23 @@ export function createMattermostModelPickerInteractionHandler(
       modelsData: params.data,
       sessionKey: thread.sessionKey,
     });
-    return `✅ Model set to ${applied.effectiveModelRef} for this session.`;
+    const verifiedEntry = getSessionEntry({
+      storePath,
+      sessionKey: thread.sessionKey,
+      readConsistency: "latest",
+    });
+    const currentModel =
+      verifiedEntry?.providerOverride && verifiedEntry.modelOverride
+        ? `${verifiedEntry.providerOverride}/${verifiedEntry.modelOverride}`
+        : "default";
+    const currentRuntime = verifiedEntry?.agentRuntimeOverride?.trim() || "auto";
+    if (
+      currentModel !== targetModelRef ||
+      (params.selectedRuntime !== undefined && currentRuntime !== params.selectedRuntime)
+    ) {
+      return `⚠️ Tried to set ${targetModelRef}${params.selectedRuntime ? ` with runtime ${params.selectedRuntime}` : ""}, but current selection is ${currentModel} with runtime setting ${currentRuntime}.`;
+    }
+    return `✅ Model set to ${currentModel} with runtime ${currentRuntime === "auto" ? applied.agentRuntime : currentRuntime} for this session.`;
   };
 
   return async (params) => {
@@ -139,7 +161,7 @@ export function createMattermostModelPickerInteractionHandler(
 
     const channelInfo = await resolveChannelInfo(params.payload.channel_id);
     const pickerCommandText =
-      pickerState.action === "select"
+      pickerState.action === "select" || pickerState.action === "apply"
         ? `/model ${pickerState.provider}/${pickerState.model}`
         : pickerState.action === "list"
           ? `/models ${pickerState.provider}`
@@ -207,7 +229,7 @@ export function createMattermostModelPickerInteractionHandler(
       agentId: eventPlan.route.agentId,
       sessionKey: eventPlan.thread.sessionKey,
     };
-    if (pickerState.action !== "select") {
+    if (pickerState.action !== "apply") {
       const sessionEntry = getSessionEntry({
         storePath: resolveStorePath(cfg.session?.store, { agentId: modelSessionRoute.agentId }),
         sessionKey: modelSessionRoute.sessionKey,
@@ -216,6 +238,23 @@ export function createMattermostModelPickerInteractionHandler(
       const data = await buildModelsProviderData(cfg, eventPlan.route.agentId, { sessionEntry });
       if (data.providers.length === 0) {
         return await updatePickerPost("No models available.");
+      }
+      if (data.isCurrent?.() === false) {
+        return { ephemeral_text: "Available models changed. Open /models and choose again." };
+      }
+      if (pickerState.action === "select") {
+        if (!buildMattermostAllowedModelRefs(data).has(`${pickerState.provider}/${pickerState.model}`)) {
+          return { ephemeral_text: "That model is no longer available. Open /models again." };
+        }
+        const view = renderMattermostRuntimePickerView({
+          ...pickerState,
+          data,
+          currentRuntime: resolveMattermostModelPickerCurrentRuntime({
+            cfg,
+            route: modelSessionRoute,
+          }),
+        });
+        return await updatePickerPost(view.text, view.buttons);
       }
       const currentModel = resolveMattermostModelPickerCurrentModel({
         cfg,
@@ -254,10 +293,24 @@ export function createMattermostModelPickerInteractionHandler(
     // the queue claim. Marking the row complete before persistence would reopen the
     // restart-loss window that durable admission is intended to close.
     try {
-      const data = await buildModelsProviderData(cfg, eventPlan.route.agentId);
+      const sessionEntry = getSessionEntry({
+        storePath: resolveStorePath(cfg.session?.store, { agentId: modelSessionRoute.agentId }),
+        sessionKey: modelSessionRoute.sessionKey,
+        readConsistency: "latest",
+      });
+      const data = await buildModelsProviderData(cfg, eventPlan.route.agentId, { sessionEntry });
       let notice: string;
-      if (!buildMattermostAllowedModelRefs(data).has(targetModelRef)) {
+      const runtimeChoices = getModelsRuntimeChoices(data, pickerState.provider, pickerState.model);
+      if (data.isCurrent?.() === false) {
+        notice = "❌ Available models changed. Open /models and choose again.";
+      } else if (!buildMattermostAllowedModelRefs(data).has(targetModelRef)) {
         notice = `❌ That model is no longer available: ${targetModelRef}`;
+      } else if (
+        pickerState.runtime
+          ? !runtimeChoices?.some((choice) => choice.id === pickerState.runtime)
+          : runtimeChoices !== undefined
+      ) {
+        notice = "❌ Available runtimes changed. Select the model and choose a runtime again.";
       } else {
         try {
           notice = await applyModelPickerSelection({
@@ -266,6 +319,7 @@ export function createMattermostModelPickerInteractionHandler(
             eventPlan,
             provider: pickerState.provider,
             model: pickerState.model,
+            selectedRuntime: pickerState.runtime,
           });
         } catch (error) {
           runtime.error?.(`mattermost model picker selection failed: ${String(error)}`);

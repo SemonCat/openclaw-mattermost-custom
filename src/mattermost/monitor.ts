@@ -27,11 +27,13 @@ import {
 } from "./interactions.js";
 import { resolveMattermostTrustedChatKind } from "./monitor-auth.js";
 import { resolveMattermostEffectiveReplyToId } from "./monitor-context.js";
-import { normalizeMention } from "./monitor-helpers.js";
+import {
+  createMattermostInboundBufferPolicy,
+  type MattermostDebounceEntry,
+} from "./inbound-buffer.js";
 import { registerMattermostInteractions } from "./monitor-interactions.js";
 import {
   createMattermostIngressMonitor,
-  type MattermostIngressLifecycle,
   type MattermostIngressLaneFacts,
   type MattermostIngressPost,
 } from "./monitor-ingress.js";
@@ -44,7 +46,6 @@ import { registerMattermostMonitorSlashCommands } from "./monitor-slash.js";
 import type { MattermostMonitorContext } from "./monitor-types.js";
 import {
   createMattermostConnectOnce,
-  type MattermostEventPayload,
   type MattermostWebSocketFactory,
 } from "./monitor-websocket.js";
 import { runWithReconnect } from "./reconnect.js";
@@ -286,45 +287,15 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
     });
   };
 
-  const debouncer = core.channel.debounce.createInboundDebouncer<{
-    post: MattermostIngressPost;
-    payload: MattermostEventPayload;
-    turnAdoptionLifecycle: MattermostIngressLifecycle;
-  }>({
+  const debouncer = core.channel.debounce.createInboundDebouncer<MattermostDebounceEntry>({
     debounceMs: resolveDebounceMs(),
     resolveDebounceMs,
-    buildKey: (entry) => {
-      const channelId =
-        entry.post.channel_id ??
-        entry.payload.data?.channel_id ??
-        entry.payload.broadcast?.channel_id;
-      if (!channelId || !entry.post.user_id) {
-        return null;
-      }
-      const rootId = normalizeOptionalString(entry.post.root_id);
-      const channelType = normalizeOptionalString(entry.payload.data?.channel_type);
-      const threadId = resolveIngressThreadId({
-        channelId,
-        postId: entry.post.id,
-        ...(rootId ? { rootId } : {}),
-        ...(channelType ? { channelType } : {}),
-      });
-      // Access checks use the final post identity, so different senders must
-      // never share a debounced turn.
-      return `mattermost:${account.accountId}:${channelId}:${threadId ? `thread:${threadId}` : "channel"}:${entry.post.user_id}`;
-    },
-    shouldDebounce: (entry) => {
-      // Typed/system posts are dropped downstream and must not influence a
-      // neighboring user post through batching.
-      if (normalizeOptionalString(entry.post.type) !== undefined || entry.post.file_ids?.length) {
-        return false;
-      }
-      const text = normalizeOptionalString(entry.post.message) ?? "";
-      return (
-        Boolean(text) &&
-        !core.channel.commands.isControlCommandMessage(normalizeMention(text, botUsername), cfg)
-      );
-    },
+    ...createMattermostInboundBufferPolicy({
+      accountId: account.accountId,
+      botUsername,
+      resolveThreadId: resolveIngressThreadId,
+      isControlCommand: (text) => core.channel.commands.isControlCommandMessage(text, readConfig()),
+    }),
     onFlush: (entries, createFlush) => {
       const last = entries.at(-1);
       const { lifecycle, settle } = fanInChannelIngressLifecycles(

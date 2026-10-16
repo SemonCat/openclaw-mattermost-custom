@@ -11,6 +11,9 @@ const mocks = vi.hoisted(() => ({
   parseContext: vi.fn(),
   pinExplicitDefaultModel: vi.fn(),
   sendMessage: vi.fn(),
+  currentModel: vi.fn(),
+  currentRuntime: vi.fn(),
+  renderRuntimePicker: vi.fn(),
 }));
 
 vi.mock("openclaw/plugin-sdk/model-session-runtime", () => ({
@@ -27,7 +30,9 @@ vi.mock("./model-picker.js", () => ({
   parseMattermostModelPickerContext: mocks.parseContext,
   renderMattermostModelsPickerView: () => ({ text: "updated picker", buttons: [] }),
   renderMattermostProviderPickerView: () => ({ text: "provider picker", buttons: [] }),
-  resolveMattermostModelPickerCurrentModel: () => "openai/gpt-5.4",
+  renderMattermostRuntimePickerView: mocks.renderRuntimePicker,
+  resolveMattermostModelPickerCurrentModel: mocks.currentModel,
+  resolveMattermostModelPickerCurrentRuntime: mocks.currentRuntime,
 }));
 
 vi.mock("./model-session-pin.js", () => ({
@@ -66,11 +71,46 @@ const modelsData = {
   modelNames: new Map([["openai/gpt-5.4", "GPT-5.4"]]),
 };
 
+function interactionFixture() {
+  const updateModelPickerPost = vi.fn(async () => ({}));
+  const monitor = {
+    account: { accountId: "default", config: {} },
+    cfg: {},
+    core: {
+      config: { current: () => ({}) },
+      channel: {
+        commands: { shouldHandleTextCommands: () => true },
+        text: { hasControlCommand: () => true },
+      },
+    },
+    pairing: { readAllowFromStore: vi.fn(async () => []) },
+    resources: {
+      resolveChannelInfo: vi.fn(async () => ({ id: "channel-1", type: "O" })),
+      updateModelPickerPost,
+    },
+    runtime: { error: vi.fn() },
+  } as unknown as MattermostMonitorContext;
+  const handler = createMattermostModelPickerInteractionHandler(monitor);
+  return {
+    updateModelPickerPost,
+    click: (userId = "user-1") => handler({
+      payload: {
+        channel_id: "channel-1",
+        post_id: "picker-post-1",
+        user_id: userId,
+      },
+      userName: "tester",
+      context: {},
+      post: { id: "picker-post-1", channel_id: "channel-1", message: "picker" },
+    }),
+  };
+}
+
 describe("Mattermost model-picker interaction dispatch", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.parseContext.mockReturnValue({
-      action: "select",
+      action: "apply",
       ownerUserId: "user-1",
       provider: "openai",
       model: "gpt-5.4",
@@ -80,15 +120,22 @@ describe("Mattermost model-picker interaction dispatch", () => {
       pinned: true,
       modelRef: "openai/gpt-5.4",
     });
+    mocks.currentModel.mockReturnValue("openai/gpt-5.4");
+    mocks.currentRuntime.mockReturnValue("openclaw");
+    mocks.renderRuntimePicker.mockReturnValue({ text: "runtime picker", buttons: [] });
     mocks.applySessionModelSelection.mockResolvedValue({
       status: "applied",
       provider: "openai",
       model: "gpt-5.4",
       effectiveModelRef: "openai/gpt-5.4",
+      agentRuntime: "openclaw",
       changed: true,
       contextTokens: 128_000,
     });
-    mocks.getSessionEntry.mockReturnValue({ sessionId: "session-1", updatedAt: 1 });
+    mocks.getSessionEntry.mockReturnValue({
+      sessionId: "session-1", updatedAt: 1,
+      providerOverride: "openai", modelOverride: "gpt-5.4", agentRuntimeOverride: "openclaw",
+    });
     mocks.authorize.mockResolvedValue({
       ok: true,
       commandAuthorized: true,
@@ -187,7 +234,9 @@ describe("Mattermost model-picker interaction dispatch", () => {
     await expect(selection).resolves.toEqual({});
 
     expect(mocks.buildModelsProviderData).toHaveBeenCalledOnce();
-    expect(mocks.buildModelsProviderData).toHaveBeenCalledWith(runtimeCfg, "main");
+    expect(mocks.buildModelsProviderData).toHaveBeenCalledWith(runtimeCfg, "main", {
+      sessionEntry: expect.objectContaining({ sessionId: "session-1", updatedAt: 1 }),
+    });
     expect(mocks.applySessionModelSelection).toHaveBeenCalledWith(
       expect.objectContaining({
         cfg: runtimeCfg,
@@ -216,7 +265,7 @@ describe("Mattermost model-picker interaction dispatch", () => {
     );
     expect(mocks.sendMessage).toHaveBeenCalledWith(
       "channel:channel-1",
-      "✅ Model set to openai/gpt-5.4 for this session.",
+      "✅ Model set to openai/gpt-5.4 with runtime openclaw for this session.",
       expect.objectContaining({
         cfg: runtimeCfg,
         accountId: "default",
@@ -300,5 +349,103 @@ describe("Mattermost model-picker interaction dispatch", () => {
     expect(updateModelPickerPost).toHaveBeenCalledWith(
       expect.objectContaining({ message: "provider picker" }),
     );
+  });
+
+  it("requires runtime confirmation before selecting a model", async () => {
+    mocks.parseContext.mockReturnValue({
+      action: "select", ownerUserId: "user-1", provider: "openai", model: "gpt-5.4", page: 1,
+    });
+    const { click, updateModelPickerPost } = interactionFixture();
+    await click();
+    expect(mocks.renderRuntimePicker).toHaveBeenCalledWith(expect.objectContaining({
+      provider: "openai", model: "gpt-5.4", currentRuntime: "openclaw",
+    }));
+    expect(updateModelPickerPost).toHaveBeenCalledWith(expect.objectContaining({
+      message: "runtime picker",
+    }));
+    expect(mocks.applySessionModelSelection).not.toHaveBeenCalled();
+    expect(mocks.pinExplicitDefaultModel).not.toHaveBeenCalled();
+  });
+
+  it("submits a host-advertised runtime and reads back its persisted selection", async () => {
+    mocks.parseContext.mockReturnValue({
+      action: "apply", ownerUserId: "user-1", provider: "openai", model: "gpt-5.4",
+      page: 1, runtime: "codex",
+    });
+    mocks.buildModelsProviderData.mockResolvedValue({
+      ...modelsData,
+      runtimeChoicesByModel: new Map([["openai/gpt-5.4", [
+        { id: "codex", label: "Codex", description: "Use Codex" },
+      ]]]),
+    });
+    mocks.applySessionModelSelection.mockResolvedValue({
+      status: "applied", effectiveModelRef: "openai/gpt-5.4", agentRuntime: "codex",
+    });
+    mocks.currentRuntime.mockReturnValue("codex");
+    mocks.getSessionEntry.mockReturnValue({
+      sessionId: "session-1", providerOverride: "openai", modelOverride: "gpt-5.4",
+      agentRuntimeOverride: "codex",
+    });
+    await interactionFixture().click();
+    expect(mocks.applySessionModelSelection).toHaveBeenCalledWith(expect.objectContaining({
+      request: expect.objectContaining({ runtime: { kind: "set", runtime: "codex" } }),
+    }));
+    expect(mocks.sendMessage).toHaveBeenCalledWith(
+      "channel:channel-1",
+      "✅ Model set to openai/gpt-5.4 with runtime codex for this session.",
+      expect.any(Object),
+    );
+  });
+
+  it.each(["stale-runtime", "missing-runtime", "empty-runtimes", "expired-catalog"] as const)(
+    "refuses %s without mutating the session",
+    async (kind) => {
+      mocks.parseContext.mockReturnValue({
+        action: "apply", ownerUserId: "user-1", provider: "openai", model: "gpt-5.4",
+        page: 1, ...(kind !== "missing-runtime" ? { runtime: "codex" } : {}),
+      });
+      mocks.buildModelsProviderData.mockResolvedValue({
+        ...modelsData,
+        runtimeChoicesByModel: new Map([["openai/gpt-5.4",
+          kind === "empty-runtimes" ? [] : [
+            { id: "openclaw", label: "OpenClaw", description: "Built-in" },
+          ],
+        ]]),
+        isCurrent: () => kind !== "expired-catalog",
+      });
+      await interactionFixture().click();
+      expect(mocks.applySessionModelSelection).not.toHaveBeenCalled();
+      expect(mocks.sendMessage.mock.calls[0]?.[1]).toContain("changed");
+    },
+  );
+
+  it.each(["model", "runtime"] as const)("reports persisted %s mismatch truthfully", async (field) => {
+    mocks.parseContext.mockReturnValue({
+      action: "apply", ownerUserId: "user-1", provider: "openai", model: "gpt-5.4",
+      page: 1, runtime: "openclaw",
+    });
+    mocks.buildModelsProviderData.mockResolvedValue({
+      ...modelsData,
+      runtimeChoicesByModel: new Map([["openai/gpt-5.4", [
+        { id: "openclaw", label: "OpenClaw", description: "Built-in" },
+      ]]]),
+    });
+    mocks.getSessionEntry.mockReturnValue({
+      sessionId: "session-1", providerOverride: "openai",
+      modelOverride: field === "model" ? "newer" : "gpt-5.4",
+      agentRuntimeOverride: field === "runtime" ? "codex" : "openclaw",
+    });
+    await interactionFixture().click();
+    expect(mocks.sendMessage.mock.calls[0]?.[1]).toContain("but current selection");
+    expect(mocks.sendMessage.mock.calls[0]?.[1]).not.toContain("✅");
+  });
+
+  it("rejects other users before reading or applying a runtime", async () => {
+    await expect(interactionFixture().click("other-user")).resolves.toEqual({
+      ephemeral_text: "Only the person who opened this picker can use it.",
+    });
+    expect(mocks.authorize).not.toHaveBeenCalled();
+    expect(mocks.buildModelsProviderData).not.toHaveBeenCalled();
+    expect(mocks.applySessionModelSelection).not.toHaveBeenCalled();
   });
 });
