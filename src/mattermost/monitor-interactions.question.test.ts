@@ -6,10 +6,14 @@ const mocks = vi.hoisted(() => ({
   createProcessor: vi.fn(),
   registerRoute: vi.fn(() => () => {}),
   resolveOption: vi.fn(),
+  questionRpc: vi.fn(),
 }));
 
 vi.mock("openclaw/plugin-sdk/question-gateway-runtime", () => ({
   questionGatewayRuntime: { resolveOption: mocks.resolveOption },
+}));
+vi.mock("./question-rpc.js", () => ({
+  createMattermostQuestionRpc: () => mocks.questionRpc,
 }));
 vi.mock("./monitor-auth.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./monitor-auth.js")>()),
@@ -34,6 +38,8 @@ vi.mock("./runtime-api.js", async (importOriginal) => ({
 import { registerMattermostInteractions } from "./monitor-interactions.js";
 import { buildButtonProps, createMattermostInteractionProcessor, type MattermostValidatedInteraction } from "./interactions.js";
 import { setMattermostRuntime } from "../runtime.js";
+import { buildMattermostQuestionFormButton, MATTERMOST_QUESTION_FORM_CALLBACK } from "./question-dialog.js";
+import { observeMattermostServerVersion } from "./text-limits.js";
 
 const QUESTION_ID = "ask_0123456789abcdef0123456789abcdef";
 const cfg = {};
@@ -133,6 +139,63 @@ describe("Mattermost question interactions", () => {
       },
       ephemeral_text: "Answer submitted.",
     });
+  });
+
+  it("routes native forms through immediate and submission handlers without a second turn", async () => {
+    const actual = await vi.importActual<typeof import("./interactions.js")>("./interactions.js");
+    actual.setInteractionSecret("main", "token");
+    const formCfg = { channels: { mattermost: {
+      enabled: true, baseUrl: "https://monitor-forms.test", botToken: "token", replyToMode: "off",
+    } } };
+    observeMattermostServerVersion(formCfg.channels.mattermost.baseUrl, "12.0.0");
+    const post = {
+      id: "post-1", channel_id: "chan-1", user_id: "bot", message: "Features",
+      props: buildButtonProps({
+        accountId: "main", channelId: "chan-1", callbackUrl: "https://gateway/cb",
+        buttons: [[buildMattermostQuestionFormButton(QUESTION_ID)]],
+      }),
+    };
+    const question = {
+      id: QUESTION_ID, sessionKey: "agent:main:mattermost:channel:chan-1",
+      expiresAtMs: Date.now() + 60_000, status: "pending",
+      questions: [{ questionId: "features", header: "Features", question: "Which?",
+        options: [{ label: "A" }, { label: "B" }], multiSelect: true, isOther: true }],
+    };
+    mocks.questionRpc.mockImplementation(async (method) => {
+      if (method === "question.get") return { question };
+      question.status = "answered"; return { status: "answered" };
+    });
+    let opened: any;
+    const request = vi.fn(async (path, init) => {
+      if (path === "/posts/post-1") return post;
+      if (path === "/users/user-1") return { id: "user-1", username: "ada" };
+      if (path === "/actions/dialogs/open") { opened = JSON.parse(init.body); return {}; }
+      throw new Error("Unexpected request");
+    });
+    const dispatch = vi.fn();
+    captureOptions(undefined, {
+      cfg: formCfg, client: { baseUrl: formCfg.channels.mattermost.baseUrl, request },
+      core: { config: { current: () => formCfg }, channel: {
+        commands: { shouldHandleTextCommands: () => true },
+        routing: { resolveAgentRoute: () => ({ sessionKey: question.sessionKey, agentId: "main", accountId: "main" }) },
+        inbound: { dispatch },
+      } },
+    });
+    const options = mocks.createHandler.mock.calls[0][0];
+    expect(await options.handleImmediateInteraction({
+      payload: { user_id: "user-1", channel_id: "chan-1", post_id: "post-1", trigger_id: "trigger" },
+      context: { oc_question_form: 1, question_id: QUESTION_ID }, post,
+    })).toEqual({});
+    expect(await options.handleDialogSubmission({
+      type: "dialog_submission", callback_id: MATTERMOST_QUESTION_FORM_CALLBACK,
+      state: opened.dialog.state, user_id: "user-1", channel_id: "chan-1",
+      submission: { q0: ["v0", "v1"] },
+    })).toEqual({ statusCode: 200, body: {} });
+    expect(mocks.questionRpc).toHaveBeenCalledWith("question.resolve", {
+      id: QUESTION_ID, answers: { answers: { features: ["A", "B"] } }, resolvedBy: "mattermost:user-1",
+    });
+    expect(mocks.resolveOption).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
   });
 
   it("rechecks current authorization inside the Gateway resolution", async () => {

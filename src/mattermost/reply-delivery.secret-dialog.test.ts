@@ -99,6 +99,6 @@ describe("Mattermost secret prompt delivery", () => {
     );
 
     expect(sendMessage.mock.calls[0]?.[2]).not.toHaveProperty("buttons");
-    expect(sendMessage.mock.calls[0]?.[2]).not.toHaveProperty("questionId");
+    expect(sendMessage.mock.calls[0]?.[2]).toHaveProperty("questionId", questionId);
   });
 });

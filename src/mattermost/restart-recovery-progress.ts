@@ -6,6 +6,7 @@ import {
 } from "openclaw/plugin-sdk/channel-outbound";
 import { updateMattermostPost } from "./client.js";
 import { createMattermostDraftStream } from "./draft-stream.js";
+import { resolveMattermostTextLimit } from "./text-limits.js";
 import { shouldUpdateMattermostDraftToolProgress } from "./monitor-context.js";
 import type { MattermostMonitorContext } from "./monitor-types.js";
 import {
@@ -279,12 +280,15 @@ function createMattermostRestartRecoveryRunUi(params: {
     };
   }
 
-  const textLimit = core.channel.text.resolveTextChunkLimit(
-    cfg,
-    "mattermost",
-    account.accountId,
-    { fallbackLimit: account.textChunkLimit ?? 4000 },
-  );
+  const textLimit = resolveMattermostTextLimit({
+    baseUrl: account.baseUrl,
+    textChunkLimit: core.channel.text.resolveTextChunkLimit(
+      cfg,
+      "mattermost",
+      account.accountId,
+      { fallbackLimit: resolveMattermostTextLimit(account) },
+    ),
+  });
   const tableMode = core.channel.text.resolveMarkdownTableMode({
     cfg,
     channel: "mattermost",
@@ -316,6 +320,7 @@ function createMattermostRestartRecoveryRunUi(params: {
         ...(params.route.threadId ? { threadId: params.route.threadId } : {}),
       }),
       throttleMs: 1200,
+      maxChars: textLimit,
       chunkText: (value) =>
         core.channel.text.chunkMarkdownTextWithMode(
           core.channel.text.convertMarkdownTables(value, tableMode),

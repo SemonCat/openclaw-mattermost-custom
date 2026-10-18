@@ -139,9 +139,7 @@ export async function deliverMattermostReplyPayload(params: {
   const secretPrompt = buildMattermostSecretPromptButton(params.payload);
   const questionId =
     secretPrompt?.questionId ??
-    (presentation.buttons.length > 0
-      ? questionGatewayRuntime.readAskUserQuestionId(params.payload)
-      : undefined);
+    questionGatewayRuntime.readAskUserQuestionId(params.payload);
   const buttons = secretPrompt
     ? [...presentation.buttons, [secretPrompt.button]]
     : presentation.buttons;

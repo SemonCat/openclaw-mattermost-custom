@@ -72,6 +72,10 @@ Gateway after changing plugin enablement.
 
 Compared with the official plugin, this build preserves:
 
+- Automatic Mattermost 12 message limits for ordinary replies, message-tool
+  delivery, streaming previews, and restart recovery.
+- Model-facing hints for the active text limit and implemented interactive
+  controls.
 - Dynamic native slash commands from core, skills, and installed plugins.
 - `/channel_model` for reading, setting, or resetting a channel-scoped default
   model while keeping a managed model label in the Mattermost channel header.
@@ -89,6 +93,8 @@ Compared with the official plugin, this build preserves:
 - Native exec, plugin, and system-agent approval cards with canonical Gateway resolution.
 - Native secret-entry dialogs that submit password fields directly to OpenClaw's protected store.
 - Native `ask_user` option buttons that resolve the original Gateway question without a second agent turn.
+- Native Mattermost 12 multi-select and multi-question dialogs, plus a
+  `mattermost_form` tool for checkbox groups and row/column matrices.
 - Durable interactive callback admission and replay across Gateway restarts.
 - Bounded Mattermost thread-history recovery after Gateway restart or session reset.
 - The Mattermost slash-trigger length cap fix.
@@ -121,6 +127,125 @@ personal downstream plugin. Each gate can still be disabled globally or per acco
 
 `messages` remains opt-in for channel reads, `search` defaults to enabled independently,
 `reactions` enables add/remove/list, and action gates can be overridden per account.
+
+### Message length and model hints
+
+Successful Mattermost REST responses supply `X-Version-ID`. Once a response
+identifies Mattermost 12 or newer, the default per-post text limit becomes
+262,144; older or not-yet-identified servers use 16,383. Normal bot authentication
+hydrates this information before inbound reply planning. Later REST responses
+refresh it after server upgrades or downgrades. A newly started standalone sender
+can use the conservative limit until its first successful response.
+
+The plugin measures UTF-16 code units, matching OpenClaw's chunkers, and preserves
+surrogate pairs at chunk boundaries. Ordinary Chinese and ASCII characters each
+use one unit; many emoji use two. This is conservative relative to the server's
+Unicode character count.
+
+`channels.mattermost.textChunkLimit` and account-level overrides remain supported.
+An explicit smaller value is preserved; a larger value is clamped to the observed
+server limit. Omit this setting to use automatic detection. The former 4,000-unit
+default and streaming ceiling no longer apply. Separate assistant/tool activity
+boundaries and explicit newline chunking still follow their existing behavior.
+
+Model hints advertise the effective account limit, presentation buttons,
+single-select menus, native `ask_user` forms, `mattermost_form`, and the host's
+protected secret-entry flow.
+
+### Native choice forms
+
+On a verified Mattermost 12+ server, ordinary `ask_user` prompts with multiple
+questions or `multiSelect: true` receive a **Fill form** button. Clicking it
+opens a mobile-compatible dialog. Multi-select questions use multi-select
+menus; matrices show one menu per row. Single-choice questions use dropdowns.
+The original question text and optional Other input are preserved.
+The **Web form** button opens Mattermost 12's native checkbox groups and
+matrices instead. Multiple questions with identical choices can share a native
+matrix when they do not require Other input. Existing single-choice buttons and
+protected password dialogs keep their existing handling.
+
+The mobile app has a separate renderer from the server/web client. Its reviewed
+v2.44.1 renderer treats `checkbox_group` and `checkbox_matrix` as text fields,
+but supports `select` with `multiselect: true`. The default form uses those
+supported controls on every client rather than guessing the user's platform
+from a server-to-server callback. Both layouts return identical canonical
+answers. Multi-select wire values use opaque tokens, so the mobile app's
+comma-separated serialization cannot split commas inside an original answer.
+
+The form submits all question answers to the original pending Gateway question.
+It does not create a second inbound agent turn. Unknown/older servers and
+unavailable or unsupported questions retain the host's text/Web UI fallback.
+Native checkbox groups support at most 50 options; larger canonical questions
+use that fallback.
+
+For an explicit matrix or a larger set of checkbox choices, the model can use
+`mattermost_form` in the current trusted Mattermost conversation:
+
+```json
+{
+  "title": "Deployment choices",
+  "fields": [
+    {
+      "id": "checks",
+      "label": "Preflight checks",
+      "type": "select",
+      "multiple": true,
+      "options": [
+        { "value": "backup", "label": "Backup" },
+        { "value": "smoke", "label": "Smoke test" }
+      ]
+    },
+    {
+      "id": "access",
+      "label": "Access matrix",
+      "type": "matrix",
+      "multiple": false,
+      "rows": [
+        { "value": "api", "label": "API" },
+        { "value": "web", "label": "Web" }
+      ],
+      "columns": [
+        { "value": "read", "label": "Read" },
+        { "value": "write", "label": "Write" }
+      ]
+    }
+  ]
+}
+```
+
+The waiting tool returns choice arrays and structured matrix rows, for example
+`{"checks":["backup","smoke"],"access":{"api":["read"],"web":["write"]}}`.
+Matrix fields default to multiple choices per row; `multiple: false` uses one
+choice per row. Set `optional: true` to allow an empty field or unanswered rows.
+There are at most three fields, 50 choices per select, and 30 rows by 10 columns
+per matrix. IDs use lowercase letters, digits and underscores, starting with a
+letter. Display labels are safely shortened to the server's UTF-8 byte limit.
+Forms accept ordinary choices only; credentials use the protected secret flow.
+
+The tool is bound to the host-provided account, channel, thread and session;
+its arguments cannot choose a different destination. The default wait is 90
+seconds, configurable with `timeoutSeconds` from 15 to 120. The host's tool/run
+deadline can end the wait earlier. Closing a dialog leaves the question pending
+so it can be reopened; tool cancellation or timeout retires it. Gateway
+questions are transient: a Gateway restart invalidates the question and its
+waiting tool. Reopening a dialog after monitor/controller reconstruction works
+while the original Gateway question still exists; no local dialog registry is
+required.
+
+Callbacks verify a signed current bot control, the clicking user's channel
+access, the original session, schema and expiry before resolving. They reject
+foreign, changed and stale submissions, and the Gateway arbitrates concurrent
+answers. A lost resolution response is read back rather than blindly replayed.
+Terminal question finalization removes the form control.
+
+The plugin uses the published SDK's authenticated loopback `GatewayClient` with
+only `operator.questions` scope. It does not use the official-plugin-only
+`runtime.gateway` permission or create device credentials. Gateway shared
+token/password authentication must resolve in the active runtime environment;
+TLS uses normal certificate validation. Native dialogs need a user click's
+short-lived trigger, so the model cannot open a modal without the button click.
+The manifest adds `mattermost_form` to the declared tool capability surface;
+deployment must review that capability change explicitly.
 
 Set `channels.mattermost.requireMentionInBotThreads: false` to accept unmentioned
 follow-ups in threads whose root post was sent by the receiving bot. Set it to

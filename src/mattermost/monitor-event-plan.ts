@@ -9,6 +9,7 @@ import { resolveMattermostThreadSessionContext } from "./monitor-context.js";
 import type { MattermostMonitorContext } from "./monitor-types.js";
 import { createMattermostReplyDeliveryBarrier } from "./reply-delivery.js";
 import { logTypingFailure } from "./runtime-api.js";
+import { resolveMattermostTextLimit } from "./text-limits.js";
 
 type MattermostEventPlanParams = {
   channelId: string;
@@ -121,12 +122,15 @@ export async function buildMattermostEventPlan(
         dmRetryOptions: monitor.account.config.dmChannelRetry,
       });
       return {
-        textLimit: monitor.core.channel.text.resolveTextChunkLimit(
-          monitor.cfg,
-          "mattermost",
-          monitor.account.accountId,
-          { fallbackLimit: monitor.account.textChunkLimit ?? 4000 },
-        ),
+        textLimit: resolveMattermostTextLimit({
+          baseUrl: monitor.account.baseUrl,
+          textChunkLimit: monitor.core.channel.text.resolveTextChunkLimit(
+            monitor.cfg,
+            "mattermost",
+            monitor.account.accountId,
+            { fallbackLimit: resolveMattermostTextLimit(monitor.account) },
+          ),
+        }),
         tableMode: monitor.core.channel.text.resolveMarkdownTableMode({
           cfg: monitor.cfg,
           channel: "mattermost",

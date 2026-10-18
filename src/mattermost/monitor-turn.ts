@@ -244,6 +244,7 @@ export async function dispatchMattermostInboundTurn(
         }),
         beforeCreatePost: taskProgressCard.settleBeforeResultPostCreate,
         throttleMs: 1200,
+        maxChars: textLimit,
         chunkText: (value) =>
           core.channel.text.chunkMarkdownTextWithMode(
             core.channel.text.convertMarkdownTables(value, tableMode),

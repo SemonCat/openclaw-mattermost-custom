@@ -31,6 +31,7 @@ import {
   resolveMessagePresentationButtonAction,
 } from "openclaw/plugin-sdk/interactive-runtime";
 import { createLazyRuntimeModule } from "openclaw/plugin-sdk/lazy-runtime";
+import { questionGatewayRuntime } from "openclaw/plugin-sdk/question-gateway-runtime";
 import { resolvePayloadMediaUrls, sendTextMediaPayload } from "openclaw/plugin-sdk/reply-payload";
 import { isPrivateNetworkOptInEnabled } from "openclaw/plugin-sdk/ssrf-runtime";
 import {
@@ -67,6 +68,7 @@ import {
 } from "./mattermost/accounts.js";
 import { normalizeMattermostEmojiName } from "./mattermost/emoji.js";
 import { mattermostIngressIdentity } from "./mattermost/ingress-identity.js";
+import { MATTERMOST_LEGACY_TEXT_LIMIT, resolveMattermostTextLimit } from "./mattermost/text-limits.js";
 import type { MattermostSendResult } from "./mattermost/send.js";
 import {
   looksLikeMattermostTargetId,
@@ -868,7 +870,9 @@ const mattermostOutbound: ChannelOutboundAdapter = {
   deliveryMode: "direct",
   chunker: chunkTextForOutbound,
   chunkerMode: "markdown",
-  textChunkLimit: 4000,
+  textChunkLimit: MATTERMOST_LEGACY_TEXT_LIMIT,
+  resolveEffectiveTextChunkLimit: ({ cfg, accountId }) =>
+    resolveMattermostTextLimit(inspectMattermostAccount({ cfg, accountId })),
   sanitizeText: ({ text }) => sanitizeAssistantVisibleText(text),
   deliveryCapabilities: {
     durableFinal: {
@@ -911,9 +915,10 @@ const mattermostOutbound: ChannelOutboundAdapter = {
   },
   sendPayload: async (ctx) => {
     const buttons = readMattermostPresentationButtons(ctx.payload);
+    const questionId = questionGatewayRuntime.readAskUserQuestionId(ctx.payload);
     const rawAttachmentText = readMattermostPayloadData(ctx.payload)?.attachmentText;
     const attachmentText = typeof rawAttachmentText === "string" ? rawAttachmentText : undefined;
-    if (buttons?.length || attachmentText !== undefined) {
+    if (buttons?.length || attachmentText !== undefined || questionId) {
       const mediaUrl = resolvePayloadMediaUrls({
         ...ctx.payload,
         mediaUrl: ctx.payload.mediaUrl ?? ctx.mediaUrl,
@@ -932,6 +937,7 @@ const mattermostOutbound: ChannelOutboundAdapter = {
         requireMediaUpload: requiresMattermostMediaUpload(mediaUrl) ? true : undefined,
         replyToId: ctx.replyToId ?? (ctx.threadId != null ? String(ctx.threadId) : undefined),
         buttons: buttons?.length ? buttons : undefined,
+        ...(questionId ? { questionId } : {}),
         attachmentText,
         assertDirectAdapterHandoff: ctx.assertDirectAdapterHandoff,
         onPlatformSendDispatch: ctx.onPlatformSendDispatch,
@@ -1065,6 +1071,18 @@ export const mattermostPlugin: ChannelPlugin<ResolvedMattermostAccount> = create
       threads: true,
       media: true,
       nativeCommands: true,
+    },
+    agentPrompt: {
+      messageToolHints: ({ cfg, accountId }) => {
+        const account = inspectMattermostAccount({ cfg, accountId });
+        const limit = resolveMattermostTextLimit(account);
+        return [
+          `Mattermost text replies support up to ${limit} UTF-16 code units per post on this account. Write a cohesive reply normally; delivery handles splitting when needed.`,
+          "Use the message tool's presentation blocks for buttons and single-select menus (1-25 distinct options). Use ask_user for questions so the original pending question is resolved by the user's choice.",
+          "Protected credential requests use the host's secret-entry flow and native password dialog. Never request secrets as ordinary messages or generic form values.",
+          "On Mattermost 12+, ask_user multiSelect and multiple questions open a dialog via Fill form, preserving Other answers. Use mattermost_form for multiple choices or row/column matrices; its tool result contains structured answers. Fill form uses mobile-compatible multi-select menus and one menu per matrix row; Web form provides native checkbox groups and matrices for the web client. The user must click a button to open the dialog. Forms are for ordinary, non-secret choices.",
+        ];
+      },
     },
     streaming: {
       blockStreamingCoalesceDefaults: { minChars: 1500, idleMs: 1000 },

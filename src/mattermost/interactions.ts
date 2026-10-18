@@ -21,6 +21,7 @@ import {
 const INTERACTION_MAX_BODY_BYTES = 64 * 1024;
 const INTERACTION_BODY_TIMEOUT_MS = 10_000;
 const SIGNED_CHANNEL_ID_CONTEXT_KEY = "__openclaw_channel_id";
+export const MATTERMOST_QUESTION_FORM_CONTROL_PROP = "openclaw_question_form";
 
 /**
  * Mattermost interactive message callback payload.
@@ -120,7 +121,7 @@ type MattermostInteractionHandlerOptions = {
   handleInteraction?: MattermostInteractionCallback;
   /** Handle a short-lived trigger before durable admission (for example, opening a dialog). */
   handleImmediateInteraction?: MattermostInteractionCallback;
-  /** Secret-bearing dialog submissions are handled synchronously and are never queued. */
+  /** Dialog submissions are handled synchronously and are never queued as agent turns. */
   handleDialogSubmission?: (
     payload: MattermostDialogSubmissionPayload,
   ) => Promise<MattermostDialogSubmissionResponse>;
@@ -438,6 +439,23 @@ export function buildButtonProps(params: {
     return undefined;
   }
 
+  const formButton = buttons.find((button) =>
+    button.id === "ocquestionform" && button.context.oc_question_form === 1);
+  const formControl = formButton ? {
+    kind: "question_form_control_v1",
+    question_id: formButton.context.question_id,
+    channel_id: params.channelId,
+    ...(formButton.context.form === undefined ? {} : { form: formButton.context.form }),
+  } : undefined;
+  // REST strips action integrations. A separate signing domain keeps the public
+  // form binding verifiable without publishing a reusable callback token.
+  const formProps = formControl ? {
+    [MATTERMOST_QUESTION_FORM_CONTROL_PROP]: {
+      ...formControl,
+      signature: generateInteractionToken(formControl, params.accountId),
+    },
+  } : {};
+
   for (const button of buttons) {
     if (button.type !== "select") continue;
     const choices = button.options;
@@ -484,6 +502,7 @@ export function buildButtonProps(params: {
       };
     });
     return {
+      ...formProps,
       mm_blocks: [
         ...(params.text ? [{ type: "text", text: params.text }] : []),
         {
@@ -498,6 +517,7 @@ export function buildButtonProps(params: {
   }
 
   return {
+    ...formProps,
     attachments: buildButtonAttachments({
       callbackUrl: params.callbackUrl,
       accountId: params.accountId,
@@ -524,7 +544,7 @@ function findMattermostBlockActionName(blocks: unknown, actionId: string): strin
   return typeof label === "string" && label.trim() ? label.trim() : null;
 }
 
-function findMattermostBlockControl(blocks: unknown, actionId: string): Record<string, unknown> | null {
+export function findMattermostBlockControl(blocks: unknown, actionId: string): Record<string, unknown> | null {
   if (!Array.isArray(blocks)) {
     return null;
   }
@@ -830,10 +850,10 @@ export function createMattermostInteractionHandler(
         res.end(JSON.stringify(response.body ?? {}));
       } catch {
         // Never stringify a secret-bearing exception or request payload into logs.
-        log?.("mattermost interaction: secret dialog submission failed");
+        log?.("mattermost interaction: dialog submission failed");
         res.statusCode = 500;
         res.setHeader("Content-Type", "application/json");
-        res.end(JSON.stringify({ error: "Credential submission failed" }));
+        res.end(JSON.stringify({ error: "Dialog submission failed" }));
       }
       return;
     }

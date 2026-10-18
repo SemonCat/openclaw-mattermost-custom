@@ -29,13 +29,11 @@ import {
   normalizeOptionalString,
 } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { z } from "zod";
+import { observeMattermostServerVersion } from "./text-limits.js";
 
 const MATTERMOST_ERROR_BODY_LIMIT_BYTES = 8 * 1024;
 const MATTERMOST_REQUEST_TIMEOUT_MS = 30_000;
-// Mattermost REST control-plane JSON (posts, users, channels, file-upload
-// results) stays well under a megabyte; cap successful JSON the same way the
-// shared provider path is capped so an untrusted/self-hosted homeserver cannot
-// stream an unbounded body into the runtime before parsing.
+// Keep the SDK's bounded JSON reader for posts and control-plane responses.
 // Non-JSON success bodies are a rare fallback (the API is JSON-first); keep a
 // generous text budget but still bound it instead of buffering the whole stream.
 const MATTERMOST_TEXT_RESPONSE_LIMIT_BYTES = 64 * 1024;
@@ -411,6 +409,7 @@ export function createMattermostClient(params: {
         isMessagePost,
       });
       if (res.ok) {
+        observeMattermostServerVersion(baseUrl, res.headers.get("x-version-id"));
         break;
       }
       const delay = res.status === 429 ? resolveMattermostRateLimitDelay(res.headers) : undefined;

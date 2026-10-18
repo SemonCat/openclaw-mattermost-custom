@@ -60,6 +60,7 @@ import {
   type RuntimeEnv,
 } from "./runtime-api.js";
 import { sendMessageMattermost } from "./send.js";
+import { resolveMattermostTextLimit } from "./text-limits.js";
 import {
   isMattermostSessionAdmissionRaceError,
   withMattermostSessionAdmissionRetry,
@@ -1017,12 +1018,15 @@ async function handleSlashCommandAsync(params: {
         const attempt = resolveDispatchAttempt();
         let modelPinResult: ReturnType<typeof pinMattermostExplicitDefaultModelSelection> | undefined;
         lastAttempt = attempt;
-        const textLimit = core.channel.text.resolveTextChunkLimit(
-          attempt.cfg,
-          "mattermost",
-          account.accountId,
-          { fallbackLimit: account.textChunkLimit ?? 4000 },
-        );
+        const textLimit = resolveMattermostTextLimit({
+          baseUrl: account.baseUrl,
+          textChunkLimit: core.channel.text.resolveTextChunkLimit(
+            attempt.cfg,
+            "mattermost",
+            account.accountId,
+            { fallbackLimit: resolveMattermostTextLimit(account) },
+          ),
+        });
         const tableMode = core.channel.text.resolveMarkdownTableMode({
           cfg: attempt.cfg,
           channel: "mattermost",

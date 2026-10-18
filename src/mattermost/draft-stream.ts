@@ -10,8 +10,8 @@ import {
   updateMattermostPostMessageWithReadback,
   type MattermostClient,
 } from "./client.js";
+import { resolveMattermostTextLimit } from "./text-limits.js";
 
-const MATTERMOST_STREAM_MAX_CHARS = 4000;
 const DEFAULT_THROTTLE_MS = 1000;
 
 type MattermostDraftPublishedPart = {
@@ -119,10 +119,10 @@ export function createMattermostDraftStream(params: {
   log?: (message: string) => void;
   warn?: (message: string) => void;
 }): MattermostDraftStream {
-  const maxChars = Math.min(
-    params.maxChars ?? MATTERMOST_STREAM_MAX_CHARS,
-    MATTERMOST_STREAM_MAX_CHARS,
-  );
+  const maxChars = resolveMattermostTextLimit({
+    baseUrl: params.client.baseUrl,
+    textChunkLimit: params.maxChars,
+  });
   const throttleMs = Math.max(250, params.throttleMs ?? DEFAULT_THROTTLE_MS);
   const streamState = { stopped: false, final: false };
   let terminalAcceptedDeliveryError: Error | undefined;

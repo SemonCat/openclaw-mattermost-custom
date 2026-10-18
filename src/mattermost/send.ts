@@ -56,6 +56,10 @@ import {
   type MattermostTarget,
 } from "./target-resolution.js";
 import { registerMattermostQuestionDelivery } from "./question-finalization.js";
+import { MATTERMOST_V12_TEXT_LIMIT, resolveMattermostTextLimit } from "./text-limits.js";
+import { createMattermostQuestionRpc } from "./question-rpc.js";
+import { buildMattermostQuestionFormButtons, readMattermostQuestion } from "./question-dialog.js";
+import { renderQuestionElements } from "./form-schema.js";
 
 type MattermostSendOpts = Pick<
   ChannelOutboundContext,
@@ -104,7 +108,7 @@ const MATTERMOST_DELIVERY_MARKER_PROP = "openclaw_delivery";
 const MATTERMOST_RECONCILE_LOOKBACK_MS = 5 * 60_000;
 const MATTERMOST_FORMAT_PROFILE = FormatCapabilityProfile.define({
   mechanism: "markdown",
-  chunk: { limit: 16_383, unit: "chars" },
+  chunk: { limit: MATTERMOST_V12_TEXT_LIMIT, unit: "chars" },
 });
 
 function renderMattermostMarkdown(
@@ -533,8 +537,23 @@ export async function sendMessageMattermost(
     await resolveMattermostSendContext(to, opts);
   client.assertRequestCurrent?.();
   let props = opts.props;
+  let buttons = opts.buttons;
+  if (!props && !buttons?.length && opts.questionId &&
+    resolveMattermostTextLimit({ baseUrl: client.baseUrl }) === MATTERMOST_V12_TEXT_LIMIT) {
+    try {
+      const question = await readMattermostQuestion(createMattermostQuestionRpc(() => cfg), opts.questionId);
+      if (question.status === "pending" &&
+        (question.questions.length > 1 || question.questions.some((q) => q.multiSelect))) {
+        renderQuestionElements(question.questions);
+        buttons = [buildMattermostQuestionFormButtons(question.id)];
+      }
+    } catch {
+      // Preserve the host's text/Web UI fallback when native form preparation is unavailable.
+      logger.warn("mattermost question form: native prompt preparation unavailable");
+    }
+  }
   let legacyButtonFallbackProps: Record<string, unknown> | undefined;
-  if (!props && Array.isArray(opts.buttons) && opts.buttons.length > 0) {
+  if (!props && Array.isArray(buttons) && buttons.length > 0) {
     setInteractionSecret(accountId, client.token);
     const interactions = resolveMattermostAccount({ cfg, accountId }).config?.interactions;
     const detectedBlocksSupport =
@@ -554,7 +573,7 @@ export async function sendMessageMattermost(
       callbackUrl,
       accountId,
       channelId,
-      buttons: opts.buttons,
+      buttons,
       text: opts.attachmentText,
     };
     props = buildButtonProps({

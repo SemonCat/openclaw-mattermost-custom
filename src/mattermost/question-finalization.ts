@@ -2,8 +2,7 @@
 import { questionGatewayRuntime } from "openclaw/plugin-sdk/question-gateway-runtime";
 import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
 import { updateMattermostPost, type MattermostClient, type MattermostPost } from "./client.js";
-
-const MATTERMOST_MESSAGE_LIMIT = 16_383;
+import { resolveMattermostTextLimit } from "./text-limits.js";
 
 function appendTerminalStatus(text: unknown, status: string): string {
   const prefix = typeof text === "string" ? text.trim() : "";
@@ -88,7 +87,9 @@ export function registerMattermostQuestionDelivery(params: {
       const separator = suffix ? "\n\n" : "";
       const prefix = truncateUtf16Safe(
         text,
-        MATTERMOST_MESSAGE_LIMIT - separator.length - suffix.length,
+        resolveMattermostTextLimit({ baseUrl: params.client.baseUrl }) -
+          separator.length -
+          suffix.length,
       );
       await updateMattermostPost(params.client, params.post.id, {
         message: `${prefix}${separator}${suffix}`,

@@ -2,6 +2,10 @@
 import { resolveHumanDelayConfig } from "openclaw/plugin-sdk/agent-runtime";
 import { questionGatewayRuntime } from "openclaw/plugin-sdk/question-gateway-runtime";
 import { parseMattermostQuestionContext } from "../normalize.js";
+import { resolveMattermostAccount } from "./accounts.js";
+import { fetchMattermostUser } from "./client.js";
+import { createMattermostQuestionDialogController, MATTERMOST_QUESTION_FORM_CALLBACK } from "./question-dialog.js";
+import { createMattermostQuestionRpc } from "./question-rpc.js";
 import {
   createMattermostApprovalInteractionHandler,
   parseMattermostApprovalAction,
@@ -127,6 +131,34 @@ export function registerMattermostInteractions(params: {
     log: (message) => runtime.error?.(message),
   });
   const handleQuestionInteraction = createMattermostQuestionInteractionHandler(monitor);
+  const questionDialog = createMattermostQuestionDialogController({
+    accountId: account.accountId,
+    botUserId,
+    callbackUrl: params.interactionCallbackUrl,
+    client,
+    rpc: createMattermostQuestionRpc(() => pinMattermostMonitorConfig(monitor).cfg),
+    authorize: async (userId, post) => {
+      const channelInfo = await resolveChannelInfo(post.channel_id!);
+      const user = await fetchMattermostUser(client, userId);
+      const current = pinMattermostMonitorConfig(monitor);
+      const currentAccount = resolveMattermostAccount({ cfg: current.cfg, accountId: account.accountId });
+      if (!currentAccount.enabled || current.cfg.channels?.mattermost?.enabled === false) return null;
+      const auth = await authorizeMattermostCommandInvocation({
+        account: currentAccount, cfg: current.cfg, senderId: userId,
+        senderName: user.username ?? "", channelId: post.channel_id!, channelInfo,
+        readStoreAllowFrom: pairing.readAllowFromStore,
+        allowTextCommands: core.channel.commands.shouldHandleTextCommands({ cfg: current.cfg, surface: "mattermost" }),
+        hasControlCommand: false,
+      });
+      if (!auth.ok) return null;
+      const plan = await buildMattermostEventPlan({ ...current, account: currentAccount }, {
+        channelId: post.channel_id!, senderId: userId, threadRootId: post.root_id,
+        dropLabel: "question form",
+      });
+      return plan?.thread.sessionKey ?? null;
+    },
+    log: (message) => runtime.error?.(message),
+  });
   const interactionOptions: Parameters<typeof createMattermostInteractionProcessor>[0] = {
     client,
     botUserId,
@@ -134,8 +166,12 @@ export function registerMattermostInteractions(params: {
     allowedSourceIps: params.allowedSourceIps,
     trustedProxies: startupCfg.gateway?.trustedProxies,
     allowRealIpFallback: startupCfg.gateway?.allowRealIpFallback === true,
-    handleImmediateInteraction: secretDialog.handleInteraction,
-    handleDialogSubmission: secretDialog.handleSubmission,
+    handleImmediateInteraction: async (input) =>
+      (await questionDialog.handleInteraction(input)) ?? (await secretDialog.handleInteraction(input)),
+    handleDialogSubmission: async (payload) =>
+      payload.callback_id === MATTERMOST_QUESTION_FORM_CALLBACK
+        ? questionDialog.handleSubmission(payload)
+        : secretDialog.handleSubmission(payload),
     handleInteraction: async (interaction) =>
       (await handleApprovalInteraction(interaction)) ??
       (await handleQuestionInteraction(interaction)) ??

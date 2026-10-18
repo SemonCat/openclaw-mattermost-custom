@@ -13,7 +13,7 @@
   "skills": ["./skills"],
   "channels": ["mattermost"],
   "contracts": {
-    "tools": ["mattermost_thread"]
+    "tools": ["mattermost_thread", "mattermost_form"]
   },
   "channelConfigs": {
     "mattermost": {
