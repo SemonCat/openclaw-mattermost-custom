@@ -219,10 +219,13 @@ export function createMattermostMessageReactionRuntime(params: {
     enabled: statusReactionsEnabled,
     adapter,
     initialEmoji: ackReaction ?? "",
-    // Ingress/steer silence is not evidence of a stalled run. Cards own task progress;
-    // acknowledgement presentation keeps receipt and actual failure reactions truthful.
-    presentation: "acknowledgement",
-    emojis: MATTERMOST_STATUS_REACTION_EMOJIS,
+    emojis: {
+      ...MATTERMOST_STATUS_REACTION_EMOJIS,
+      // The SDK retains the receipt until settlement. Reusing it for inferred stalls
+      // adds no visible state during silence, while real activity events still render.
+      stallSoft: ackReaction ?? "",
+      stallHard: ackReaction ?? "",
+    },
     timing: DEFAULT_TIMING,
     onError: (err) => {
       logAckFailure({ log, channel: "mattermost", target, error: err });
@@ -296,7 +299,7 @@ export function createMattermostMessageReactionRuntime(params: {
         return;
       }
       if (result.anyReplyDelivered) {
-        // A visible delivery keeps its acknowledgement; only real errors replace it.
+        // Keep the successful outcome and sweep the receipt/activity trail.
         await targetController.setDone();
         return;
       }

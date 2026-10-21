@@ -105,11 +105,15 @@ Compared with the official plugin, this build preserves:
 - Native model/runtime confirmation with host validation and persisted-selection readback.
 - Backlog-aware text debounce with sender/thread isolation and bounded batches.
 
-Status reactions use acknowledgement presentation: a received post keeps one
-acknowledgement through queued work, steering, tools, and successful delivery.
-Elapsed silence does not add hourglass or warning markers. Actual dispatch or
-delivery failures still replace the acknowledgement with an error reaction.
-Task cards and progress previews carry task state.
+When `messages.statusReactions.enabled` is true, received posts show the configured
+acknowledgement, followed by event-driven thinking, tool, and compaction reactions.
+Successful delivery leaves a completion reaction; actual dispatch or delivery
+failures leave an error reaction. Terminal settlement clears the earlier reaction
+trail. Elapsed silence adds no hourglass or warning markers and does not imply that
+work has stalled. Steered posts follow their active owner; queued follow-ups keep
+their receipt until admission and settle with their own turn. Without explicit
+status-reaction enablement, posts retain the existing plain acknowledgement.
+Task cards and progress previews continue to carry the detailed task state.
 
 Mutable message-tool actions and bounded search are enabled by default for this
 personal downstream plugin. Each gate can still be disabled globally or per account:
