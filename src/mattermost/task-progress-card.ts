@@ -20,6 +20,7 @@ export type MattermostTaskProgressPlan = {
   phase?: string;
   title?: string;
   explanation?: string;
+  markdown?: string;
   steps?: AgentPlanStep[];
   source?: string;
 };
@@ -516,7 +517,15 @@ export function createMattermostTaskProgressCard(params: {
   return {
     postId: () => taskPostId,
     hasWorkSession: (sessionKey: string) => workSessions.has(sessionKey),
-    canContinue: () => Boolean(taskPostId && latestSnapshot?.steps.length &&
+    suspendContinuation: () => {
+      if (parentTerminalStatus === "failed" || parentTerminalStatus === "cancelled") return;
+      // Host custody survives steering, but old run correlation does not.
+      activeRunId = undefined;
+      parentFinished = true;
+      lifecycleTerminal = "yielded";
+      parentTerminalStatus = undefined;
+    },
+    canContinue: () => Boolean(taskPostId && latestSnapshot &&
       parentTerminalStatus !== "failed" && parentTerminalStatus !== "cancelled" &&
       latestSnapshot.status !== "failed" && latestSnapshot.status !== "cancelled" &&
       (lifecycleTerminal === "yielded" ||
@@ -524,7 +533,7 @@ export function createMattermostTaskProgressCard(params: {
     beginContinuation: async (runId: string, isCurrent: () => boolean): Promise<boolean> => {
       // Only the monitor's proven committed continuation may reopen this card.
       await writeTail;
-      if (!isCurrent() || !taskPostId || !latestSnapshot?.steps.length || !parentFinished ||
+      if (!isCurrent() || !taskPostId || !latestSnapshot || !parentFinished ||
           latestSnapshot.status === "failed" || latestSnapshot.status === "cancelled" ||
           parentTerminalStatus === "failed" || parentTerminalStatus === "cancelled" ||
           lifecycleTerminal !== "yielded" &&
@@ -541,10 +550,15 @@ export function createMattermostTaskProgressCard(params: {
     ): Promise<boolean> => {
       await writeTail;
       if (!isCurrent() || parentFinished || activeRunId !== runId || !taskPostId || !latestSnapshot) return false;
+      const title = normalizeTitle(plan.title, plan.source);
+      const markdown = renderNativeProgressMarkdownForMattermost(plan.markdown);
+      const explanation = normalizeExplanation(markdown) ??
+        normalizePlanExplanation(plan.explanation, plan.source);
       const steps = normalizeSteps(plan.steps);
-      if (steps.length !== latestSnapshot.steps.length ||
-          steps.some((step, index) => step.step !== latestSnapshot!.steps[index].step)) return false;
-      latestSnapshot = { ...latestSnapshot, revision: ++nextRevision, steps,
+      if (!title && !explanation && steps.length === 0) return false;
+      // A committed native call replaces the card, including a revised or absent checklist.
+      lastNativeProgressMarkdown = markdown;
+      latestSnapshot = { revision: ++nextRevision, title, explanation, steps,
         status: "in_progress", workSessions: listWorkSessions() };
       return await schedulePublish(isCurrent);
     },
@@ -735,7 +749,9 @@ export function createMattermostTaskProgressCard(params: {
     finish: async (result: {
       outcome?: "completed" | "failed";
       deliveryFailed?: boolean;
+      isCurrent?: () => boolean;
     }): Promise<void> => {
+      if (result.isCurrent && !result.isCurrent()) return;
       parentFinished = true;
       if (!latestSnapshot) {
         await writeTail;
@@ -763,7 +779,7 @@ export function createMattermostTaskProgressCard(params: {
         status: status ?? "in_progress",
         workSessions: listWorkSessions(),
       };
-      await schedulePublish();
+      await schedulePublish(result.isCurrent);
       if (!hasActiveWorkSessions()) settle();
     },
   };

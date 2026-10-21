@@ -171,6 +171,42 @@ describe("createMattermostMessageReactionRuntime", () => {
       });
     }
 
+    it.each(["steer", "followup"] as const)(
+      "keeps acknowledgement truthful across a long %s wait and surfaces a real failure", async (mode) => {
+        const lifecycleStore = createMattermostReactionLifecycleStore();
+        const cfg: OpenClawConfig = {
+          messages: { statusReactions: { enabled: true }, queue: { mode } },
+        };
+        const ownerParams = createBaseParams({ cfg, lifecycleStore, postId: "owner" });
+        const followupParams = createBaseParams({ cfg, lifecycleStore, postId: "followup" });
+        const owner = createMattermostMessageReactionRuntime(ownerParams);
+        const followup = createMattermostMessageReactionRuntime(followupParams);
+        owner.activateAfterRecord();
+        owner.setTool("bash");
+        followup.startIngressReceipt();
+        await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.stallHardMs + 1);
+        followup.activateAfterRecord();
+        if (mode === "followup") followup.beginQueuedFollowup();
+        await followup.finish({ dispatchError: false, anyReplyDelivered: false });
+        await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.stallHardMs * 2);
+        for (const params of [ownerParams, followupParams]) {
+          expect(requestedEmojis(params.request as ReturnType<typeof vi.fn>)).toEqual(["+eyes"]);
+        }
+        if (mode === "followup") followup.admitQueuedFollowup();
+        const ownerFinish = owner.finish({ dispatchError: true, anyReplyDelivered: false });
+        await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.errorHoldMs);
+        await ownerFinish;
+        expect(requestedEmojis(ownerParams.request as ReturnType<typeof vi.fn>)).toEqual(["+eyes", "+x", "-eyes"]);
+        if (mode === "followup") {
+          expect(requestedEmojis(followupParams.request as ReturnType<typeof vi.fn>)).toEqual(["+eyes"]);
+          const failed = followup.finishQueuedFollowup({ dispatchError: true, anyReplyDelivered: false });
+          await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.errorHoldMs);
+          await failed;
+        }
+        expect(requestedEmojis(followupParams.request as ReturnType<typeof vi.fn>)).toEqual(["+eyes", "+x", "-eyes"]);
+      },
+    );
+
     it("settles a pre-record ingress receipt as an error without shared lifecycle activation", async () => {
       const params = createBaseParams({
         cfg: { messages: { statusReactions: { enabled: true } } },
@@ -225,11 +261,14 @@ describe("createMattermostMessageReactionRuntime", () => {
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
       expect(requestedEmojis(pendingParams.request as ReturnType<typeof vi.fn>)).toEqual([
         "+eyes",
-        "+computer",
       ]);
+      const failed = owner.finish({ dispatchError: true, anyReplyDelivered: false });
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.errorHoldMs);
+      await failed;
+      expect(requestedEmojis(pendingParams.request as ReturnType<typeof vi.fn>)).toContain("+x");
     });
 
-    it("moves queued -> thinking -> tool -> done, replacing the prior emoji at each step", async () => {
+    it("keeps one acknowledgement through thinking, tools and successful delivery", async () => {
       const params = createBaseParams({
         cfg: { messages: { statusReactions: { enabled: true } } },
       });
@@ -250,17 +289,8 @@ describe("createMattermostMessageReactionRuntime", () => {
       await finishPromise;
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
 
-      // Intermediate transitions only add; the terminal state removes every
-      // previously-tracked emoji in one pass, keeping just the terminal one, which then
-      // stays on the post as the turn's recorded outcome.
       expect(requestedEmojis(params.request as ReturnType<typeof vi.fn>)).toEqual([
-        "+eyes", // queued
-        "+brain", // thinking
-        "+computer", // bash tool
-        "+white_check_mark", // done
-        "-eyes",
-        "-brain",
-        "-computer",
+        "+eyes",
       ]);
     });
 
@@ -322,8 +352,8 @@ describe("createMattermostMessageReactionRuntime", () => {
       runtime.activateAfterRecord();
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
 
-      const finishPromise = runtime.finish({ dispatchError: false, anyReplyDelivered: true });
-      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.doneHoldMs);
+      const finishPromise = runtime.finish({ dispatchError: true, anyReplyDelivered: false });
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.errorHoldMs);
       await expect(finishPromise).resolves.toBeUndefined();
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
 
@@ -366,20 +396,16 @@ describe("createMattermostMessageReactionRuntime", () => {
       await joined.finish({ dispatchError: false, anyReplyDelivered: false });
       owner.setTool("web_search");
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
-      const ownerFinishPromise = owner.finish({ dispatchError: false, anyReplyDelivered: true });
-      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.doneHoldMs);
+      const ownerFinishPromise = owner.finish({ dispatchError: true, anyReplyDelivered: false });
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.errorHoldMs);
       await ownerFinishPromise;
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
 
       for (const params of [ownerParams, joinedParams]) {
         expect(requestedEmojis(params.request as ReturnType<typeof vi.fn>)).toEqual([
           "+eyes",
-          "+brain",
-          "+globe_with_meridians",
-          "+white_check_mark",
+          "+x",
           "-eyes",
-          "-brain",
-          "-globe_with_meridians",
         ]);
       }
     });
@@ -425,16 +451,13 @@ describe("createMattermostMessageReactionRuntime", () => {
 
       expect(requestedEmojis(joinedParams.request as ReturnType<typeof vi.fn>)).toEqual([
         "+eyes",
-        "+white_check_mark",
-        "-eyes",
       ]);
 
-      // The owner is unaffected and still active; its own later transitions still work.
-      owner.setThinking();
-      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
-      expect(requestedEmojis(ownerParams.request as ReturnType<typeof vi.fn>).at(-1)).toBe(
-        "+brain",
-      );
+      const failed = owner.finish({ dispatchError: true, anyReplyDelivered: false });
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.errorHoldMs);
+      await failed;
+      expect(requestedEmojis(ownerParams.request as ReturnType<typeof vi.fn>)).toContain("+x");
+      expect(requestedEmojis(joinedParams.request as ReturnType<typeof vi.fn>)).toEqual(["+eyes"]);
     });
 
     it("transfers a zero-count joined dispatch into its own queued follow-up lifecycle", async () => {
@@ -467,12 +490,12 @@ describe("createMattermostMessageReactionRuntime", () => {
       const endCorrelation = followup.beginQueuedFollowup();
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
 
-      const ownerFinish = owner.finish({ dispatchError: false, anyReplyDelivered: true });
-      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.doneHoldMs);
+      const ownerFinish = owner.finish({ dispatchError: true, anyReplyDelivered: false });
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.errorHoldMs);
       await ownerFinish;
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
       expect(requestedEmojis(followupParams.request as ReturnType<typeof vi.fn>)).not.toContain(
-        "+white_check_mark",
+        "+x",
       );
 
       followup.admitQueuedFollowup();
@@ -493,16 +516,7 @@ describe("createMattermostMessageReactionRuntime", () => {
       const followupEmojis = requestedEmojis(
         followupParams.request as ReturnType<typeof vi.fn>,
       );
-      expect(followupEmojis).toEqual(
-        expect.arrayContaining([
-          "+eyes",
-          "+brain",
-          "+computer",
-          "+compression",
-          "+white_check_mark",
-        ]),
-      );
-      expect(followupEmojis.at(-1)).toBe("-compression");
+      expect(followupEmojis).toEqual(["+eyes"]);
     });
 
     it("does not make a queued follow-up the active owner before admission", async () => {
@@ -548,19 +562,17 @@ describe("createMattermostMessageReactionRuntime", () => {
       expect(requestedEmojis(followupParams.request as ReturnType<typeof vi.fn>)).toEqual([
         "+eyes",
       ]);
-      expect(requestedEmojis(trailingParams.request as ReturnType<typeof vi.fn>)).toContain(
-        "+computer",
-      );
+      expect(requestedEmojis(trailingParams.request as ReturnType<typeof vi.fn>)).toEqual(["+eyes"]);
 
       await trailing.finish({ dispatchError: false, anyReplyDelivered: false });
-      const ownerFinish = owner.finish({ dispatchError: false, anyReplyDelivered: true });
-      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.doneHoldMs);
+      const ownerFinish = owner.finish({ dispatchError: true, anyReplyDelivered: false });
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.errorHoldMs);
       await ownerFinish;
       expect(requestedEmojis(trailingParams.request as ReturnType<typeof vi.fn>)).toContain(
-        "+white_check_mark",
+        "+x",
       );
       expect(requestedEmojis(followupParams.request as ReturnType<typeof vi.fn>)).not.toContain(
-        "+white_check_mark",
+        "+x",
       );
 
       followup.admitQueuedFollowup();
@@ -601,14 +613,14 @@ describe("createMattermostMessageReactionRuntime", () => {
 
       // finish() has entered the old owner's terminal path, but the core queue-drain
       // correlation transfers the second post before that settlement executes.
-      const ownerFinish = owner.finish({ dispatchError: false, anyReplyDelivered: true });
+      const ownerFinish = owner.finish({ dispatchError: true, anyReplyDelivered: false });
       const endCorrelation = followup.beginQueuedFollowup();
-      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.doneHoldMs);
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.errorHoldMs);
       await ownerFinish;
       await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
 
       expect(requestedEmojis(ownerParams.request as ReturnType<typeof vi.fn>)).toContain(
-        "+white_check_mark",
+        "+x",
       );
       expect(requestedEmojis(followupParams.request as ReturnType<typeof vi.fn>)).toEqual([
         "+eyes",

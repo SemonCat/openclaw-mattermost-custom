@@ -53,6 +53,7 @@ import { deliverMattermostReplyPayload, joinMattermostVisibleContent } from "./r
 import type { HistoryEntry, ReplyPayload } from "./runtime-api.js";
 import { createChannelMessageReplyPipeline } from "./runtime-api.js";
 import { sendMessageMattermost } from "./send.js";
+import { retainMattermostProgressDraft } from "./monitor-progress-continuation.js";
 import { withMattermostSessionAdmissionRetry } from "./session-admission-retry.js";
 import { recordMattermostThreadParticipation } from "./thread-participation.js";
 import {
@@ -216,6 +217,8 @@ export async function dispatchMattermostInboundTurn(
   monitor.taskCardContinuation?.retireSession(thread.sessionKey);
   let initialRunId: string | undefined;
   let continuationRegistered = false;
+  let continuationSessionId: string | undefined;
+  let progressDraftAdopted = false;
   let continuationOwner: ReturnType<NonNullable<MattermostMonitorContext["taskCardContinuation"]>["register"]>;
   const taskProgressCard = createMattermostTaskProgressCard({
     client,
@@ -507,6 +510,69 @@ export async function dispatchMattermostInboundTurn(
       if (taskCardBarrier) {
         await taskCardBarrier;
       }
+      if (
+        !progressDraftAdopted && draftPreviewEnabled && account.streamingMode === "progress" &&
+        info.kind === "final" && info.adoptProgressDraft && monitor.taskCardContinuation &&
+        initialRunId && continuationSessionId && taskProgressCard.postId() &&
+        !payloadEntry.isError && !payloadEntry.isCommentary && !payloadEntry.isReasoning &&
+        !payloadEntry.mediaUrl && !payloadEntry.mediaUrls?.length &&
+        payloadEntry.interactive === undefined && payloadEntry.presentation === undefined &&
+        payloadEntry.channelData === undefined && !previewLifecycle.previewFinalized
+      ) {
+        const snapshot = progressDraft.getSnapshot();
+        const text = progressDraft.getText().trimEnd();
+        if (text && (progressDraft.hasStatusHeadline || progressDraft.hasPlanProgress || snapshot.lines.length)) {
+          const assertCurrent = () => {
+            monitor.abortSignal?.throwIfAborted();
+            if (core.agent.session.getSessionEntry({ sessionKey: thread.sessionKey })?.sessionId !== continuationSessionId) {
+              throw new Error("Mattermost progress session changed");
+            }
+          };
+          assertCurrent();
+          // Freeze and confirm the old producer before giving its identity to a new owner.
+          progressDraft.markFinalReplyStarted();
+          await draftStream.stop();
+          const postId = draftStream.postId();
+          if (postId) {
+            const confirmed = await fetchMattermostPost(client, postId).catch((error: unknown) => {
+              assertCurrent();
+              monitor.logVerboseMessage(`mattermost progress adoption confirmation failed: ${String(error)}`);
+              return undefined;
+            });
+            assertCurrent();
+            if (confirmed && confirmed.id === postId && confirmed.channel_id === channelId &&
+                (confirmed.root_id || undefined) === effectiveReplyToId &&
+                confirmed.user_id === botUserId && confirmed.message === text) {
+              let releaseRetained: (() => void) | undefined;
+              const retained = retainMattermostProgressDraft({
+                client, channelId, rootId: effectiveReplyToId, postId, text, snapshot,
+                entry: account.config, seed: `${account.accountId}:${channelId}`, maxChars: textLimit,
+                abortSignal: monitor.abortSignal, assertCurrent, log: monitor.logVerboseMessage,
+                onRetired: () => releaseRetained?.(),
+              });
+              if (info.adoptProgressDraft(retained)) {
+                progressDraftAdopted = true;
+                previewLifecycle.retainPreview();
+                if (!retained.retired) releaseRetained = monitor.taskCardContinuation.retainProgressDraft({
+                  agentId: route.agentId, sessionId: continuationSessionId,
+                  sessionKey: thread.sessionKey, draft: retained,
+                });
+                // The owner-held capability proves custody after same-run steer input.
+                // Re-register at this boundary; old unprovenanced input grants no authority.
+                continuationOwner = monitor.taskCardContinuation.register({
+                  agentId: route.agentId, sessionId: continuationSessionId,
+                  sessionKey: thread.sessionKey, initialRunId, card: taskProgressCard,
+                  adoptedDraft: retained,
+                });
+                anyReplyDelivered = true;
+                return { visibleReplySent: true };
+              }
+              // Rejection leaves the original draft to ordinary final delivery/cleanup.
+              retained.release();
+            }
+          }
+        }
+      }
       if (info.kind === "final") {
         await enterBlockPreviewActivity("text");
         // Final text uses only confirmed-visible generations, so join prior boundary work before deciding whether to edit in place.
@@ -609,6 +675,7 @@ export async function dispatchMattermostInboundTurn(
     onDelivered: async (payloadEntry, info, result) => {
       if (
         info.kind !== "final" ||
+        progressDraftAdopted ||
         payloadEntry.isError ||
         result?.visibleReplySent === false
       ) {
@@ -854,10 +921,13 @@ export async function dispatchMattermostInboundTurn(
                     continuationRegistered = true;
                     try {
                       const entry = core.agent.session.getSessionEntry({ sessionKey: thread.sessionKey });
-                      if (entry?.sessionId) continuationOwner = monitor.taskCardContinuation.register({
+                      if (entry?.sessionId) {
+                        continuationSessionId = entry.sessionId;
+                        continuationOwner = monitor.taskCardContinuation.register({
                         agentId: route.agentId, sessionId: entry.sessionId,
                         sessionKey: thread.sessionKey, initialRunId, card: taskProgressCard,
-                      });
+                        });
+                      }
                     } catch (error: unknown) {
                       monitor.logVerboseMessage(`mattermost continuation identity unavailable: ${String(error)}`);
                     }

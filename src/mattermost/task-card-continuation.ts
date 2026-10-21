@@ -26,16 +26,20 @@ function committedRunId(update: TranscriptUpdate): string | undefined {
 
 function readPlan(value: unknown): MattermostTaskProgressPlan | undefined {
   const args = record(value);
-  if (!Array.isArray(args?.plan) || args.plan.length === 0 || args.plan.length > 50) return;
+  if (!args) return;
+  if (args.plan !== undefined && (!Array.isArray(args.plan) || args.plan.length > 50)) return;
   const steps: NonNullable<MattermostTaskProgressPlan["steps"]> = [];
-  for (const value of args.plan) {
+  for (const value of (args.plan ?? []) as unknown[]) {
     const step = record(value);
     if (typeof step?.step !== "string" ||
         !["pending", "in_progress", "completed"].includes(String(step.status))) return;
     steps.push({ step: step.step, status: step.status as typeof steps[number]["status"] });
   }
-  // Only the original explicit checklist crosses this boundary. No transcript text.
-  return { source: "openclaw", steps };
+  const explanation = typeof args.explanation === "string" ? args.explanation : undefined;
+  const markdown = typeof args.markdown === "string" ? args.markdown : undefined;
+  if (!steps.length && !explanation?.trim() && !markdown?.trim()) return;
+  // Only arguments of a successful native progress tool cross this boundary.
+  return { source: "openclaw", steps, explanation, markdown };
 }
 
 function successfulWrappedResult(message: Record<string, unknown>): boolean {
@@ -73,6 +77,10 @@ type Owner = {
   lifecycle: Map<string, MattermostTaskProgressAgentEvent>;
   tail: Promise<void>;
   timer: ReturnType<typeof setTimeout>;
+  adoptedDraft?: { retire: () => void };
+  generation: number;
+  finishingGeneration?: number;
+  releasing?: boolean;
 };
 
 export function createMattermostTaskCardContinuation(params: {
@@ -80,6 +88,26 @@ export function createMattermostTaskCardContinuation(params: {
   log: (message: string) => void;
 }) {
   const owners = new Map<string, Owner>();
+  type Draft = { retire: () => void };
+  const drafts = new Map<Draft, { agentId: string; sessionId: string; sessionKey: string;
+    timer: ReturnType<typeof setTimeout> }>();
+  const releaseDraft = (draft: Draft, drainTerminal = false) => {
+    const entry = drafts.get(draft);
+    if (entry) clearTimeout(entry.timer);
+    drafts.delete(draft);
+    for (const owner of owners.values()) {
+      if (owner.adoptedDraft !== draft) continue;
+      if (drainTerminal && owner.finishingGeneration === owner.generation) {
+        // Close observation now, but let already-proven terminal work join provider writes.
+        owner.releasing = true;
+        void owner.tail.then(() => retire(owner));
+      } else retire(owner);
+    }
+  };
+  const retireDraft = (draft: Draft) => {
+    releaseDraft(draft);
+    draft.retire();
+  };
   let stopped = false;
   const retire = (owner: Owner) => {
     owner.active = false;
@@ -89,9 +117,29 @@ export function createMattermostTaskCardContinuation(params: {
     owner.lifecycle.clear();
     if (owners.get(owner.sessionKey) === owner) owners.delete(owner.sessionKey);
   };
-  const queue = (owner: Owner, operation: () => Promise<void>) => {
+  const hasHostCustody = (owner: Owner) => {
+    const target = owner.adoptedDraft && drafts.get(owner.adoptedDraft);
+    return target && target.sessionKey === owner.sessionKey &&
+      target.sessionId === owner.sessionId && target.agentId === owner.agentId;
+  };
+  const fenceInput = (owner: Owner) => {
+    if (!hasHostCustody(owner)) { retire(owner); return; }
+    owner.generation += 1;
+    owner.input = undefined;
+    owner.runId = undefined;
+    owner.terminalRunId = undefined;
+    owner.finishingGeneration = undefined;
+    owner.calls.clear();
+    owner.lifecycle.clear();
+    owner.pending.length = 0;
+    owner.bufferingContinuation = false;
+    owner.card.suspendContinuation();
+  };
+  const queue = (owner: Owner, operation: (isCurrent: () => boolean) => Promise<void>) => {
+    const generation = owner.generation;
+    const isCurrent = () => owner.active && owner.generation === generation;
     owner.tail = owner.tail.then(async () => {
-      if (owner.active) await operation();
+      if (isCurrent()) await operation(isCurrent);
     }).catch((error: unknown) => {
       params.log(`mattermost task continuation failed: ${String(error)}`);
       retire(owner);
@@ -103,10 +151,13 @@ export function createMattermostTaskCardContinuation(params: {
     if (!runId || owner.terminalRunId !== runId || !event) return;
     owner.terminalRunId = undefined;
     owner.lifecycle.delete(runId);
-    queue(owner, async () => {
+    owner.finishingGeneration = owner.generation;
+    queue(owner, async (isCurrent) => {
       // A committed assistant stop alone cannot distinguish yield from task completion.
       owner.card.noteAgentEvent(event);
-      await owner.card.finish({ outcome: event.data.phase === "error" ? "failed" : "completed" });
+      await owner.card.finish({ outcome: event.data.phase === "error" ? "failed" : "completed", isCurrent });
+      if (!isCurrent()) return;
+      owner.finishingGeneration = undefined;
       if (owner.runId === runId) owner.input = undefined;
       if (!owner.card.canContinue()) retire(owner);
     });
@@ -116,10 +167,11 @@ export function createMattermostTaskCardContinuation(params: {
     event.data.status === "cancelled" || event.data.status === "timed_out" ||
     event.data.timeoutPhase != null || event.data.error != null;
   const finishFailure = (owner: Owner, event: MattermostTaskProgressAgentEvent) => {
-    queue(owner, async () => {
+    owner.finishingGeneration = owner.generation;
+    queue(owner, async (isCurrent) => {
       owner.card.noteAgentEvent(event);
-      await owner.card.finish({ outcome: "failed" });
-      retire(owner);
+      await owner.card.finish({ outcome: "failed", isCurrent });
+      if (isCurrent()) retire(owner);
     });
   };
   const consume = (owner: Owner, update: TranscriptUpdate) => {
@@ -127,7 +179,7 @@ export function createMattermostTaskCardContinuation(params: {
     if (!message) return;
     // A missing sequence cannot establish that a row follows the correlated input.
     if (typeof update.messageSeq !== "number") {
-      if (message.role === "user") retire(owner);
+      if (message.role === "user") fenceInput(owner);
       return;
     }
     if (update.messageSeq <= owner.seq) return;
@@ -138,7 +190,7 @@ export function createMattermostTaskCardContinuation(params: {
           provenance.sourceTool !== "subagent_settle" ||
           typeof provenance.sourceSessionKey !== "string" ||
           !owner.card.hasWorkSession(provenance.sourceSessionKey)) {
-        retire(owner);
+        fenceInput(owner);
         return;
       }
       owner.input = { sourceSessionKey: provenance.sourceSessionKey, seq: update.messageSeq };
@@ -157,8 +209,8 @@ export function createMattermostTaskCardContinuation(params: {
       if (owner.usedRuns.size >= MAX_PENDING) { retire(owner); return; }
       owner.runId = rowRunId;
       owner.usedRuns.add(rowRunId);
-      queue(owner, async () => {
-        if (!await owner.card.beginContinuation(rowRunId, () => owner.active)) retire(owner);
+      queue(owner, async (isCurrent) => {
+        if (!await owner.card.beginContinuation(rowRunId, isCurrent) && isCurrent()) retire(owner);
       });
       const receipt = owner.lifecycle.get(rowRunId);
       if (receipt && failedLifecycle(receipt)) {
@@ -168,7 +220,7 @@ export function createMattermostTaskCardContinuation(params: {
     }
     if (rowRunId !== owner.runId) return;
     const apply = (plan: MattermostTaskProgressPlan | undefined) => {
-      if (plan) queue(owner, async () => { await owner.card.updateContinuationPlan(rowRunId, plan, () => owner.active); });
+      if (plan) queue(owner, async (isCurrent) => { await owner.card.updateContinuationPlan(rowRunId, plan, isCurrent); });
     };
     if (message.role === "custom" && message.customType === "openclaw.nested-tool.v1" &&
         details?.toolName === "progress_card" && details.isError === false &&
@@ -201,10 +253,27 @@ export function createMattermostTaskCardContinuation(params: {
     }
   };
   const unsubscribeTranscript = params.events.onSessionTranscriptUpdate((update) => {
+    // The host owns adopted task debt across steers. Only incarnation replacement
+    // (or account stop/expiry) revokes transport custody here, never human prose.
+    for (const [draft, target] of drafts) {
+      if (update.target.sessionKey === target.sessionKey &&
+          (update.target.agentId !== target.agentId || update.target.sessionId !== target.sessionId)) {
+        retireDraft(draft);
+      }
+    }
     const owner = owners.get(update.target.sessionKey);
     if (!owner) return;
     if (update.target.agentId !== owner.agentId || update.target.sessionId !== owner.sessionId) {
       retire(owner);
+      return;
+    }
+    if (owner.releasing) {
+      const message = record(update.message);
+      const provenance = record(message?.provenance);
+      if (message?.role === "user" && (provenance?.kind !== "inter_session" ||
+          provenance.sourceChannel !== "internal" || provenance.sourceTool !== "subagent_settle" ||
+          typeof provenance.sourceSessionKey !== "string" ||
+          !owner.card.hasWorkSession(provenance.sourceSessionKey))) retire(owner);
       return;
     }
     if (!owner.ready) {
@@ -215,7 +284,7 @@ export function createMattermostTaskCardContinuation(params: {
         if (provenance?.kind !== "inter_session" || provenance.sourceTool !== "subagent_settle" ||
             provenance.sourceChannel !== "internal" ||
             typeof provenance.sourceSessionKey !== "string" ||
-            !owner.card.hasWorkSession(provenance.sourceSessionKey)) { retire(owner); return; }
+            !owner.card.hasWorkSession(provenance.sourceSessionKey)) { fenceInput(owner); return; }
         owner.bufferingContinuation = true;
       } else {
         // Normal tool-heavy initial runs do not consume the continuation buffer.
@@ -232,6 +301,7 @@ export function createMattermostTaskCardContinuation(params: {
   const unsubscribeAgent = params.events.onAgentEvent((event) => {
     // Lifecycle events can finalize only a run already proven by committed rows.
     for (const owner of owners.values()) {
+      if (owner.releasing) continue;
       if (owner.ready && event.sessionKey && owner.card.hasWorkSession(event.sessionKey)) {
         owner.card.noteAgentEvent(event);
       }
@@ -258,15 +328,15 @@ export function createMattermostTaskCardContinuation(params: {
   return {
     retireSession: (sessionKey: string) => {
       const owner = owners.get(sessionKey);
-      if (owner) retire(owner);
+      if (owner) fenceInput(owner);
     },
     register: (input: { agentId: string; sessionId: string; sessionKey: string;
-      initialRunId: string; card: Card }) => {
+      initialRunId: string; card: Card; adoptedDraft?: Draft }) => {
       const previous = owners.get(input.sessionKey);
       if (previous) retire(previous);
       if (stopped) return undefined;
       if (owners.size >= MAX_OWNERS) retire(owners.values().next().value!);
-      const owner: Owner = { ...input, ready: false, active: true, seq: -1,
+      const owner: Owner = { ...input, ready: false, active: true, seq: -1, generation: 0,
         usedRuns: new Set([input.initialRunId]), calls: new Map(), pending: [], bufferingContinuation: false,
         lifecycle: new Map(),
         tail: Promise.resolve(), timer: setTimeout(() => retire(owner), OWNER_TTL_MS) };
@@ -284,9 +354,18 @@ export function createMattermostTaskCardContinuation(params: {
         },
       };
     },
+    retainProgressDraft: (input: { agentId: string; sessionId: string; sessionKey: string; draft: Draft }) => {
+      if (stopped) { input.draft.retire(); return () => {}; }
+      if (drafts.size >= MAX_OWNERS) retireDraft(drafts.keys().next().value!);
+      const timer = setTimeout(() => retireDraft(input.draft), OWNER_TTL_MS);
+      timer.unref?.();
+      drafts.set(input.draft, { ...input, timer });
+      return () => releaseDraft(input.draft, true);
+    },
     stop: () => {
       stopped = true;
       for (const owner of owners.values()) retire(owner);
+      for (const draft of drafts.keys()) retireDraft(draft);
       unsubscribeTranscript();
       unsubscribeAgent();
     },

@@ -219,6 +219,9 @@ export function createMattermostMessageReactionRuntime(params: {
     enabled: statusReactionsEnabled,
     adapter,
     initialEmoji: ackReaction ?? "",
+    // Ingress/steer silence is not evidence of a stalled run. Cards own task progress;
+    // acknowledgement presentation keeps receipt and actual failure reactions truthful.
+    presentation: "acknowledgement",
     emojis: MATTERMOST_STATUS_REACTION_EMOJIS,
     timing: DEFAULT_TIMING,
     onError: (err) => {
@@ -293,7 +296,7 @@ export function createMattermostMessageReactionRuntime(params: {
         return;
       }
       if (result.anyReplyDelivered) {
-        // Same sweep, but for the success emoji; it stays visible as the turn's outcome.
+        // A visible delivery keeps its acknowledgement; only real errors replace it.
         await targetController.setDone();
         return;
       }

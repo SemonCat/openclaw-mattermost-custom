@@ -2180,6 +2180,178 @@ describe("mattermost inbound user posts", () => {
     },
   );
 
+  it.each(["accepted", "rejected", "read-failure", "terminal-retire", "post-adoption-steer", "reset"] as const)(
+    "keeps the real steer/yield continuation sequence safe with adoption=%s", async (adoption) => {
+    const socket = new FakeWebSocket();
+    const abortController = new AbortController();
+    const parentSessionKey = "agent:main:mattermost:channel:chan-1:thread:thread-live-continuation";
+    const target = { agentId: "main", sessionId: "parent-incarnation", sessionKey: parentSessionKey };
+    const cfg: OpenClawConfig = { ...testConfig, channels: { mattermost: {
+      ...testConfig.channels?.mattermost, streaming: { mode: "progress", progress: { toolProgress: true } },
+    } } };
+    mockState.runtimeCore = createRuntimeCore(cfg, { sessionKey: "agent:main:mattermost:channel:chan-1" });
+    mockState.getSessionEntry.mockImplementation(({ sessionKey }) => ({
+      sessionId: sessionKey === parentSessionKey ? target.sessionId : "child-incarnation",
+      lastRunId: sessionKey === parentSessionKey ? "initial-run" : "child-run", status: "running",
+    }));
+    const posts = new Map<string, MattermostPost>();
+    const request = vi.fn(async (path: string, init?: RequestInit) => {
+      if (path === "/posts" && init?.method === "POST") {
+        const body = JSON.parse(String(init.body));
+        const post = { ...body, id: `post-${posts.size + 1}`, user_id: "bot-user" };
+        posts.set(post.id, post);
+        return post;
+      }
+      const id = path.split("/")[2];
+      if (adoption === "read-failure" && path === "/posts/post-2" && !init?.method) {
+        throw new Error("Transient adoption confirmation failure");
+      }
+      if (init?.method === "DELETE") { posts.delete(id); return; }
+      const post = posts.get(id);
+      if (!post) throw new Error("Unknown test post");
+      if (init?.method === "PUT") Object.assign(post, JSON.parse(String(init.body)));
+      return { ...post };
+    });
+    const client = { baseUrl: "https://mattermost.example.com", apiBaseUrl: "https://mattermost.example.com/api/v4",
+      token: "test-token", request, fetchImpl: vi.fn() };
+    mockState.createMattermostClient.mockReturnValue(client);
+    const actualClient = await vi.importActual<typeof import("./client.js")>("./client.js");
+    mockState.createMattermostPost.mockImplementation(actualClient.createMattermostPost);
+    mockState.fetchMattermostPost.mockImplementation(actualClient.fetchMattermostPost);
+    mockState.updateMattermostPost.mockImplementation(actualClient.updateMattermostPost);
+    mockState.updateMattermostPostMessageWithReadback.mockImplementation(actualClient.updateMattermostPostMessageWithReadback);
+    const actualDraft = await vi.importActual<typeof import("./draft-stream.js")>("./draft-stream.js");
+    mockState.createMattermostDraftStream.mockImplementation(actualDraft.createMattermostDraftStream);
+    mockState.sendMessageMattermost.mockImplementation(async (_to, text) => {
+      const post = await request("/posts", { method: "POST", body: JSON.stringify({
+        channel_id: "chan-1", root_id: "thread-live-continuation", message: text,
+      }) });
+      return { messageId: post!.id, channelId: "chan-1", content: text };
+    });
+    let releaseOriginal: () => void = () => {};
+    const originalGate = new Promise<void>((resolve) => { releaseOriginal = resolve; });
+    let originalStarted = false;
+    type Draft = Parameters<NonNullable<import("openclaw/plugin-sdk/reply-runtime").ReplyDispatchRuntimeInfo["adoptProgressDraft"]>>[0];
+    let retained: Draft | undefined;
+    const adopt = vi.fn((draft: Draft) => { retained = draft; return adoption !== "rejected"; });
+    let originalDelivery: { deliver: (payload: ReplyPayload, info: unknown) => Promise<unknown> };
+    mockState.dispatchInboundMessage.mockImplementation(async (params) => {
+      if (params.ctx.MessageSid !== "original-input") return { counts: {}, deferredToActiveRun: "steer" };
+      originalDelivery = mockState.deliveryPlanObserver.mock.calls.at(-1)?.[0];
+      params.replyOptions?.onAgentRunStart?.("initial-run");
+      await params.replyOptions?.onPlanUpdate?.({ source: "openclaw", explanation: "Investigating the task" });
+      params.replyOptions?.onVisibleWorkSessions?.([{ sessionKey: "child-1", label: "Evidence" }]);
+      await params.replyOptions?.onItemEvent?.(projectAgentToolActivity({ toolCallId: "first-read", name: "read", phase: "start" }));
+      originalStarted = true;
+      await originalGate;
+      await originalDelivery.deliver({ text: "Waiting for delegated work" }, { kind: "final", adoptProgressDraft: adopt });
+      for (const listener of [...mockState.agentEventListeners]) listener({
+        sessionKey: parentSessionKey, runId: "initial-run", stream: "lifecycle",
+        data: { phase: "end", yielded: true, livenessState: "paused", stopReason: "end_turn" },
+      });
+      return withAgentRunTerminalOutcome({ counts: { final: 1 } }, "completed");
+    });
+    const monitor = monitorMattermostProvider({ config: cfg, runtime: testRuntime(),
+      abortSignal: abortController.signal, webSocketFactory: () => socket });
+    let original: Promise<void> | undefined;
+    let seq = 0;
+    const emit = (message: unknown, runId?: string) => {
+      for (const listener of [...mockState.sessionTranscriptListeners]) listener({ target, message, messageSeq: ++seq, runId });
+    };
+    try {
+      await vi.waitFor(() => expect(socket.openListenerCount).toBeGreaterThan(0));
+      socket.emitOpen();
+      original = emitMattermostChannelPost(socket, {
+        id: "original-input", rootId: "thread-live-continuation", message: "Investigate",
+      });
+      await vi.waitFor(() => expect(originalStarted).toBe(true));
+      for (let i = 0; i < 3; i++) {
+        await emitMattermostChannelPost(socket, { id: `steer-${i}`,
+          rootId: "thread-live-continuation", message: `Additional constraint ${i}` });
+        emit({ role: "user", content: [{ type: "text", text: "Private steer body" }] });
+      }
+      releaseOriginal();
+      await original;
+      if (adoption === "read-failure") expect(adopt).not.toHaveBeenCalled();
+      else expect(adopt).toHaveBeenCalledOnce();
+      expect(mockState.sendMessageMattermost).not.toHaveBeenCalled();
+      const creates = () => request.mock.calls.filter(([path, init]) => path === "/posts" && init?.method === "POST");
+      expect(creates()).toHaveLength(2);
+      expect(posts.get("post-1")?.message).toContain("Task progress · In progress");
+      expect(posts.get("post-2")?.message).not.toContain("Task progress");
+      if (adoption === "rejected" || adoption === "read-failure") {
+        expect(posts.get("post-2")?.message).toBe("Waiting for delegated work");
+        expect(request.mock.calls.some(([, init]) => init?.method === "DELETE")).toBe(false);
+        if (adoption === "read-failure") return;
+        const count = request.mock.calls.length;
+        retained!.push({ itemId: "rejected", kind: "tool", name: "exec", status: "running" });
+        retained!.retire();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(request.mock.calls).toHaveLength(count);
+        return;
+      }
+      if (adoption === "reset") {
+        for (const listener of [...mockState.sessionTranscriptListeners]) listener({
+          target: { ...target, sessionId: "replaced-session" }, messageSeq: ++seq,
+          message: { role: "user", content: [] },
+        });
+        await vi.waitFor(() => expect(posts.has("post-2")).toBe(false));
+        const count = request.mock.calls.length;
+        retained!.push({ itemId: "wrong-session", kind: "tool", name: "exec", status: "running" });
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(request.mock.calls).toHaveLength(count);
+        expect(creates()).toHaveLength(2);
+        return;
+      }
+      if (adoption === "post-adoption-steer") {
+        await emitMattermostChannelPost(socket, { id: "late-steer",
+          rootId: "thread-live-continuation", message: "Continue with this additional constraint" });
+        emit({ role: "user", content: [{ type: "text", text: "Private late steer" }] });
+        expect(posts.has("post-2")).toBe(true);
+        expect(request.mock.calls.some(([, init]) => init?.method === "DELETE")).toBe(false);
+      }
+      for (const listener of [...mockState.agentEventListeners]) listener({
+        sessionKey: "child-1", runId: "child-run", stream: "lifecycle", data: { phase: "end" },
+      });
+      emit({ role: "user", provenance: { kind: "inter_session", sourceChannel: "internal",
+        sourceTool: "subagent_settle", sourceSessionKey: "child-1" } });
+      emit({ role: "assistant", __openclaw: { runId: "settle-run" },
+        content: [{ type: "text", text: "Private suppressed commentary" }] });
+      retained!.push({ itemId: "requester:tool", kind: "tool", name: "exec", phase: "update", status: "running" });
+      await vi.waitFor(() => expect(posts.get("post-2")?.message).toContain("Exec: running"), { timeout: 3000 });
+      retained!.push({ itemId: "requester:tool", kind: "tool", name: "exec", phase: "end", status: "completed" });
+      await vi.waitFor(() => {
+        expect(posts.get("post-2")?.message).toContain("Exec");
+        expect(posts.get("post-2")?.message).not.toContain("Exec: running");
+      }, { timeout: 3000 });
+      expect(creates()).toHaveLength(2);
+      expect(request.mock.calls.filter(([, init]) => init?.method === "PUT").every(
+        ([path]) => path === "/posts/post-1/patch" || path === "/posts/post-2/patch",
+      )).toBe(true);
+      expect(JSON.stringify(request.mock.calls)).not.toContain("Private");
+      emit({ role: "assistant", __openclaw: { runId: "settle-run" }, content: [], stopReason: "stop" }, "settle-run");
+      for (const listener of [...mockState.agentEventListeners]) listener({
+        sessionKey: parentSessionKey, runId: "settle-run", stream: "lifecycle", data: { phase: "end" },
+      });
+      if (adoption === "terminal-retire") retained!.retire();
+      await vi.waitFor(() => expect(posts.get("post-1")?.message).toContain("Task progress · Completed"));
+      retained!.retire();
+      await vi.waitFor(() => expect(posts.has("post-2")).toBe(false));
+      await originalDelivery!.deliver({ text: "Verified final result" }, { kind: "final" });
+      expect(creates()).toHaveLength(3);
+      expect(mockState.sendMessageMattermost).toHaveBeenCalledOnce();
+      const count = request.mock.calls.length;
+      retained!.push({ itemId: "stale", kind: "tool", name: "read", status: "running" });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(request.mock.calls).toHaveLength(count);
+    } finally {
+      releaseOriginal();
+      await original;
+      abortController.abort(); socket.emitClose(1000); await monitor;
+    }
+    },
+  );
+
   it("discovers a hidden child session from this turn and keeps the task card live", async () => {
     const socket = new FakeWebSocket();
     const abortController = new AbortController();

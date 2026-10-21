@@ -105,6 +105,12 @@ Compared with the official plugin, this build preserves:
 - Native model/runtime confirmation with host validation and persisted-selection readback.
 - Backlog-aware text debounce with sender/thread isolation and bounded batches.
 
+Status reactions use acknowledgement presentation: a received post keeps one
+acknowledgement through queued work, steering, tools, and successful delivery.
+Elapsed silence does not add hourglass or warning markers. Actual dispatch or
+delivery failures still replace the acknowledgement with an error reaction.
+Task cards and progress previews carry task state.
+
 Mutable message-tool actions and bounded search are enabled by default for this
 personal downstream plugin. Each gate can still be disabled globally or per account:
 
@@ -567,22 +573,42 @@ A native automatic parent continuation can update that same card when committed
 transcript provenance identifies `subagent_settle` from a child recorded by the
 original task, with the exact parent session incarnation and a committed successor
 run. Requester-settle wakes use this same `subagent_settle` provenance; run-id
-spelling grants no authority. Only matching successful native `progress_card` calls updating the original
-checklist are applied. A successful terminal with all parent steps completed leaves
+spelling grants no authority. Only matching successful native `progress_card`
+calls are applied, including explanation-only or Markdown-only updates and
+revised checklists. A successful terminal with all parent steps completed leaves
 that card Completed; a partial plan remains Incomplete. Continuation finalization
 requires both a committed terminal assistant and its native lifecycle receipt,
 so repeated yields remain In progress. Receipts arriving before committed rows
 are buffered within the existing bounded continuation ownership.
-New inbound or Web UI input,
-a session reset, failure/cancellation, or account stop retires continuation ownership.
+Without host-adopted custody, new inbound or Web UI input retires continuation
+ownership. Session reset, failure/cancellation, or account stop also retires it.
 Ownership is in memory with a 24-hour absolute lifetime, at most 100 retained tasks,
 and a bounded 32-row successor buffer; ordinary original-run transcript volume does
 not consume that buffer. Existing cards and ownership lost on restart are not adopted,
 and a continuation never creates a card for a planless turn or an accepted post with
 no usable identity. Final answers keep their separate delivery path.
-An unprovenanced human correction also retires continuation ownership, including
-during the original run: the published transcript API does not prove same-run
+An unprovenanced human correction retires unadopted continuation ownership,
+including during the original run: the transcript API does not prove same-run
 steer adoption on user rows. Later original-run tools alone cannot establish it.
+
+In progress streaming mode, the host may offer its `adoptProgressDraft`
+capability on a waiting reply. The plugin transfers only a confirmed, bot-owned
+preview alongside an existing card in the exact channel/thread and session
+incarnation. The host then updates that same preview with prepared operation
+names/statuses across child settlement, requester continuation, repeated yields,
+and steering. The preview stays bounded to one post and retires when the host
+settles its task debt; session replacement, account stop, or the bounded custody
+lifetime also revoke it. Rejected adoption or an unavailable confirmation read
+keeps ordinary final delivery; abort and session replacement still stop stale work.
+
+Current host-adopted custody preserves the original card's observation across
+same-session input. Each input clears previous run/tool correlation; only a fresh
+trusted settle from an already-known child can authorize subsequent committed
+progress and terminal receipts. Host retirement closes observation and drains an
+already-proven terminal update; new human input, session replacement, account stop,
+and expiry still fence queued writes. Neither activity adoption nor card observation forwards
+assistant transcript prose. Continuation commentary remains subject to the
+host's source-reply policy, and final answers keep their own delivery path.
 
 ### Task-card ordering and late-plan handoff
 

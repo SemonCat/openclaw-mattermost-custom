@@ -708,12 +708,10 @@ describe("mattermost lifecycle status reactions", () => {
 
     const ownerEmit = emitMattermostChannelPost(socket, { id: "post-owner", message: "start" });
     await vi.waitFor(() => expect(ownerDispatchStarted).toBe(true));
-    // The owner reached its own "thinking" transition while still holding the gate open,
-    // proving its turn is genuinely mid-flight when the steered post arrives below.
+    // The dispatch is still active; acknowledgement does not infer liveness from silence.
     await vi.waitFor(() =>
       expect(requestedReactionsByPost(mockState.request).get("post-owner")).toEqual([
         "+eyes",
-        "+brain",
       ]),
     );
 
@@ -736,18 +734,8 @@ describe("mattermost lifecycle status reactions", () => {
     await monitor;
 
     const finalByPost = requestedReactionsByPost(mockState.request);
-    // The owner's own trail includes the "thinking" step it lived through; the steered
-    // post's own reaction never carried that emoji, but both converge on the same terminal
-    // "done" settlement fired once, together, by the owner's finish(). The done emoji stays
-    // on both posts as the turn's recorded outcome.
-    expect(finalByPost.get("post-owner")).toEqual([
-      "+eyes",
-      "+brain",
-      "+white_check_mark",
-      "-eyes",
-      "-brain",
-    ]);
-    expect(finalByPost.get("post-steered")).toEqual(["+eyes", "+white_check_mark", "-eyes"]);
+    expect(finalByPost.get("post-owner")).toEqual(["+eyes"]);
+    expect(finalByPost.get("post-steered")).toEqual(["+eyes"]);
   });
 
   it("rebinds a zero-count dispatch when core later admits it as a queued follow-up", async () => {
@@ -830,30 +818,13 @@ describe("mattermost lifecycle status reactions", () => {
       | undefined;
 
     await onQueuedFollowupAdmitted?.();
-    await vi.waitFor(() =>
-      expect(requestedReactionsByPost(mockState.request).get("post-queued-followup")).toContain(
-        "+brain",
-      ),
-    );
     await onToolStart?.({ name: "bash", phase: "start", toolCallId: "tool-1" });
-    await vi.waitFor(() =>
-      expect(requestedReactionsByPost(mockState.request).get("post-queued-followup")).toContain(
-        "+computer",
-      ),
-    );
     await onCompactionStart?.();
-    await vi.waitFor(() =>
-      expect(requestedReactionsByPost(mockState.request).get("post-queued-followup")).toContain(
-        "+compression",
-      ),
-    );
     await onObservedReplyDelivery?.();
     await onQueuedFollowupSettled?.();
     endCorrelation?.();
 
-    expect(requestedReactionsByPost(mockState.request).get("post-queued-followup")).toContain(
-      "+white_check_mark",
-    );
+    expect(requestedReactionsByPost(mockState.request).get("post-queued-followup")).toEqual(["+eyes"]);
 
     abortController.abort();
     socket.emitClose(1000);
@@ -893,12 +864,12 @@ describe("mattermost lifecycle status reactions", () => {
       .mockImplementationOnce(async () => {
         firstStarted = true;
         await firstGate;
-        return { queuedFinal: false, counts: { final: 1 } };
+        return { queuedFinal: false, counts: {}, failedCounts: { final: 1 } };
       })
       .mockImplementationOnce(async () => {
         secondStarted = true;
         await secondGate;
-        return { queuedFinal: false, counts: { final: 1 } };
+        return { queuedFinal: false, counts: {}, failedCounts: { final: 1 } };
       });
 
     const monitor = monitorMattermostProvider({
@@ -925,8 +896,8 @@ describe("mattermost lifecycle status reactions", () => {
     await firstEmit;
 
     const afterFirstFinished = requestedReactionsByPost(mockState.request);
-    expect(afterFirstFinished.get("thread-root-a")).toContain("+white_check_mark");
-    expect(afterFirstFinished.get("thread-root-b")).not.toContain("+white_check_mark");
+    expect(afterFirstFinished.get("thread-root-a")).toContain("+x");
+    expect(afterFirstFinished.get("thread-root-b")).not.toContain("+x");
 
     releaseSecond?.();
     await secondEmit;
@@ -935,7 +906,7 @@ describe("mattermost lifecycle status reactions", () => {
     await monitor;
 
     const finalByPost = requestedReactionsByPost(mockState.request);
-    expect(finalByPost.get("thread-root-a")).toContain("+white_check_mark");
-    expect(finalByPost.get("thread-root-b")).toContain("+white_check_mark");
+    expect(finalByPost.get("thread-root-a")).toContain("+x");
+    expect(finalByPost.get("thread-root-b")).toContain("+x");
   });
 });

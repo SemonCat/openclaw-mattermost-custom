@@ -12,7 +12,8 @@ const drain = async () => { for (let i = 0; i < 60; i++) await Promise.resolve()
 
 const yieldedEnd = { phase: "end", yielded: true, livenessState: "paused", stopReason: "end_turn" };
 
-async function fixture(options: { noPlan?: boolean; missingId?: boolean; yielded?: boolean; allCompleted?: boolean; childRunning?: boolean } = {}) {
+async function fixture(options: { noPlan?: boolean; missingId?: boolean; yielded?: boolean; allCompleted?: boolean; childRunning?: boolean;
+  progress?: { explanation?: string; markdown?: string }; adopted?: boolean } = {}) {
   const request = vi.fn<MattermostClient["request"]>(async () => (options.missingId ? { message: "accepted" } : { id: "original-card" }) as never);
   const client: MattermostClient = {
     baseUrl: "https://mattermost.example.com", apiBaseUrl: "https://mattermost.example.com/api/v4",
@@ -31,9 +32,15 @@ async function fixture(options: { noPlan?: boolean; missingId?: boolean; yielded
   } as Events;
   const bridge = createMattermostTaskCardContinuation({ events, log: vi.fn() });
   card.noteRunStart("original-run");
-  if (!options.noPlan) await card.updatePlan({ source: "openclaw", steps: steps.map(step => ({ step, status: options.allCompleted ? "completed" : "pending" })) });
+  if (options.progress?.markdown) card.noteToolStart({ name: "progress_card", phase: "start",
+    toolCallId: "initial-card", args: options.progress });
+  if (!options.noPlan) await card.updatePlan({ source: "openclaw", ...(options.progress ??
+    { steps: steps.map(step => ({ step, status: options.allCompleted ? "completed" : "pending" })) }) });
   await card.noteVisibleWorkSessions([{ sessionKey: "child-1", status: options.childRunning ? "running" : "done" }]);
-  const owner = bridge.register({ ...target, initialRunId: "original-run", card })!;
+  const draft = { retire: vi.fn() };
+  const releaseDraft = options.adopted ? bridge.retainProgressDraft({ ...target, draft }) : undefined;
+  const owner = bridge.register({ ...target, initialRunId: "original-run", card,
+    adoptedDraft: options.adopted ? draft : undefined })!;
   let seq = 0;
   const emit = (message: unknown, runId?: string, route = target) => {
     for (const listener of listeners) listener({ target: route, message, messageSeq: ++seq, runId });
@@ -43,7 +50,8 @@ async function fixture(options: { noPlan?: boolean; missingId?: boolean; yielded
   };
   const complete = (options: { runId?: string; partial?: boolean; outerError?: boolean;
     innerError?: boolean; wrongCall?: boolean; wrongWrapper?: boolean; terminal?: "stop" | "error" | "aborted";
-    yielded?: boolean; lifecycleFirst?: boolean; skipLifecycle?: boolean } = {}) => {
+    yielded?: boolean; lifecycleFirst?: boolean; skipLifecycle?: boolean;
+    progress?: Record<string, unknown>; nested?: boolean } = {}) => {
     const runId = options.runId ?? "successor-run";
     emit({ role: "user", provenance: { kind: "inter_session", sourceChannel: "internal",
       sourceTool: "subagent_settle", sourceSessionKey: "child-1" }, content: [] });
@@ -51,11 +59,16 @@ async function fixture(options: { noPlan?: boolean; missingId?: boolean; yielded
       phase: options.terminal === "error" ? "error" : "end", aborted: options.terminal === "aborted",
     };
     if (options.lifecycleFirst) end(runId, terminalData);
+    const args = options.progress ?? {
+      plan: steps.map((step, index) => ({ step, status: options.partial && index === 1 ? "pending" : "completed" })),
+    };
+    if (options.nested) emit({ role: "custom", customType: "openclaw.nested-tool.v1",
+      details: { runId, toolName: "progress_card", input: args, isError: options.outerError ?? false,
+        result: { isError: options.innerError ?? false } } });
+    else {
     emit({ role: "assistant", __openclaw: { runId }, stopReason: "toolUse",
       content: [{ type: "toolCall", id: "call-1", name: "tool_call", arguments: {
-        id: "openclaw:core:progress_card", args: {
-          plan: steps.map((step, index) => ({ step, status: options.partial && index === 1 ? "pending" : "completed" })),
-        },
+        id: "openclaw:core:progress_card", args,
       } }] });
     emit({ role: "toolResult", __openclaw: { runId },
       toolName: "tool_call", toolCallId: options.wrongCall ? "foreign-call" : "call-1", isError: options.outerError ?? false,
@@ -63,6 +76,7 @@ async function fixture(options: { noPlan?: boolean; missingId?: boolean; yielded
         tool: { id: options.wrongWrapper ? "other-tool" : "openclaw:core:progress_card", name: "progress_card", source: "openclaw" },
         result: { isError: options.innerError ?? false, content: [], details: { revision: 2, steps: { completed: 2, total: 2 } } },
       }) }] });
+    }
     emit({ role: "assistant", __openclaw: { runId },
       stopReason: options.terminal ?? "stop", content: [{ type: "text", text: "Result delivered separately" }] }, runId);
     if (!options.skipLifecycle && !options.lifecycleFirst) end(runId, terminalData);
@@ -80,12 +94,56 @@ async function fixture(options: { noPlan?: boolean; missingId?: boolean; yielded
     expect(body.message).not.toContain("Result delivered separately");
   };
   const message = () => JSON.parse(String(request.mock.calls.at(-1)?.[1]?.body)).message as string;
-  return { request, bridge, listeners, agentListeners, emit, complete, end, finish, assertCompleted, message, card };
+  return { request, bridge, listeners, agentListeners, emit, complete, end, finish, assertCompleted, message, card, releaseDraft };
 }
 
 afterEach(() => vi.useRealTimers());
 
 describe("committed native task-card continuation retention", () => {
+  it.each(["explanation", "markdown"] as const)(
+    "continues a native %s-only card through repeated yields on the original identity", async (field) => {
+      const f = await fixture({ yielded: true, progress: { [field]: "Initial structured progress" } });
+      try {
+        await f.finish();
+        expect(f.message()).toContain("Task progress · In progress");
+        f.complete({ yielded: true, lifecycleFirst: true,
+          progress: { [field]: "Validating the collected evidence" } });
+        await drain();
+        expect(f.message()).toContain("Validating the collected evidence");
+        expect(f.message()).toContain("Task progress · In progress");
+        f.complete({ runId: "second-yield", yielded: true, nested: true,
+          progress: { [field]: "Checking the final candidate" } });
+        await drain();
+        expect(f.message()).toContain("Checking the final candidate");
+        expect(f.card.canContinue()).toBe(true);
+        f.complete({ runId: "final-success", lifecycleFirst: true, nested: true,
+          progress: { [field]: "Candidate verified" } });
+        await drain();
+        expect(f.message()).toContain("Candidate verified");
+        expect(f.message()).toContain("Task progress · Completed");
+        expect(f.card.canContinue()).toBe(false);
+        expect(f.request.mock.calls.filter(([path]) => path === "/posts")).toHaveLength(1);
+        expect(f.request.mock.calls.slice(1).every(([path]) => path === "/posts/original-card/patch")).toBe(true);
+        expect(f.message()).not.toContain("Result delivered separately");
+      } finally { f.bridge.stop(); }
+    },
+  );
+
+  it("replaces structured progress when a proven native continuation revises the checklist", async () => {
+    const f = await fixture({ yielded: true });
+    try {
+      await f.finish();
+      f.complete({ progress: { markdown: '<progress aria-label="Verified"></progress>\nReady for review',
+        plan: [{ step: "Review revised candidate", status: "pending" }] } });
+      await drain();
+      expect(f.message()).toContain("**Verified**");
+      expect(f.message()).toContain("Ready for review");
+      expect(f.message()).toContain("- [ ] Review revised candidate");
+      expect(f.message()).not.toContain(steps[0]);
+      expect(f.message()).toContain("Task progress · Incomplete");
+    } finally { f.bridge.stop(); }
+  });
+
   it.each([false, true])("preserves repeated yields, native lifecycle before committed rows=%s", async (lifecycleFirst) => {
     const f = await fixture({ yielded: true });
     try {
@@ -174,6 +232,114 @@ describe("committed native task-card continuation retention", () => {
 
 
 describe("continuation ownership and terminal fences", () => {
+  it.each(["completed", "partial", "error", "aborted"] as const)(
+    "drains a proven %s terminal when host custody retires in the same tick", async (outcome) => {
+      const f = await fixture({ yielded: true, adopted: true });
+      try {
+        await f.finish();
+        f.complete({ partial: outcome === "partial",
+          terminal: outcome === "error" || outcome === "aborted" ? outcome : "stop" });
+        f.releaseDraft?.();
+        f.complete({ runId: "after-retirement" });
+        await drain();
+        expect(f.message()).toContain(`Task progress · ${
+          outcome === "error" ? "Failed" : outcome === "aborted" ? "Cancelled" :
+          outcome === "partial" ? "Incomplete" : "Completed"}`);
+        const count = f.request.mock.calls.length;
+        f.complete({ runId: "later-run" });
+        await drain();
+        expect(f.request.mock.calls).toHaveLength(count);
+      } finally { f.bridge.stop(); }
+    },
+  );
+
+  it("joins an accepted edit before publishing a proven terminal during custody retirement", async () => {
+    const f = await fixture({ yielded: true, adopted: true });
+    const started = Promise.withResolvers<void>();
+    const pending = Promise.withResolvers<void>();
+    try {
+      await f.finish();
+      f.request.mockImplementationOnce(async () => {
+        started.resolve();
+        await pending.promise;
+        return { id: "original-card" } as never;
+      });
+      f.complete();
+      await started.promise;
+      f.releaseDraft?.();
+      pending.resolve();
+      await drain();
+      f.assertCompleted();
+    } finally { pending.resolve(); f.bridge.stop(); }
+  });
+
+  it.each(["human", "replacement", "stop"] as const)(
+    "fences a draining terminal after %s", async (cause) => {
+      const f = await fixture({ yielded: true, adopted: true });
+      try {
+        await f.finish();
+        const count = f.request.mock.calls.length;
+        f.complete();
+        f.releaseDraft?.();
+        if (cause === "human") f.emit({ role: "user", content: [] });
+        if (cause === "replacement") f.emit({ role: "user" }, undefined, { ...target, sessionId: "replacement" });
+        if (cause === "stop") f.bridge.stop();
+        await drain();
+        expect(f.request.mock.calls).toHaveLength(count);
+      } finally { f.bridge.stop(); }
+    },
+  );
+
+  it("clears adopted run/call correlation on human input and requires fresh known-child settle provenance", async () => {
+    const f = await fixture({ yielded: true, adopted: true });
+    try {
+      await f.finish();
+      f.complete({ runId: "pre-steer-run", skipLifecycle: true });
+      await drain();
+      f.emit({ role: "user", content: [] });
+      const count = f.request.mock.calls.length;
+      f.emit({ role: "assistant", __openclaw: { runId: "pre-steer-run" }, content: [], stopReason: "stop" }, "pre-steer-run");
+      f.end("pre-steer-run");
+      await drain();
+      expect(f.request.mock.calls).toHaveLength(count);
+      f.complete({ runId: "fresh-settle-run", lifecycleFirst: true });
+      await drain();
+      f.assertCompleted();
+    } finally { f.bridge.stop(); }
+  });
+
+  it("fences queued adopted writes and retires card authority when host custody ends", async () => {
+    const f = await fixture({ yielded: true, adopted: true });
+    try {
+      await f.finish();
+      const count = f.request.mock.calls.length;
+      f.complete({ runId: "before-steer" });
+      f.emit({ role: "user", content: [] });
+      await drain();
+      expect(f.request.mock.calls).toHaveLength(count);
+      f.releaseDraft?.();
+      f.complete({ runId: "after-host-retire" });
+      await drain();
+      expect(f.request.mock.calls).toHaveLength(count);
+    } finally { f.bridge.stop(); }
+  });
+
+  it("keeps host draft custody across new input, but revokes it on incarnation replacement", async () => {
+    const f = await fixture({ yielded: true });
+    const draft = { retire: vi.fn() };
+    try {
+      await f.finish();
+      f.bridge.retainProgressDraft({ ...target, draft });
+      f.bridge.retireSession(target.sessionKey);
+      f.emit({ role: "user", content: [] });
+      expect(draft.retire).not.toHaveBeenCalled();
+      f.emit({ role: "user" }, undefined, { ...target, sessionId: "replacement" });
+      expect(draft.retire).toHaveBeenCalledOnce();
+      f.bridge.stop();
+      expect(draft.retire).toHaveBeenCalledOnce();
+    } finally { f.bridge.stop(); }
+  });
+
   it.each(["foreign-child", "foreign-session", "foreign-agent", "replaced-incarnation", "web-ui-user", "new-inbound", "stop"])(
     "prevents edits after %s", async (cause) => {
       const f = await fixture();
