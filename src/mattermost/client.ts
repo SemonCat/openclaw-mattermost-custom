@@ -8,6 +8,7 @@ import {
 import { buildTimeoutAbortSignal } from "openclaw/plugin-sdk/extension-shared";
 import {
   captureChannelReadAuthority,
+  captureEffectAuthority,
   responseWithRelease,
 } from "openclaw/plugin-sdk/fetch-runtime";
 import { resolveTimerTimeoutMs } from "openclaw/plugin-sdk/number-runtime";
@@ -257,7 +258,7 @@ export async function readMattermostError(
     chunkTimeoutMs: 10_000,
     onIdleTimeout: ({ chunkTimeoutMs }) =>
       new Error(`error body read stalled for ${chunkTimeoutMs}ms`),
-  });
+  }).catch(() => ({ text: "error response body unavailable", truncated: false }));
   let detail = text;
   if (contentType.includes("application/json")) {
     try {
@@ -353,6 +354,7 @@ export function createMattermostClient(params: {
     | ((input: RequestInfo | URL, init?: MattermostRequestInit) => Promise<Response>)
     | undefined = externalFetchImpl
     ? async (input, init) => {
+        const effect = captureEffectAuthority();
         const assertReadAuthority = captureChannelReadAuthority();
         assertReadAuthority?.();
         const url =
@@ -370,11 +372,15 @@ export function createMattermostClient(params: {
             ? AbortSignal.any([callerSignal, timeoutSignal])
             : (callerSignal ?? timeoutSignal);
         try {
-          assertRequestCurrent?.();
-          if (isMessagePost) {
-            postDispatchStarted = true;
-          }
-          const response = await externalFetchImpl(input, { ...requestInit, signal });
+          const response = await effect.initiate(() => {
+            assertReadAuthority?.();
+            assertRequestCurrent?.();
+            signal?.throwIfAborted();
+            if (isMessagePost) {
+              postDispatchStarted = true;
+            }
+            return externalFetchImpl(input, { ...requestInit, signal });
+          });
           // Match guarded production fetches: retain cancellation and the
           // request deadline until the custom response body is consumed.
           return responseWithRelease(response, async () => cleanup());
@@ -872,55 +878,12 @@ export function isRetryableError(error: Error): boolean {
     current.reason,
     ...(Array.isArray(current.errors) ? current.errors : []),
   ]);
-  const messages = candidates
-    .map((candidate) => normalizeLowercaseStringOrEmpty(readErrorMessage(candidate)))
-    .filter((message): message is string => Boolean(message));
-
-  // Retry on 5xx server errors FIRST (before checking 4xx)
-  // Use "mattermost api" prefix to avoid matching port numbers (e.g., :443) or IP octets
-  // This prevents misclassification when a 5xx error detail contains a 4xx substring
-  // e.g., "Mattermost API 503: upstream returned 404"
-  if (messages.some((message) => /mattermost api 5\d{2}\b/.test(message))) {
-    return true;
-  }
-
-  // Check for explicit 429 rate limiting FIRST (before generic "429" text match)
-  // This avoids retrying when error detail contains "429" but it's not the status code
-  if (
-    messages.some(
-      (message) => /mattermost api 429\b/.test(message) || message.includes("too many requests"),
-    )
-  ) {
-    return true;
-  }
-
-  // Check for explicit 4xx status codes - these are client errors and should NOT be retried
-  // (except 429 which is handled above)
-  // Use "mattermost api" prefix to avoid matching port numbers like :443
-  for (const message of messages) {
-    const clientErrorMatch = message.match(/mattermost api (4\d{2})\b/);
-    if (!clientErrorMatch) {
-      continue;
+  // The first outer provider status wins over nested statuses and diagnostic keywords.
+  for (const candidate of candidates) {
+    const status = parseMattermostApiStatus(candidate);
+    if (status !== undefined) {
+      return status === 429 || (status >= 500 && status < 600);
     }
-    const statusCodeText = clientErrorMatch[1];
-    if (!statusCodeText) {
-      continue;
-    }
-    const statusCode = Number.parseInt(statusCodeText, 10);
-    if (statusCode >= 400 && statusCode < 500) {
-      return false;
-    }
-  }
-
-  // Retry on network/transient errors only if no explicit Mattermost API status code is present
-  // This avoids false positives like:
-  // - "400 Bad Request: connection timed out" (has status code)
-  // - "connect ECONNRESET 104.18.32.10:443" (has port number, not status)
-  const hasMattermostApiStatusCode = messages.some((message) =>
-    /mattermost api \d{3}\b/.test(message),
-  );
-  if (hasMattermostApiStatusCode) {
-    return false;
   }
 
   const codes: string[] = [];
@@ -945,9 +908,11 @@ export function isRetryableError(error: Error): boolean {
     return true;
   }
 
-  return messages.some((message) =>
-    RETRYABLE_NETWORK_MESSAGE_SNIPPETS.some((pattern) => message.includes(pattern)),
-  );
+  return candidates.some((candidate) => {
+    const message = normalizeLowercaseStringOrEmpty(readErrorMessage(candidate));
+    return message.includes("too many requests") ||
+      RETRYABLE_NETWORK_MESSAGE_SNIPPETS.some((pattern) => message.includes(pattern));
+  });
 }
 
 function readErrorMessage(error: unknown): string | undefined {

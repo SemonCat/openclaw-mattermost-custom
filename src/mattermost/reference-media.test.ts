@@ -19,7 +19,7 @@ vi.mock("./monitor-turn.js", () => ({ dispatchMattermostInboundTurn: dispatch })
 vi.mock("./runtime-api.js", async original => ({ ...await original<typeof import("./runtime-api.js")>(), listSkillCommandsForAgents: skillCommands }));
 vi.mock("./thread-participation.js", () => ({ hasMattermostThreadParticipation: async () => false }));
 vi.mock("./permalink-hydration.js", () => ({ hydrateMattermostPermalinks: async () => "[existing attachment metadata]" }));
-vi.mock("openclaw/plugin-sdk/channel-inbound", async original => ({ ...await original<typeof import("openclaw/plugin-sdk/channel-inbound")>(), resolveInboundSessionEnvelopeContext: () => ({ envelopeOptions: {} }) }));
+vi.mock("openclaw/plugin-sdk/channel-inbound", async original => ({ ...await original<typeof import("openclaw/plugin-sdk/channel-inbound")>(), resolveInboundSessionEnvelopeContextAsync: async () => ({ envelopeOptions: {} }) }));
 
 const C = "c".repeat(26), O = "o".repeat(26), R = "r".repeat(26), P = "p".repeat(26), U = "u".repeat(26), B = "b".repeat(26);
 const F = (n: number) => String(n).padStart(26, "f");

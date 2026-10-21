@@ -41,7 +41,7 @@ mkdir -p /tmp/openclaw/mattermost-custom
 npm run build
 npm pack --omit=dev --pack-destination /tmp/openclaw/mattermost-custom
 openclaw plugins install \
-  /tmp/openclaw/mattermost-custom/openclaw-mattermost-custom-2026.10.4.tgz --force
+  /tmp/openclaw/mattermost-custom/openclaw-mattermost-custom-2026.10.5.tgz --force
 ```
 
 Do not use `plugins install --link` or add this source checkout to
@@ -277,22 +277,15 @@ permalink; threads use their native root. Thread slash callbacks use `root_id`.
 Flat slash invocations without a native source do not fabricate a link from their
 synthetic command ID. Links use the configured instance URL, including its subpath.
 
-The host retains the **first session launch link**, including across reset and real
-provider switches; this is not a latest-message link. The Control UI header shows
-it only for a current Mattermost session whose explicit account has an enabled,
-configured `channels.status` row and whose launch link matches that instance's exact
-permalink path. Missing/denied status, invalid identities and foreign links hide it.
-Accounts sharing the same instance cannot be distinguished by a permalink alone.
-No session state is rewritten to rotate inherited launch links. Task-card child
-session links keep their existing purpose and behavior.
-
-The accessory uses read-only status (no config/credential RPC or provider probe).
-It refreshes on session/account changes, reconnect/read-access transitions, and
-presentation resume. It uses that status snapshot while continuously presented;
-a same-scope configuration change becomes visible at the next such boundary,
-not immediately. It does not poll or refetch on token-stream updates. The browser
-entry is a self-contained generated `dist/control-ui/index.js` with the public
-Control UI SDK bundled, and has no Node or bare SDK imports.
+OpenClaw 10.5 retires `conversationLink` from session storage and Gateway session
+rows, and passes only session identity to Control UI header accessories.
+`sessions.describe` cannot recover the former first-session launch link.
+The Web UI Mattermost origin shortcut is therefore unavailable on this build.
+The declared browser entry remains inert: it registers no accessory and performs
+no RPC reads. Restoring the shortcut would require a separate supported source
+of durable origin metadata. Existing inbound permalink metadata is retained for
+compatibility, but 10.5 does not persist or project it as a session launch link.
+Task-card child session links keep their existing purpose and behavior.
 
 ### Channel instructions and skill availability
 
@@ -636,8 +629,8 @@ The package build bundles plugin-owned TypeScript only. OpenClaw Plugin SDK,
 the plugin's declared runtime dependencies. This keeps OpenClaw core code and
 state migrations out of the plugin artifact.
 
-This release targets the published OpenClaw `2026.10.4` SDK and requires host
-and plugin API `>=2026.10.4`. Earlier hosts are not covered by this build's
+This release targets the published OpenClaw `2026.10.5` SDK and requires host
+and plugin API `>=2026.10.5`. Earlier hosts are not covered by this build's
 compatibility checks. The build verifies every emitted SDK subpath and named
 binding against the exact dev dependency in this checkout's `node_modules`;
 linked host checkouts and Gateway host overrides are not used.
@@ -659,7 +652,24 @@ changes in this repo's `src/`. Recheck the downstream command, callback,
 reaction, and trigger-cap behavior when upstream touches the corresponding
 files.
 
-### OpenClaw 2026.10.4 adaptation
+### OpenClaw 2026.10.5 adaptation
+
+This build targets the exact published 10.5 SDK and advances the package,
+minimum host and plugin API contracts together. It ports the official
+asynchronous inbound session-envelope read, outer HTTP status precedence for
+DM retries, error-body failure handling, and effect-authority fencing for
+custom transports. Permanent rejections are not retried because their details
+mention transient errors; a dispatched post remains accepted if its sender
+retires while its response is in flight.
+
+The Control UI origin shortcut is disabled because the host retires
+`conversationLink` from session storage and Gateway rows as well as removing
+`props.session`. The browser entry registers no accessory or reads.
+Existing long-message limits, forms, commands, task cards and recovery behavior
+are preserved. The source comparison, decisions and validation are recorded in
+[the 10.5 upstream review](docs/upstream-2026.10.5.md).
+
+### Previous OpenClaw 2026.10.4 adaptation
 
 The official Mattermost 10.3-to-10.4 delta changes package declarations only.
 This build updates the exact published development SDK, minimum host, plugin API,
@@ -735,7 +745,7 @@ shared Mattermost contract tests and the downstream behavior tests.
 ### Test status against the published npm SDK
 
 This repo builds and tests against the published `openclaw` npm package
-(`2026.10.4`), not the OpenClaw monorepo checkout. One category of tests
+(`2026.10.5`), not the OpenClaw monorepo checkout. One category of tests
 behaves differently from the monorepo for that reason:
 
 - Ten suites import test-only Plugin SDK subpaths (`channel-test-helpers`,

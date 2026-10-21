@@ -10,6 +10,7 @@ import type { OpenClawConfig } from "./runtime-api.js";
 
 const dispatch = vi.hoisted(() => vi.fn());
 const hasParticipation = vi.hoisted(() => vi.fn());
+const resolveEnvelope = vi.hoisted(() => vi.fn());
 
 vi.mock("./monitor-turn.js", () => ({ dispatchMattermostInboundTurn: dispatch }));
 vi.mock("./thread-participation.js", () => ({
@@ -17,13 +18,14 @@ vi.mock("./thread-participation.js", () => ({
 }));
 vi.mock("openclaw/plugin-sdk/channel-inbound", async (importOriginal) => ({
   ...(await importOriginal<typeof import("openclaw/plugin-sdk/channel-inbound")>()),
-  resolveInboundSessionEnvelopeContext: () => ({ envelopeOptions: {} }),
+  resolveInboundSessionEnvelopeContextAsync: resolveEnvelope,
 }));
 
 describe("Mattermost bot-owned thread mention policy", () => {
   beforeEach(() => {
     dispatch.mockReset();
     hasParticipation.mockReset().mockResolvedValue(false);
+    resolveEnvelope.mockReset().mockResolvedValue({ envelopeOptions: {} });
   });
 
   function setup(config: Partial<MattermostAccountConfig> = {}, botUsername = "bot") {
@@ -115,6 +117,28 @@ describe("Mattermost bot-owned thread mention policy", () => {
         ),
     };
   }
+
+  it("waits for the asynchronous session envelope before dispatch", async () => {
+    const fixture = setup({ requireMentionInBotThreads: false });
+    const started = Promise.withResolvers<void>();
+    const envelope = Promise.withResolvers<{ envelopeOptions: {} }>();
+    resolveEnvelope.mockImplementation(() => {
+      started.resolve();
+      return envelope.promise;
+    });
+    const receiving = fixture.receive();
+    try {
+      await started.promise;
+      expect(dispatch).not.toHaveBeenCalled();
+    } finally {
+      envelope.resolve({ envelopeOptions: {} });
+      await receiving;
+    }
+    expect(resolveEnvelope).toHaveBeenCalledWith(expect.objectContaining({
+      agentId: "main", sessionKey: "agent:main:mattermost:channel:room:thread:root",
+    }));
+    expect(dispatch).toHaveBeenCalledOnce();
+  });
 
   it.each([
     { scope: "account", config: { requireMentionInBotThreads: false } },

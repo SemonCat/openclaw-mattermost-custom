@@ -191,7 +191,7 @@ vi.mock("openclaw/plugin-sdk/plugin-runtime", async (importOriginal) => ({
 
 vi.mock("openclaw/plugin-sdk/channel-inbound", async (importOriginal) => ({
   ...(await importOriginal<typeof import("openclaw/plugin-sdk/channel-inbound")>()),
-  resolveInboundSessionEnvelopeContext: (params: { cfg: OpenClawConfig }) => {
+  resolveInboundSessionEnvelopeContextAsync: async (params: { cfg: OpenClawConfig }) => {
     const userTimezone = params.cfg.agents?.defaults?.userTimezone;
     return {
       envelopeOptions: {

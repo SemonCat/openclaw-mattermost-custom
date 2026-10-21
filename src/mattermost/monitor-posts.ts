@@ -2,7 +2,7 @@
 import {
   formatInboundEnvelope,
   implicitMentionKindWhen,
-  resolveInboundSessionEnvelopeContext,
+  resolveInboundSessionEnvelopeContextAsync,
 } from "openclaw/plugin-sdk/channel-inbound";
 import { resolveBotThreadMentionPolicy } from "openclaw/plugin-sdk/channel-mention-gating";
 import { resolveChannelGroups } from "openclaw/plugin-sdk/channel-policy";
@@ -153,7 +153,7 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
       return;
     }
     const { effectiveReplyToId, sessionKey } = thread;
-    const { envelopeOptions, previousTimestamp } = resolveInboundSessionEnvelopeContext({
+    const { envelopeOptions, previousTimestamp } = await resolveInboundSessionEnvelopeContextAsync({
       cfg,
       agentId: route.agentId,
       sessionKey,

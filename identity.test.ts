@@ -54,7 +54,7 @@ describe("Mattermost custom plugin identity", () => {
     expect(packageJson.openclaw.setupEntry).toBe("./setup-entry.ts");
     expect(packageJson.openclaw.runtimeSetupEntry).toBe("./dist/setup-entry.js");
     expect(packageJson.openclaw.setupFeatures).toEqual({ configPromotion: true });
-    expect(packageJson.openclaw.install.minHostVersion).toBe(">=2026.10.4");
+    expect(packageJson.openclaw.install.minHostVersion).toBe(">=2026.10.5");
     expect(packageJson.openclaw.install.localPath).toBeUndefined();
     expect(packageJson.openclaw.install.defaultChoice).toBeUndefined();
     expect(packageJson.openclaw.install.allowInvalidConfigRecovery).toBeUndefined();
@@ -64,24 +64,24 @@ describe("Mattermost custom plugin identity", () => {
 
   it("aligns the artifact and host contracts with the validated published SDK", () => {
     expect(readJson("./package.json")).toMatchObject({
-      version: "2026.10.4",
-      devDependencies: { openclaw: "2026.10.4" },
-      peerDependencies: { openclaw: ">=2026.10.4" },
+      version: "2026.10.5",
+      devDependencies: { openclaw: "2026.10.5" },
+      peerDependencies: { openclaw: ">=2026.10.5" },
       openclaw: {
-        install: { minHostVersion: ">=2026.10.4" },
-        compat: { pluginApi: ">=2026.10.4" },
-        build: { openclawVersion: "2026.10.4", bundledDist: false },
+        install: { minHostVersion: ">=2026.10.5" },
+        compat: { pluginApi: ">=2026.10.5" },
+        build: { openclawVersion: "2026.10.5", bundledDist: false },
       },
     });
     expect(readJson("./package-lock.json")).toMatchObject({
-      version: "2026.10.4",
+      version: "2026.10.5",
       packages: {
         "": {
-          version: "2026.10.4",
-          devDependencies: { openclaw: "2026.10.4" },
-          peerDependencies: { openclaw: ">=2026.10.4" },
+          version: "2026.10.5",
+          devDependencies: { openclaw: "2026.10.5" },
+          peerDependencies: { openclaw: ">=2026.10.5" },
         },
-        "node_modules/openclaw": { version: "2026.10.4" },
+        "node_modules/openclaw": { version: "2026.10.5" },
       },
     });
   });
