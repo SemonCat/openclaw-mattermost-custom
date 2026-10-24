@@ -235,6 +235,117 @@ describe("mattermost monitor resources", () => {
     ]);
   });
 
+  it("reports size limits by attachment slot while preserving siblings and unknown failures", async () => {
+    const limit = 32 * 1024 * 1024;
+    const privateErrorText = "https://private.example/files?token=secret-test-value";
+    const saveRemoteMedia = vi
+      .fn()
+      .mockRejectedValueOnce(Object.assign(new Error(privateErrorText), { code: "max_bytes" }))
+      .mockResolvedValueOnce({ path: "/tmp/image.png", contentType: "image/png" })
+      .mockRejectedValueOnce(new Error(`max_bytes ${privateErrorText}`))
+      .mockRejectedValueOnce(Object.assign(new Error(privateErrorText), { code: "max_bytes" }));
+    const resources = createMattermostMonitorResources({
+      accountId: "default",
+      callbackUrl: "https://openclaw.test/callback",
+      client: {
+        baseUrl: "https://chat.example.com",
+        token: "test-token",
+        request: async () => ({ mime_type: "video/mp4", name: "../clip\n.mp4" }),
+      } as never,
+      logger: {},
+      mediaMaxBytes: limit,
+      saveRemoteMedia,
+      mediaKindFromMime: (mime) => mime === "image/png" ? "image" : "video",
+    });
+    const media = await resources.resolveMattermostMedia(["video", "image", "unknown", "video-2"]);
+    expect(media).toEqual([
+      {
+        contentType: "video/mp4", fileName: "../clip\n.mp4", kind: "video",
+        downloadFailure: { reason: "max_bytes", maxBytes: limit },
+      },
+      { path: "/tmp/image.png", contentType: "image/png", kind: "image" },
+      { contentType: "video/mp4", fileName: "../clip\n.mp4", kind: "video" },
+      {
+        contentType: "video/mp4", fileName: "../clip\n.mp4", kind: "video",
+        downloadFailure: { reason: "max_bytes", maxBytes: limit },
+      },
+    ]);
+    const text = formatMattermostInboundMediaText({
+      body: "caption",
+      nativeMedia: [{}, {}, {}, {}],
+      materializedMedia: media,
+    });
+    expect(text).toContain('caption\n\n[mattermost 3 attachments unavailable]');
+    expect(text).toContain("[mattermost attachment 1 exceeds inbound media limit (33554432 bytes)]");
+    expect(text).toContain("[mattermost attachment 4 exceeds inbound media limit (33554432 bytes)]");
+    expect(text).not.toContain("attachment 2 exceeds");
+    expect(text).not.toContain("attachment 3 exceeds");
+    expect(text.indexOf("attachment 1 exceeds")).toBeLessThan(text.indexOf("attachment 4 exceeds"));
+    expect(text).not.toContain(privateErrorText);
+    expect(text).not.toContain("secret-test-value");
+    expect(text).not.toContain("../");
+    expect(text).not.toContain("clip\n");
+  });
+
+  it("uses the applied bounded limit even when failed metadata lookup is unavailable", async () => {
+    const resources = createMattermostMonitorResources({
+      accountId: "default",
+      callbackUrl: "https://openclaw.test/callback",
+      client: {
+        baseUrl: "https://chat.example.com",
+        request: async () => { throw new Error("metadata unavailable"); },
+      } as never,
+      logger: {},
+      mediaMaxBytes: 1024 * 1024 * 1024,
+      saveRemoteMedia: vi.fn().mockRejectedValue({ code: "max_bytes" }),
+      mediaKindFromMime: () => null,
+    });
+    const media = await resources.resolveMattermostMedia(["video"], {
+      signal: new AbortController().signal,
+      maxBytes: 1024,
+      timeoutMs: 1000,
+      allowPrivateNetwork: false,
+    });
+    expect(media).toEqual([{
+      contentType: undefined,
+      kind: "unknown",
+      downloadFailure: { reason: "max_bytes", maxBytes: 1024 },
+    }]);
+    expect(formatMattermostInboundMediaText({
+      body: "",
+      nativeMedia: [{}],
+      materializedMedia: media,
+    })).toBe(
+      "[mattermost attachment unavailable]\n[mattermost attachment 1 exceeds inbound media limit (1024 bytes)]",
+    );
+  });
+
+  it("recognizes the published SDK's 1 GiB header rejection without reading a gigabyte", async () => {
+    const { saveResponseMedia } = await import("openclaw/plugin-sdk/media-runtime");
+    const cancel = vi.fn();
+    const response = new Response(new ReadableStream({ cancel }), {
+      headers: { "content-length": String(1024 * 1024 * 1024 + 1), "content-type": "video/mp4" },
+    });
+    const resources = createMattermostMonitorResources({
+      accountId: "default",
+      callbackUrl: "https://openclaw.test/callback",
+      client: {
+        baseUrl: "https://chat.example.com",
+        request: async () => ({ mime_type: "video/mp4", name: "clip.mp4" }),
+      } as never,
+      logger: {},
+      mediaMaxBytes: 1024 * 1024 * 1024,
+      saveRemoteMedia: async ({ maxBytes }) => saveResponseMedia(response, { maxBytes }),
+      mediaKindFromMime: () => "video",
+    });
+    const media = await resources.resolveMattermostMedia(["video"]);
+    expect(media[0]).toMatchObject({
+      kind: "video",
+      downloadFailure: { reason: "max_bytes", maxBytes: 1073741824 },
+    });
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects unsafe file paths before media download", async () => {
     const saveRemoteMedia = vi.fn();
     const resources = createMattermostMonitorResources({

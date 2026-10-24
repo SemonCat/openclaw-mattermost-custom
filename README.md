@@ -796,6 +796,39 @@ this checkout also has existing type errors, including a task-card reader of
 the non-public `SessionEntry.lastRunId`. The runtime build checks actual SDK
 exports; tests and build success do not imply a clean TypeScript check.
 
+### Inbound attachment size limit
+
+Each directly attached inbound file, including a video, uses the effective
+`channels.mattermost.mediaMaxMb` limit. An account's
+`channels.mattermost.accounts.<accountId>.mediaMaxMb` overrides the channel
+setting; accounts without an override inherit it. If neither is set,
+`agents.defaults.mediaMaxMb` applies, with an 8 MiB fallback when all are unset.
+The unit is MiB (1,048,576 bytes).
+
+For an explicit per-file ceiling of 1 GiB:
+
+```json
+{
+  "channels": {
+    "mattermost": {
+      "mediaMaxMb": 1024
+    }
+  }
+}
+```
+
+This raises the download/staging ceiling; it does not guarantee that a model
+can read a video or that its context and media-processing limits accept the
+file. Mattermost server and proxy upload limits still apply. Oversize inbound
+files retain their ordered metadata slots, and the agent-facing notice identifies
+the attachment position and effective byte limit; successfully downloaded
+siblings remain available. Other download failures retain the generic
+unavailable notice.
+
+Referenced attachment hydration keeps its separate aggregate cap of at most
+8 MiB and its existing file/time bounds, even when direct attachments allow
+1024 MiB. Outbound grouped-send budgets keep their existing behavior.
+
 ## Docs
 
 See the OpenClaw docs (`docs/channels/mattermost.md` upstream) for the shared

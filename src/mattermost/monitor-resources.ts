@@ -33,6 +33,7 @@ import { buildButtonProps, type MattermostInteractionResponse } from "./interact
 
 export type MattermostMediaInfo = Pick<ChannelInboundMediaInput, "contentType" | "fileName" | "path"> & {
   kind: MediaKind;
+  downloadFailure?: { reason: "max_bytes"; maxBytes: number };
 };
 
 export async function buildMattermostInboundMediaPayload(
@@ -53,7 +54,7 @@ export function formatMattermostPendingMediaText(params: {
 export function formatMattermostInboundMediaText(params: {
   body: string;
   nativeMedia: readonly MediaPlaceholderTextFact[];
-  materializedMedia: readonly ChannelInboundMediaInput[];
+  materializedMedia: readonly (ChannelInboundMediaInput & Pick<MattermostMediaInfo, "downloadFailure">)[];
 }): string {
   const materializedCount = params.materializedMedia.filter(
     (media) => Boolean(media.path) || Boolean(media.url),
@@ -70,9 +71,17 @@ export function formatMattermostInboundMediaText(params: {
   const fileNameNotice = unavailableFileNames
     ? ` ${JSON.stringify(truncateUtf16Safe(unavailableFileNames, 512))}`
     : "";
+  const sizeNotices = params.materializedMedia.flatMap((media, index) =>
+    !media.path && !media.url && media.downloadFailure?.reason === "max_bytes"
+      ? [`[mattermost attachment ${index + 1} exceeds inbound media limit (${media.downloadFailure.maxBytes} bytes)]`]
+      : [],
+  );
   return formatInboundMediaUnavailableText({
     body: params.body,
-    notice: `[mattermost ${unavailableCount > 1 ? `${unavailableCount} attachments` : "attachment"} unavailable]${fileNameNotice}`,
+    notice: [
+      `[mattermost ${unavailableCount > 1 ? `${unavailableCount} attachments` : "attachment"} unavailable]${fileNameNotice}`,
+      ...sizeNotices,
+    ].join("\n"),
   });
 }
 
@@ -172,6 +181,7 @@ export function createMattermostMonitorResources(params: {
         out.push({ kind: "unknown" });
         continue;
       }
+      const maxBytes = Math.min(options?.maxBytes ?? mediaMaxBytes, mediaMaxBytes);
       try {
         const saved = await saveRemoteMedia({
           url: downloadUrl,
@@ -182,7 +192,7 @@ export function createMattermostMonitorResources(params: {
             ...(options ? { signal: options.signal } : {}),
           },
           filePathHint: fileId,
-          maxBytes: Math.min(options?.maxBytes ?? mediaMaxBytes, mediaMaxBytes),
+          maxBytes,
           ssrfPolicy: options
             ? { hostnameAllowlist: [new URL(client.baseUrl).hostname], allowPrivateNetwork: options.allowPrivateNetwork }
             : { allowedHostnames: [new URL(client.baseUrl).hostname] },
@@ -216,6 +226,9 @@ export function createMattermostMonitorResources(params: {
           contentType,
           ...(fileName ? { fileName } : {}),
           kind: mediaKindFromMime(contentType) ?? "unknown",
+          ...(typeof err === "object" && err !== null && "code" in err && err.code === "max_bytes"
+            ? { downloadFailure: { reason: "max_bytes" as const, maxBytes } }
+            : {}),
         });
       }
     }
