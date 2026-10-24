@@ -237,6 +237,9 @@ export function createMattermostMessageReactionRuntime(params: {
   const lifecycleOwner: MattermostReactionLifecycleOwner = {};
   let registration: MattermostReactionRegistration | undefined;
   let queuedFollowupPending = false;
+  let sourceRunStarted = false;
+  let queuedAttempt = 0;
+  let queuedReceiptRestore: Promise<void> | undefined;
   const startIngressReceipt = () => {
     if (ingressReceiptStarted) {
       return;
@@ -277,13 +280,42 @@ export function createMattermostMessageReactionRuntime(params: {
   };
 
   const update = (apply: (target: StatusReactionController) => Promise<void> | void) => {
-    if (registration === "owner") {
-      lifecycleStore.update(sessionKey, lifecycleOwner, apply);
+    if (registration === "joined" || registration === "pending") {
       return;
     }
-    if (registration !== "joined" && registration !== "pending") {
-      void Promise.resolve(apply(controller)).catch(() => undefined);
+    const applyCurrent = () => {
+      if (registration === "owner") {
+        lifecycleStore.update(sessionKey, lifecycleOwner, apply);
+        return;
+      }
+      if (registration !== "joined" && registration !== "pending") {
+        void Promise.resolve(apply(controller)).catch(() => undefined);
+      }
+    };
+    if (queuedReceiptRestore) {
+      const attempt = queuedAttempt;
+      // Restoring eyes is asynchronous. Activity for this attempt must follow
+      // that write, or a quick readmission can lose thinking/tool to the restore.
+      void queuedReceiptRestore.then(() => {
+        if (queuedAttempt === attempt) applyCurrent();
+      }).catch(() => undefined);
+    } else {
+      applyCurrent();
     }
+  };
+
+  const noteRunStart = (runId: string) => {
+    if (!statusReactionsEnabled || !lifecycleActivated || !runId.trim() || sourceRunStarted) {
+      return;
+    }
+    sourceRunStarted = true;
+    // This callback belongs to the source dispatch, unlike runner presentation
+    // callbacks. An actual independent run overrides the predicted steer join.
+    if (registration === "joined" || registration === "pending") {
+      lifecycleStore.transfer({ sessionKey, owner: lifecycleOwner, controller });
+      registration = "owner";
+    }
+    update((targetController) => targetController.setThinking());
   };
 
   const settle = async (result: { dispatchError: boolean; anyReplyDelivered: boolean }) => {
@@ -338,6 +370,7 @@ export function createMattermostMessageReactionRuntime(params: {
       return undefined;
     }
     queuedFollowupPending = true;
+    queuedAttempt += 1;
     if (registration !== "pending") {
       // A drain attempt proves that this post is queued, but not that it owns the
       // reply lane yet: admission can still defer or fail. Park it outside the
@@ -348,7 +381,7 @@ export function createMattermostMessageReactionRuntime(params: {
     }
     // A post may briefly have shared the previous owner's current activity before
     // core proves it is queued. Restore the queued marker until admission.
-    void controller.restoreInitial().catch(() => undefined);
+    queuedReceiptRestore = controller.restoreInitial().catch(() => undefined);
     return () => {};
   };
 
@@ -380,6 +413,7 @@ export function createMattermostMessageReactionRuntime(params: {
     controller,
     startIngressReceipt,
     activateAfterRecord,
+    noteRunStart,
     setThinking: () => update((targetController) => targetController.setThinking()),
     setTool: (toolName?: string) =>
       update((targetController) => targetController.setTool(toolName)),

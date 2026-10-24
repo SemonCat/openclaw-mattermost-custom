@@ -466,6 +466,122 @@ describe("createMattermostMessageReactionRuntime", () => {
       }
     });
 
+    it("binds independent joined work at source run-start and ignores duplicate starts", async () => {
+      const lifecycleStore = createMattermostReactionLifecycleStore();
+      const cfg: OpenClawConfig = {
+        messages: { statusReactions: { enabled: true }, queue: { mode: "steer" } },
+      };
+      const ownerParams = createBaseParams({ cfg, lifecycleStore, postId: "owner" });
+      const ownParams = createBaseParams({ cfg, lifecycleStore, postId: "own" });
+      const owner = createMattermostMessageReactionRuntime(ownerParams);
+      const own = createMattermostMessageReactionRuntime(ownParams);
+
+      owner.activateAfterRecord();
+      own.noteRunStart("unrecorded");
+      own.activateAfterRecord();
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+      expect(requestedEmojis(ownParams.request as ReturnType<typeof vi.fn>)).toEqual(["+eyes"]);
+
+      own.noteRunStart("run-own");
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+      own.setTool("exec");
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+      own.noteRunStart("run-own");
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+      expect(requestedEmojis(ownParams.request as ReturnType<typeof vi.fn>)).toEqual([
+        "+eyes", "+brain", "+computer",
+      ]);
+      expect(requestedEmojis(ownerParams.request as ReturnType<typeof vi.fn>)).toEqual(["+eyes"]);
+
+      const finished = owner.finish({ dispatchError: true, anyReplyDelivered: false });
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.errorHoldMs);
+      await finished;
+      expect(requestedEmojis(ownParams.request as ReturnType<typeof vi.fn>)).not.toContain("+x");
+      const ownFinished = own.finish({ dispatchError: false, anyReplyDelivered: true });
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.doneHoldMs);
+      await ownFinished;
+    });
+
+    it("lets source run-start transfer win at the previous owner's final boundary", async () => {
+      const lifecycleStore = createMattermostReactionLifecycleStore();
+      const cfg: OpenClawConfig = {
+        messages: { statusReactions: { enabled: true }, queue: { mode: "steer" } },
+      };
+      const ownerParams = createBaseParams({ cfg, lifecycleStore, postId: "owner-boundary" });
+      const ownParams = createBaseParams({ cfg, lifecycleStore, postId: "own-boundary" });
+      const owner = createMattermostMessageReactionRuntime(ownerParams);
+      const own = createMattermostMessageReactionRuntime(ownParams);
+      owner.activateAfterRecord();
+      own.activateAfterRecord();
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+      const finished = owner.finish({ dispatchError: false, anyReplyDelivered: true });
+      own.noteRunStart("run-own-boundary");
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.doneHoldMs);
+      await finished;
+      expect(requestedEmojis(ownParams.request as ReturnType<typeof vi.fn>)).toEqual([
+        "+eyes", "+brain",
+      ]);
+      const ownFinished = own.finish({ dispatchError: false, anyReplyDelivered: false });
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+      await ownFinished;
+      own.noteRunStart("late-run");
+      own.setTool("exec");
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+      expect(requestedEmojis(ownParams.request as ReturnType<typeof vi.fn>)).toEqual([
+        "+eyes", "+brain", "-eyes", "-brain",
+      ]);
+    });
+
+    it("keeps queued presentation inactive until source run-start or admission", async () => {
+      const params = createBaseParams({
+        cfg: { messages: { statusReactions: { enabled: true } } },
+      });
+      const runtime = createMattermostMessageReactionRuntime(params);
+      runtime.activateAfterRecord();
+      runtime.beginQueuedFollowup();
+      runtime.setThinking();
+      runtime.setTool("exec");
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+      expect(requestedEmojis(params.request as ReturnType<typeof vi.fn>)).toEqual(["+eyes"]);
+
+      runtime.noteRunStart("run-admitted-source");
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+      runtime.setTool("exec");
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+      const finished = runtime.finishQueuedFollowup({ dispatchError: false, anyReplyDelivered: true });
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.doneHoldMs);
+      await finished;
+      expect(requestedEmojis(params.request as ReturnType<typeof vi.fn>)).toEqual([
+        "+eyes", "+brain", "+computer", "+white_check_mark", "-eyes", "-brain", "-computer",
+      ]);
+    });
+
+    it("does not replay waiting activity when admission races receipt restoration", async () => {
+      const params = createBaseParams({
+        cfg: { messages: { statusReactions: { enabled: true } } },
+      });
+      const runtime = createMattermostMessageReactionRuntime(params);
+      runtime.activateAfterRecord();
+      runtime.beginQueuedFollowup();
+      runtime.setTool("web_search");
+      runtime.admitQueuedFollowup();
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+      expect(requestedEmojis(params.request as ReturnType<typeof vi.fn>)).toEqual([
+        "+eyes", "+brain",
+      ]);
+      runtime.beginQueuedFollowup();
+      runtime.admitQueuedFollowup();
+      runtime.setTool("exec");
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+      const finished = runtime.finishQueuedFollowup({ dispatchError: false, anyReplyDelivered: true });
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.doneHoldMs);
+      await finished;
+      expect(requestedEmojis(params.request as ReturnType<typeof vi.fn>)).toEqual([
+        "+eyes", "+brain", "-brain", "+computer",
+        "+white_check_mark", "-eyes", "-computer",
+      ]);
+    });
+
     it("self-settles a joined post whose own dispatch actually delivered independently", async () => {
       // A joined registration predicts steer from resolved queue config, but the effective
       // per-session mode can differ (e.g. a persisted session override). If this post's own

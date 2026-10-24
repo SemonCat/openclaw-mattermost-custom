@@ -114,6 +114,13 @@ work has stalled. Steered posts follow their active owner; queued follow-ups kee
 their receipt until admission and settle with their own turn. Without explicit
 status-reaction enablement, posts retain the existing plain acknowledgement.
 Task cards and progress previews continue to carry the detailed task state.
+Source-bound run starts establish independent post ownership even when the
+configured queue mode predicted steering. Hosts advertising
+`queued-source-lifecycle-v1` send admitted/tool/settled reactions to the original
+source posts using their own delivery and error facts; refreshed renderer
+callbacks cannot promote a different waiting source. Admission retries retain
+the receipt until that source runs and reaches a terminal outcome. Older hosts
+retain the legacy queue callback path.
 
 Mutable message-tool actions and bounded search are enabled by default for this
 personal downstream plugin. Each gate can still be disabled globally or per account:

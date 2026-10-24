@@ -339,6 +339,7 @@ function createRuntimeCore(cfg: OpenClawConfig) {
     },
   );
   return {
+    capabilities: [] as string[],
     config: { current: () => cfg },
     events: {
       onAgentEvent: () => () => {},
@@ -663,6 +664,412 @@ describe("mattermost lifecycle status reactions", () => {
     }
     return byPost;
   }
+
+  async function startReactionMonitor(sourceLifecycleSupported = true) {
+    const socket = new FakeWebSocket();
+    const abortController = new AbortController();
+    const config: OpenClawConfig = {
+      ...baseConfig,
+      messages: {
+        ackReactionScope: "all",
+        statusReactions: { enabled: true },
+        queue: { mode: "steer" },
+      },
+    };
+    const core = createRuntimeCore(config);
+    if (sourceLifecycleSupported) core.capabilities.push("queued-source-lifecycle-v1");
+    mockState.runtimeCore = core;
+    const monitor = monitorMattermostProvider({
+      config,
+      runtime: testRuntime(),
+      abortSignal: abortController.signal,
+      webSocketFactory: () => socket,
+    });
+    await vi.waitFor(() => expect(socket.openListenerCount).toBeGreaterThan(0));
+    socket.emitOpen();
+    return {
+      socket,
+      stop: async () => {
+        abortController.abort();
+        socket.emitClose(1000);
+        await monitor;
+      },
+    };
+  }
+
+  type SourceReplyOptions = {
+    onAgentRunStart: (runId: string) => void;
+    onToolStart: (payload: { name: string; phase: "start"; toolCallId: string }) => Promise<unknown>;
+    onReasoningStream: (payload: { text: string }) => Promise<unknown>;
+    onCompactionStart: () => void;
+    onCompactionEnd: () => void;
+  };
+
+  type QueuedSourceCorrelation = {
+    begin: () => (() => void) | void;
+    onAdmitted: () => void | Promise<void>;
+    onToolStart: (payload: { name?: string; toolCallId?: string }) => void | Promise<void>;
+    onSettled: (result: { dispatchError: boolean; anyReplyDelivered: boolean }) => Promise<void>;
+  };
+
+  it.each(["reply", "silent", "error"] as const)(
+    "settles source-owned queued %s independently of refreshed runner callbacks",
+    async (outcome) => {
+      let releaseOwner: (() => void) | undefined;
+      let ownerStarted = false;
+      const ownerGate = new Promise<void>((resolve) => { releaseOwner = resolve; });
+      let source: (SourceReplyOptions & {
+        queuedDeliveryCorrelations: QueuedSourceCorrelation[];
+        onQueuedFollowupAdmitted: () => void;
+        onQueuedFollowupSettled: () => Promise<void>;
+        onObservedReplyDelivery: () => Promise<void>;
+      }) | undefined;
+      mockState.dispatchInboundMessage
+        .mockImplementationOnce(async () => {
+          ownerStarted = true;
+          await ownerGate;
+          return { queuedFinal: false, counts: { final: 1 } };
+        })
+        .mockImplementationOnce(async (params) => {
+          source = params.replyOptions;
+          return { queuedFinal: false, counts: {} };
+        });
+      const monitor = await startReactionMonitor();
+      const owner = emitMattermostChannelPost(monitor.socket, {
+        id: "queued-prior-owner", message: "prior work",
+      });
+      try {
+        await vi.waitFor(() => expect(ownerStarted).toBe(true));
+        await emitMattermostChannelPost(monitor.socket, {
+          id: "queued-source", message: "continue after admission",
+        });
+        const correlation = source!.queuedDeliveryCorrelations[0];
+        const end = correlation.begin();
+        releaseOwner?.();
+        await owner;
+        await source!.onToolStart({ name: "exec", phase: "start", toolCallId: "not-admitted" });
+        expect(requestedReactionsByPost(mockState.request).get("queued-source")).toEqual(["+eyes"]);
+        expect(correlation.onAdmitted).toBeTypeOf("function");
+        await correlation.onAdmitted();
+        await vi.waitFor(() =>
+          expect(requestedReactionsByPost(mockState.request).get("queued-source")).toContain("+brain"),
+        );
+        await correlation.onToolStart({ name: "exec", toolCallId: "source-tool" });
+        await vi.waitFor(() =>
+          expect(requestedReactionsByPost(mockState.request).get("queued-source")).toContain("+computer"),
+        );
+        // Hosts may also emit the legacy runner callbacks. They must not reset
+        // source activity or settle it using a different runner's empty facts.
+        source!.onQueuedFollowupAdmitted();
+        await source!.onQueuedFollowupSettled();
+        expect(requestedReactionsByPost(mockState.request).get("queued-source")).toEqual([
+          "+eyes", "+brain", "+computer",
+        ]);
+        // A refreshed renderer's observation cannot replace authoritative
+        // source settlement facts (notably deliberate silence or failure).
+        await source!.onObservedReplyDelivery();
+        const facts = { dispatchError: outcome === "error", anyReplyDelivered: outcome === "reply" };
+        await correlation.onSettled(facts);
+        await correlation.onSettled(facts);
+        await correlation.onAdmitted();
+        await correlation.onToolStart({ name: "web_search", toolCallId: "stale-tool" });
+        end?.();
+      } finally {
+        releaseOwner?.();
+        await owner;
+        await monitor.stop();
+      }
+      expect(requestedReactionsByPost(mockState.request).get("queued-source")).toEqual(
+        outcome === "silent"
+          ? ["+eyes", "+brain", "+computer", "-eyes", "-brain", "-computer"]
+          : ["+eyes", "+brain", "+computer",
+              outcome === "error" ? "+x" : "+white_check_mark",
+              "-eyes", "-brain", "-computer"],
+      );
+    },
+  );
+
+  it("keeps collected source correlations separate from the prior owner and waiting siblings", async () => {
+    const sources: Array<{
+      queuedDeliveryCorrelations: QueuedSourceCorrelation[];
+      onQueuedFollowupAdmitted: () => void;
+      onQueuedFollowupSettled: () => Promise<void>;
+    }> = [];
+    let ownerOptions: SourceReplyOptions | undefined;
+    let releaseOwner: (() => void) | undefined;
+    const ownerGate = new Promise<void>((resolve) => { releaseOwner = resolve; });
+    mockState.dispatchInboundMessage
+      .mockImplementationOnce(async (params) => {
+        ownerOptions = params.replyOptions;
+        await ownerGate;
+        return { queuedFinal: false, counts: { final: 1 } };
+      })
+      .mockImplementation(async (params) => {
+        sources.push(params.replyOptions);
+        return { queuedFinal: false, counts: {} };
+      });
+    const monitor = await startReactionMonitor();
+    const owner = emitMattermostChannelPost(monitor.socket, { id: "collect-owner", message: "prior work" });
+    try {
+      await vi.waitFor(() => expect(ownerOptions).toBeDefined());
+      for (const id of ["collect-a", "collect-b", "waiting-sibling"]) {
+        await emitMattermostChannelPost(monitor.socket, { id, message: id });
+      }
+      const [a, b, waiting] = sources.map((source) => source.queuedDeliveryCorrelations[0]);
+      for (const correlation of [a, b, waiting]) correlation.begin();
+      releaseOwner?.();
+      await owner;
+      expect(requestedReactionsByPost(mockState.request).get("collect-owner")).toContain("+white_check_mark");
+      for (const id of ["collect-a", "collect-b", "waiting-sibling"]) {
+        expect(requestedReactionsByPost(mockState.request).get(id)).toEqual(["+eyes"]);
+      }
+      // The refreshed runner can belong to the waiting sibling before its
+      // first source-owned notification. Host capability must fence that path.
+      sources[2].onQueuedFollowupAdmitted();
+      await sources[2].onQueuedFollowupSettled();
+      expect(requestedReactionsByPost(mockState.request).get("waiting-sibling")).toEqual(["+eyes"]);
+      expect(a.onAdmitted).toBeTypeOf("function");
+      await a.onAdmitted();
+      await b.onAdmitted();
+      await a.onToolStart({ name: "exec", toolCallId: "collected-tool" });
+      await b.onToolStart({ name: "exec", toolCallId: "collected-tool" });
+      // A tool callback without admission is not evidence that the waiting source ran.
+      await waiting.onToolStart({ name: "exec", toolCallId: "unadmitted-tool" });
+      await vi.waitFor(() => {
+        for (const id of ["collect-a", "collect-b"]) {
+          expect(requestedReactionsByPost(mockState.request).get(id)).toContain("+computer");
+        }
+      });
+      for (const correlation of [a, b]) {
+        await correlation.onSettled({ dispatchError: false, anyReplyDelivered: true });
+      }
+      expect(requestedReactionsByPost(mockState.request).get("waiting-sibling")).toEqual(["+eyes"]);
+      expect(requestedReactionsByPost(mockState.request).get("collect-owner")).not.toContain("+computer");
+      for (const id of ["collect-a", "collect-b"]) {
+        expect(requestedReactionsByPost(mockState.request).get(id)).toEqual([
+          "+eyes", "+computer", "+white_check_mark", "-eyes", "-computer",
+        ]);
+      }
+      await waiting.onAdmitted();
+      await waiting.onToolStart({ name: "web_search", toolCallId: "actually-admitted-tool" });
+      await vi.waitFor(() =>
+        expect(requestedReactionsByPost(mockState.request).get("waiting-sibling")).toContain("+globe_with_meridians"),
+      );
+      await waiting.onSettled({ dispatchError: false, anyReplyDelivered: false });
+    } finally {
+      releaseOwner?.();
+      await owner;
+      await monitor.stop();
+    }
+  });
+
+  it("readmits a source after a pre-execution retry without consuming its terminal lifecycle", async () => {
+    let source: { queuedDeliveryCorrelations: QueuedSourceCorrelation[];
+      onToolStart: SourceReplyOptions["onToolStart"];
+      onQueuedFollowupAdmitted: () => void; onQueuedFollowupSettled: () => Promise<void> } | undefined;
+    let sourceDelivery: {
+      onDelivered: (
+        payload: ReplyPayload,
+        info: { kind: "final" },
+        result: { visibleReplySent: true; messageIds: string[]; content: string },
+      ) => Promise<void>;
+    } | undefined;
+    let releaseOwner: (() => void) | undefined;
+    let ownerStarted = false;
+    const ownerGate = new Promise<void>((resolve) => { releaseOwner = resolve; });
+    mockState.dispatchInboundMessage
+      .mockImplementationOnce(async () => {
+        ownerStarted = true;
+        await ownerGate;
+        return { queuedFinal: false, counts: { final: 1 } };
+      })
+      .mockImplementationOnce(async (params) => {
+        source = params.replyOptions;
+        const core = mockState.runtimeCore as ReturnType<typeof createRuntimeCore>;
+        const turn = core.channel.session.recordInboundSession.mock.calls.at(-1)?.[0] as
+          { delivery: NonNullable<typeof sourceDelivery> };
+        sourceDelivery = turn.delivery;
+        return { queuedFinal: false, counts: {} };
+      });
+    const monitor = await startReactionMonitor();
+    const owner = emitMattermostChannelPost(monitor.socket, { id: "retry-owner", message: "prior work" });
+    try {
+      await vi.waitFor(() => expect(ownerStarted).toBe(true));
+      await emitMattermostChannelPost(monitor.socket, { id: "retry-source", message: "retry admission" });
+      const correlation = source!.queuedDeliveryCorrelations[0];
+      const endDeferred = correlation.begin();
+      endDeferred?.();
+      source!.onQueuedFollowupAdmitted();
+      await source!.onQueuedFollowupSettled();
+      expect(requestedReactionsByPost(mockState.request).get("retry-source")).toEqual(["+eyes"]);
+
+      const endRetry = correlation.begin();
+      await correlation.onAdmitted();
+      await vi.waitFor(() =>
+        expect(requestedReactionsByPost(mockState.request).get("retry-source")).toContain("+brain"),
+      );
+      endRetry?.();
+      // Admission happened, but execution did not. Renderer cleanup is not
+      // source terminal evidence, and the next attempt may be admitted again.
+      await source!.onQueuedFollowupSettled();
+      const endSuccess = correlation.begin();
+      await correlation.onAdmitted();
+      await vi.waitFor(() =>
+        expect(requestedReactionsByPost(mockState.request).get("retry-source")).toEqual([
+          "+eyes", "+brain", "-brain", "+brain",
+        ]),
+      );
+      await correlation.onToolStart({ name: "exec", toolCallId: "retry-tool" });
+      await vi.waitFor(() =>
+        expect(requestedReactionsByPost(mockState.request).get("retry-source")).toContain("+computer"),
+      );
+      await source!.onToolStart({ name: "exec", phase: "start", toolCallId: "retry-tool" });
+      await correlation.onAdmitted();
+      await sourceDelivery!.onDelivered(
+        { text: "retry final" },
+        { kind: "final" },
+        { visibleReplySent: true, messageIds: ["retry-result"], content: "retry final" },
+      );
+      const receiptEdit = mockState.request.mock.calls.find(
+        ([path, init]) => path === "/posts/retry-result/patch" && init?.method === "PUT",
+      );
+      expect(receiptEdit).toBeDefined();
+      expect(JSON.parse(String(receiptEdit![1]!.body)).message).toContain("1 tool call");
+      releaseOwner?.();
+      await owner;
+      expect(requestedReactionsByPost(mockState.request).get("retry-source")).not.toContain("+white_check_mark");
+      await correlation.onSettled({ dispatchError: false, anyReplyDelivered: true });
+      endSuccess?.();
+      correlation.begin();
+      await correlation.onAdmitted();
+      await correlation.onSettled({ dispatchError: false, anyReplyDelivered: true });
+      expect(requestedReactionsByPost(mockState.request).get("retry-source")).toEqual([
+        "+eyes", "+brain", "-brain", "+brain", "+computer",
+        "+white_check_mark", "-eyes", "-brain", "-computer",
+      ]);
+    } finally {
+      releaseOwner?.();
+      await owner;
+      await monitor.stop();
+    }
+  });
+
+  it.each([false, true])("shows source-bound run activity with queued capability %s", async (capable) => {
+    let replyOptions: SourceReplyOptions | undefined;
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    mockState.dispatchInboundMessage.mockImplementationOnce(async (params) => {
+      replyOptions = params.replyOptions;
+      await gate;
+      return { queuedFinal: false, counts: { final: 1 } };
+    });
+    const monitor = await startReactionMonitor(capable);
+    const inbound = emitMattermostChannelPost(monitor.socket, {
+      id: "source-run-only",
+      message: "start work without visible progress",
+    });
+    try {
+      await vi.waitFor(() => expect(replyOptions).toBeDefined());
+      expect(requestedReactionsByPost(mockState.request).get("source-run-only")).toEqual(["+eyes"]);
+      if (capable) {
+        vi.useFakeTimers();
+        try {
+          const dispatcherOptions = mockState.createReplyDispatcherWithTyping.mock.calls.at(-1)?.[0];
+          await dispatcherOptions.onReplyStart();
+          await replyOptions!.onToolStart({ name: "exec", phase: "start", toolCallId: "foreign-renderer" });
+          await replyOptions!.onReasoningStream({ text: "another source's reasoning" });
+          replyOptions!.onCompactionEnd();
+          replyOptions!.onCompactionStart();
+          await vi.advanceTimersByTimeAsync(1000);
+          expect(requestedReactionsByPost(mockState.request).get("source-run-only")).toEqual(["+eyes"]);
+        } finally {
+          vi.useRealTimers();
+        }
+      }
+      replyOptions!.onAgentRunStart("run-source-only");
+      await vi.waitFor(() =>
+        expect(requestedReactionsByPost(mockState.request).get("source-run-only")).toEqual([
+          "+eyes", "+brain",
+        ]),
+      );
+    } finally {
+      release?.();
+      await inbound;
+      await monitor.stop();
+    }
+    expect(requestedReactionsByPost(mockState.request).get("source-run-only")).toEqual([
+      "+eyes", "+brain", "+white_check_mark", "-eyes", "-brain",
+    ]);
+  });
+
+  it.each(["reply", "silent", "error"] as const)(
+    "isolates an independently executing joined source through its own %s settlement",
+    async (outcome) => {
+      let ownerOptions: SourceReplyOptions | undefined;
+      let ownOptions: SourceReplyOptions | undefined;
+      let releaseOwner: (() => void) | undefined;
+      let releaseOwn: (() => void) | undefined;
+      const ownerGate = new Promise<void>((resolve) => { releaseOwner = resolve; });
+      const ownGate = new Promise<void>((resolve) => { releaseOwn = resolve; });
+      mockState.dispatchInboundMessage
+        .mockImplementationOnce(async (params) => {
+          ownerOptions = params.replyOptions;
+          await ownerGate;
+          return { queuedFinal: false, counts: { final: 1 } };
+        })
+        .mockImplementationOnce(async (params) => {
+          ownOptions = params.replyOptions;
+          await ownGate;
+          if (outcome === "error") throw new Error("source dispatch failed");
+          return { queuedFinal: false, counts: outcome === "reply" ? { final: 1 } : {} };
+        });
+      const monitor = await startReactionMonitor();
+      const owner = emitMattermostChannelPost(monitor.socket, {
+        id: "prior-active-source", message: "prior work",
+      });
+      let own: Promise<void> | undefined;
+      try {
+        await vi.waitFor(() => expect(ownerOptions).toBeDefined());
+        ownerOptions!.onAgentRunStart("run-prior");
+        own = emitMattermostChannelPost(monitor.socket, {
+          id: "independent-source", message: "a separate run despite predicted steer",
+        });
+        await vi.waitFor(() => expect(ownOptions).toBeDefined());
+        ownOptions!.onAgentRunStart("run-independent");
+        await vi.waitFor(() =>
+          expect(requestedReactionsByPost(mockState.request).get("independent-source")).toContain("+brain"),
+        );
+        await ownerOptions!.onToolStart({ name: "web_search", phase: "start", toolCallId: "old-tool" });
+        await vi.waitFor(() =>
+          expect(requestedReactionsByPost(mockState.request).get("prior-active-source")).toContain("+globe_with_meridians"),
+        );
+        expect(requestedReactionsByPost(mockState.request).get("independent-source")).not.toContain("+globe_with_meridians");
+        await ownOptions!.onToolStart({ name: "exec", phase: "start", toolCallId: "own-tool" });
+        await vi.waitFor(() =>
+          expect(requestedReactionsByPost(mockState.request).get("independent-source")).toContain("+computer"),
+        );
+        releaseOwner?.();
+        await owner;
+        expect(requestedReactionsByPost(mockState.request).get("independent-source")).toEqual([
+          "+eyes", "+brain", "+computer",
+        ]);
+      } finally {
+        releaseOwner?.();
+        releaseOwn?.();
+        await owner;
+        await own;
+        await monitor.stop();
+      }
+      expect(requestedReactionsByPost(mockState.request).get("independent-source")).toEqual(
+        outcome === "silent"
+          ? ["+eyes", "+brain", "+computer", "-eyes", "-brain", "-computer"]
+          : ["+eyes", "+brain", "+computer",
+              outcome === "error" ? "+x" : "+white_check_mark",
+              "-eyes", "-brain", "-computer"],
+      );
+      expect(requestedReactionsByPost(mockState.request).get("prior-active-source")).not.toContain("+computer");
+    },
+  );
 
   it("correlates a same-session steered post's reactions with the still-active owner turn", async () => {
     // Real overlap, not two sequential turns: the owner's dispatch is held open with a

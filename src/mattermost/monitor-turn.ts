@@ -159,6 +159,8 @@ export async function dispatchMattermostInboundTurn(
   } = params;
   const { channelId, kind, route, senderId, thread, to } = eventPlan;
   const { effectiveReplyToId } = thread;
+  const sourceQueuedLifecycleSupported =
+    core.capabilities?.includes("queued-source-lifecycle-v1") === true;
   const reactions = createMattermostMessageReactionRuntime({
     cfg,
     client,
@@ -472,12 +474,68 @@ export async function dispatchMattermostInboundTurn(
     onReplyStart: async () => {
       hasStartedWork = true;
       await typingCallbacks?.onReplyStart();
-      reactions.setThinking();
+      if (canUpdateReactionsFromRenderer()) {
+        reactions.setThinking();
+      }
     },
   };
   let anyReplyDelivered = false;
   let queuedFollowupActive = false;
   let queuedFollowupDeliveryError = false;
+  let sourceQueuedLifecycleObserved = false;
+  const canUpdateReactionsFromRenderer = () =>
+    !sourceQueuedLifecycleSupported || Boolean(initialRunId) || queuedFollowupActive;
+  let queuedReactionSettlement: Promise<void> | undefined;
+  const admitQueuedReactions = () => {
+    if (queuedFollowupActive || queuedReactionSettlement) {
+      return;
+    }
+    queuedFollowupActive = true;
+    queuedFollowupDeliveryError = false;
+    anyReplyDelivered = false;
+    reactions.admitQueuedFollowup();
+    progressReceipt.reset();
+    transcriptUsage.reset();
+  };
+  const settleQueuedReactions = (result?: {
+    dispatchError: boolean;
+    anyReplyDelivered: boolean;
+  }) => {
+    queuedReactionSettlement ??= (async () => {
+      try {
+        await reactions.finishQueuedFollowup(
+          result ?? { dispatchError: queuedFollowupDeliveryError, anyReplyDelivered },
+        );
+      } finally {
+        queuedFollowupActive = false;
+      }
+    })();
+    return queuedReactionSettlement;
+  };
+  // Keep the structural extension optional on the published SDK's begin-only
+  // contract. Older hosts retain the source run-start and legacy runner paths.
+  const queuedReactionCorrelation = {
+    begin: () => {
+      if (queuedReactionSettlement) {
+        return;
+      }
+      queuedFollowupActive = false;
+      return reactions.beginQueuedFollowup();
+    },
+    onAdmitted: () => {
+      sourceQueuedLifecycleObserved = true;
+      admitQueuedReactions();
+    },
+    onToolStart: (payload: { name?: string; toolCallId?: string }) => {
+      if (sourceQueuedLifecycleObserved && queuedFollowupActive) {
+        reactions.setTool(payload.name);
+      }
+    },
+    onSettled: (result: { dispatchError: boolean; anyReplyDelivered: boolean }) => {
+      sourceQueuedLifecycleObserved = true;
+      return settleQueuedReactions(result);
+    },
+  };
   let resolveQueuedFollowupLifecycle: (() => void) | undefined;
   const queuedFollowupLifecycleSettled = new Promise<void>((resolve) => {
     resolveQueuedFollowupLifecycle = resolve;
@@ -879,9 +937,11 @@ export async function dispatchMattermostInboundTurn(
                   ? { suppressDefaultToolProgressMessages: true }
                   : {}),
                 queuedDeliveryCorrelations: reactions.statusReactionsEnabled
-                  ? [{ begin: reactions.beginQueuedFollowup }]
+                  ? [queuedReactionCorrelation]
                   : undefined,
                 onAgentRunStart: (runId) => {
+                  hasStartedWork = true;
+                  reactions.noteRunStart(runId);
                   initialRunId ??= runId;
                   progressReceipt.noteRunStart(runId);
                   taskProgressCard.noteRunStart(runId);
@@ -962,7 +1022,9 @@ export async function dispatchMattermostInboundTurn(
                 },
                 onReasoningStream: async (payloadResult) => {
                   hasStartedWork = true;
-                  reactions.setThinking();
+                  if (canUpdateReactionsFromRenderer()) {
+                    reactions.setThinking();
+                  }
                   if (account.streamingMode === "progress") {
                     return await progressDraft.pushReasoningProgress(
                       payloadResult.text || "Thinking…",
@@ -982,7 +1044,9 @@ export async function dispatchMattermostInboundTurn(
                 onToolStart: async (payloadValue) => {
                   hasStartedWork = true;
                   taskProgressCard.noteToolStart(payloadValue);
-                  reactions.setTool(payloadValue.name);
+                  if (canUpdateReactionsFromRenderer() && !sourceQueuedLifecycleObserved) {
+                    reactions.setTool(payloadValue.name);
+                  }
                   if (payloadValue.phase === "start") {
                     progressReceipt.noteToolCall(payloadValue.name, payloadValue.toolCallId);
                   }
@@ -1015,30 +1079,29 @@ export async function dispatchMattermostInboundTurn(
                   return visible;
                 },
                 onCompactionStart: () => {
-                  reactions.setCompacting();
+                  if (canUpdateReactionsFromRenderer()) {
+                    reactions.setCompacting();
+                  }
                 },
                 onCompactionEnd: () => {
-                  reactions.cancelPending();
-                  reactions.setThinking();
+                  if (canUpdateReactionsFromRenderer()) {
+                    reactions.cancelPending();
+                    reactions.setThinking();
+                  }
                 },
                 onQueuedFollowupAdmitted: () => {
-                  queuedFollowupActive = true;
-                  queuedFollowupDeliveryError = false;
-                  anyReplyDelivered = false;
-                  reactions.admitQueuedFollowup();
-                  // A pending receipt describes the turn that just finished; an
-                  // admitted followup starts a fresh turn's tool/elapsed tally.
-                  progressReceipt.reset();
-                  transcriptUsage.reset();
+                  if (!sourceQueuedLifecycleSupported) {
+                    admitQueuedReactions();
+                  } else if (!sourceQueuedLifecycleObserved) {
+                    // The refreshed runner still owns renderer bookkeeping, but
+                    // only a source correlation may admit this post's reactions.
+                    progressReceipt.reset();
+                    transcriptUsage.reset();
+                  }
                 },
                 onQueuedFollowupSettled: async () => {
-                  try {
-                    await reactions.finishQueuedFollowup({
-                      dispatchError: queuedFollowupDeliveryError,
-                      anyReplyDelivered,
-                    });
-                  } finally {
-                    queuedFollowupActive = false;
+                  if (!sourceQueuedLifecycleSupported && !sourceQueuedLifecycleObserved) {
+                    await settleQueuedReactions();
                   }
                 },
               },
