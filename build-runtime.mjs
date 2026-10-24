@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "tsdown";
 
@@ -52,23 +51,6 @@ await build({
   platform: "node",
 });
 
-// Preserve an externalized browser probe for the same named SDK binding gate.
-// The shipped browser build below then bundles that validated public DOM SDK.
-const browserProbeDir = fs.mkdtempSync(
-  path.join(os.tmpdir(), "mattermost-browser-sdk-"),
-);
-await build({
-  clean: false,
-  config: false,
-  dts: false,
-  deps: { neverBundle },
-  entry: { index: path.join(pluginDir, "browser/index.ts") },
-  format: "esm",
-  platform: "browser",
-  outDir: browserProbeDir,
-  logLevel: "warn",
-});
-
 // tsdown/rolldown splits shared code used by 2+ entries into hashed chunk
 // files (e.g. `channel.runtime-X1qGRmcs.js`) alongside the entry-named
 // outputs. Most Plugin SDK imports live in those chunks, not the entries, so
@@ -89,7 +71,7 @@ function listEmittedJsFiles(dir) {
   return results;
 }
 
-const emittedJsFiles = [...listEmittedJsFiles(outDir), ...listEmittedJsFiles(browserProbeDir)].toSorted((left, right) =>
+const emittedJsFiles = listEmittedJsFiles(outDir).toSorted((left, right) =>
   left.localeCompare(right),
 );
 if (emittedJsFiles.length === 0) {
@@ -177,7 +159,8 @@ if (namedImportsBySpecifier.size === 0) {
 
 // The standalone gate must validate the published dependency used by this
 // checkout, never a source checkout or a separately installed Gateway.
-const hostRoot = path.join(pluginDir, "node_modules", "openclaw");
+// Worktrees may share node_modules; the openclaw package itself must be installed.
+const hostRoot = path.join(fs.realpathSync(path.join(pluginDir, "node_modules")), "openclaw");
 if (fs.realpathSync(hostRoot) !== hostRoot) {
   throw new Error("standalone build requires an installed OpenClaw npm package, not a linked checkout");
 }
@@ -241,33 +224,3 @@ console.error(
     `${emittedJsFiles.length} emitted files; verified ${totalNamedExports} named Plugin SDK ` +
     `exports across ${namedImportsBySpecifier.size} subpaths against openclaw@${hostPackageJson.version} at ${hostRoot}`,
 );
-
-await build({
-  clean: false,
-  config: false,
-  dts: false,
-  deps: { alwaysBundle: ["openclaw/plugin-sdk/control-ui"] },
-  entry: { index: path.join(pluginDir, "browser/index.ts") },
-  format: "esm",
-  platform: "browser",
-  outDir: path.join(outDir, "control-ui"),
-  logLevel: "info",
-});
-const browserFiles = listEmittedJsFiles(path.join(outDir, "control-ui"));
-if (
-  browserFiles.length !== 1 ||
-  path.basename(browserFiles[0]) !== "index.js"
-) {
-  throw new Error("browser entry must be one self-contained index.js artifact");
-}
-const browserOutput = fs.readFileSync(browserFiles[0], "utf8");
-if (
-  /\b(?:import\s*(?:["'({*]|[\w$]+)|export\s*[^;]*?\bfrom\s*["'])|\b(?:require\s*\(|process\.|Buffer\b)|node:/u.test(
-    browserOutput,
-  )
-) {
-  throw new Error(
-    "browser artifact contains an import or Node runtime dependency",
-  );
-}
-fs.rmSync(browserProbeDir, { recursive: true, force: true });

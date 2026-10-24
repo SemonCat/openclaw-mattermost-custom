@@ -40,7 +40,7 @@ describe("configured Mattermost channel context", () => {
   });
   it("validates fields and keeps excluded policies excluded", () => {
     expect(MattermostConfigSchema.safeParse(cfg.channels!.mattermost).success).toBe(true);
-    for (const entry of [{ skills: null }, { skills: "coding" }, { skills: [1] }, { systemPrompt: null }, { systemPrompt: 1 }, { tools: {} }, { toolsBySender: {} }, { enabled: true }, { allowFrom: [] }]) {
+    for (const entry of [{ skills: null }, { skills: "coding" }, { skills: [1] }, { systemPrompt: null }, { systemPrompt: 1 }, { enabled: true }, { allowFrom: [] }]) {
       expect(MattermostConfigSchema.safeParse({ groups: { "*": entry } }).success).toBe(false);
     }
   });

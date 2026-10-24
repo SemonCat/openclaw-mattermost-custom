@@ -465,7 +465,7 @@ describe("slash-http cfg threading", () => {
   });
 
   it.each([undefined, "a".repeat(26)])(
-    "links only native slash root %s, never synthetic invocation SID",
+    "preserves native slash root %s without retired origin metadata",
     async (rootId) => {
       mockState.resolveMattermostModelPickerEntry.mockReturnValueOnce(null);
       mockState.parseSlashCommandPayload.mockReturnValueOnce({
@@ -507,14 +507,12 @@ describe("slash-http cfg threading", () => {
         expect.objectContaining({
           ctxPayload: expect.objectContaining({
             NativeChannelId: "chan-1",
-            ConversationLink: rootId
-              ? {
-                  url: `${accountFixture.baseUrl}/_redirect/pl/${rootId}`,
-                  label: "Mattermost",
-                }
-              : undefined,
+            MessageThreadId: rootId,
           }),
         }),
+      );
+      expect(mockState.dispatchInbound.mock.calls[0][0].ctxPayload).not.toHaveProperty(
+        "ConversationLink",
       );
     },
   );

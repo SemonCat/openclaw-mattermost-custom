@@ -67,6 +67,7 @@ import {
   type ResolvedMattermostAccount,
 } from "./mattermost/accounts.js";
 import { normalizeMattermostEmojiName } from "./mattermost/emoji.js";
+import { assertMattermostAttachmentCount } from "./mattermost/attachment-limits.js";
 import { mattermostIngressIdentity } from "./mattermost/ingress-identity.js";
 import { MATTERMOST_LEGACY_TEXT_LIMIT, resolveMattermostTextLimit } from "./mattermost/text-limits.js";
 import type { MattermostSendResult } from "./mattermost/send.js";
@@ -427,13 +428,13 @@ const mattermostMessageActions: ChannelMessageActionAdapter = {
     if (ctx.action !== "send") {
       return null;
     }
-    const mediaUrl = resolveMattermostSendAttachmentMedia(ctx.params);
+    const mediaUrls = resolveMattermostSendAttachmentMedia(ctx.params);
     const attachmentText =
       typeof ctx.params.attachmentText === "string" ? ctx.params.attachmentText : undefined;
     const existingMattermostData = readMattermostPayloadData(payload);
     return {
       ...payload,
-      ...(mediaUrl ? { mediaUrl, mediaUrls: [mediaUrl] } : {}),
+      ...(mediaUrls.length ? { mediaUrl: mediaUrls[0], mediaUrls } : {}),
       ...(attachmentText !== undefined
         ? {
             channelData: {
@@ -832,19 +833,15 @@ function collectMattermostAttachmentMedia(params: Record<string, unknown>): {
   };
 }
 
-function resolveMattermostSendAttachmentMedia(params: Record<string, unknown>): string | undefined {
+function resolveMattermostSendAttachmentMedia(params: Record<string, unknown>): string[] {
   const attachmentMedia = collectMattermostAttachmentMedia(params);
   if (attachmentMedia.hasUnsupportedAttachmentPayload) {
     throw new Error(
       "Mattermost send attachments require media, mediaUrl, path, filePath, fileUrl, mediaUrls, or attachments[] with one of those fields; buffer/base64 payloads are not supported.",
     );
   }
-  if (attachmentMedia.mediaUrls.length > 1) {
-    throw new Error(
-      "Mattermost send supports one attachment per message; split multiple mediaUrls or attachments[] entries into separate sends.",
-    );
-  }
-  return attachmentMedia.mediaUrls[0];
+  assertMattermostAttachmentCount(attachmentMedia.mediaUrls);
+  return attachmentMedia.mediaUrls;
 }
 
 type MattermostOutboundContext = Parameters<NonNullable<ChannelOutboundAdapter["sendText"]>>[0];
@@ -868,6 +865,7 @@ function createMattermostDeliveryProgressReporter(
 
 const mattermostOutbound: ChannelOutboundAdapter = {
   deliveryMode: "direct",
+  sendPayloadGroupsMedia: true,
   chunker: chunkTextForOutbound,
   chunkerMode: "markdown",
   textChunkLimit: MATTERMOST_LEGACY_TEXT_LIMIT,
@@ -879,6 +877,7 @@ const mattermostOutbound: ChannelOutboundAdapter = {
       text: true,
       media: true,
       payload: true,
+      silent: true,
       replyTo: true,
       thread: true,
       messageSendingHooks: true,
@@ -886,9 +885,6 @@ const mattermostOutbound: ChannelOutboundAdapter = {
   },
   presentationCapabilities: MATTERMOST_PRESENTATION_CAPABILITIES,
   renderPresentation: ({ payload, presentation }) => {
-    if (payload.mediaUrls && payload.mediaUrls.length > 1) {
-      return null;
-    }
     const { text, buttons } = resolveMattermostPresentation({
       text: payload.text,
       presentation,
@@ -918,19 +914,20 @@ const mattermostOutbound: ChannelOutboundAdapter = {
     const questionId = questionGatewayRuntime.readAskUserQuestionId(ctx.payload);
     const rawAttachmentText = readMattermostPayloadData(ctx.payload)?.attachmentText;
     const attachmentText = typeof rawAttachmentText === "string" ? rawAttachmentText : undefined;
-    if (buttons?.length || attachmentText !== undefined || questionId) {
-      const mediaUrl = resolvePayloadMediaUrls({
-        ...ctx.payload,
-        mediaUrl: ctx.payload.mediaUrl ?? ctx.mediaUrl,
-      })
-        .map((url) => url.trim())
-        .find(Boolean);
+    const mediaUrls = resolvePayloadMediaUrls({
+      ...ctx.payload,
+      mediaUrl: ctx.payload.mediaUrl ?? ctx.mediaUrl,
+    }).map((url) => url.trim()).filter(Boolean);
+    assertMattermostAttachmentCount(mediaUrls);
+    if (mediaUrls.length > 1 || buttons?.length || attachmentText !== undefined || questionId) {
+      const mediaUrl = mediaUrls[0];
       const result = await (
         await loadMattermostChannelRuntime()
       ).sendMessageMattermost(ctx.to, ctx.payload.text ?? ctx.text, {
         cfg: ctx.cfg,
         accountId: ctx.accountId ?? undefined,
         mediaUrl,
+        ...(mediaUrls.length > 1 ? { mediaUrls } : {}),
         mediaLocalRoots: ctx.mediaLocalRoots ?? ctx.mediaAccess?.localRoots,
         mediaReadFile: ctx.mediaReadFile ?? ctx.mediaAccess?.readFile,
         ...(ctx.mediaAccess?.workspaceDir ? { workspaceDir: ctx.mediaAccess.workspaceDir } : {}),
@@ -939,6 +936,11 @@ const mattermostOutbound: ChannelOutboundAdapter = {
         buttons: buttons?.length ? buttons : undefined,
         ...(questionId ? { questionId } : {}),
         attachmentText,
+        silent: ctx.silent,
+        signal: ctx.signal,
+        deliveryQueueId: ctx.deliveryQueueId,
+        deliveryPartIndex: ctx.deliveryPartIndex,
+        deliveryPartCount: ctx.deliveryPartCount,
         assertDirectAdapterHandoff: ctx.assertDirectAdapterHandoff,
         onPlatformSendDispatch: ctx.onPlatformSendDispatch,
         onDeliveryResult: createMattermostDeliveryProgressReporter(ctx.onDeliveryResult),
@@ -968,6 +970,8 @@ const mattermostOutbound: ChannelOutboundAdapter = {
       accountId,
       replyToId,
       threadId,
+      silent,
+      signal,
       deliveryQueueId,
       deliveryPartIndex,
       deliveryPartCount,
@@ -981,6 +985,8 @@ const mattermostOutbound: ChannelOutboundAdapter = {
         ).sendMessageMattermost(to, text, {
           cfg,
           accountId: accountId ?? undefined,
+          silent,
+          signal,
           replyToId: replyToId ?? (threadId != null ? String(threadId) : undefined),
           ...(deliveryQueueId
             ? { deliveryQueueId, deliveryPartIndex, deliveryPartCount }
@@ -1001,6 +1007,11 @@ const mattermostOutbound: ChannelOutboundAdapter = {
       accountId,
       replyToId,
       threadId,
+      silent,
+      signal,
+      deliveryQueueId,
+      deliveryPartIndex,
+      deliveryPartCount,
       assertDirectAdapterHandoff,
       onPlatformSendDispatch,
       onDeliveryResult,
@@ -1011,6 +1022,11 @@ const mattermostOutbound: ChannelOutboundAdapter = {
         ).sendMessageMattermost(to, text, {
           cfg,
           accountId: accountId ?? undefined,
+          silent,
+          signal,
+          deliveryQueueId,
+          deliveryPartIndex,
+          deliveryPartCount,
           mediaUrl,
           mediaLocalRoots: mediaLocalRoots ?? mediaAccess?.localRoots,
           mediaReadFile: mediaReadFile ?? mediaAccess?.readFile,

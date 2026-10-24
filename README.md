@@ -41,7 +41,7 @@ mkdir -p /tmp/openclaw/mattermost-custom
 npm run build
 npm pack --omit=dev --pack-destination /tmp/openclaw/mattermost-custom
 openclaw plugins install \
-  /tmp/openclaw/mattermost-custom/openclaw-mattermost-custom-2026.10.5.tgz --force
+  /tmp/openclaw/mattermost-custom/openclaw-mattermost-custom-2026.10.6.tgz --force
 ```
 
 Do not use `plugins install --link` or add this source checkout to
@@ -104,6 +104,14 @@ Compared with the official plugin, this build preserves:
 - Live `messages.inbound` debounce updates without replacing the Mattermost connection.
 - Native model/runtime confirmation with host validation and persisted-selection readback.
 - Backlog-aware text debounce with sender/thread isolation and bounded batches.
+- Explicit per-send silent delivery on servers supporting Mattermost's silent API.
+- Channel/sender tool policies through the published host's shared policy pipeline.
+- Up to ten ordered attachments on one post, including ordinary inbound replies.
+
+This artifact targets the published OpenClaw `2026.10.6` SDK and requires an
+OpenClaw host at least that version. Its Node contract follows that release:
+`>=24.22.1 <25 || >=26.12.1`. Development checks use Node `24.22.1`; this does
+not establish the runtime version of an installed Gateway.
 
 When `messages.statusReactions.enabled` is true, received posts show the configured
 acknowledgement, followed by event-driven thinking, tool, and compaction reactions.
@@ -275,7 +283,7 @@ Account settings override the channel-wide value. For an individual channel,
 deleted, cross-channel, or non-root posts retain the existing mention behavior;
 sender and channel access restrictions still apply.
 
-### Ingress and conversation origin links
+### Ingress and conversation links
 
 Deferred Mattermost ingress releases its lane so later input in that channel/thread
 can reach core while the earlier claim remains in the durable SQLite spool. Release
@@ -289,20 +297,16 @@ extend it. Batches stop at 12 posts or 50,000 text characters. The published SDK
 maximum wait (five debounce windows) still applies even if the backlog reader stalls
 or input keeps arriving. This does not enable debounce when its configured delay is zero.
 
-Admitted messages and verified bot-post interactions supply a Mattermost source
-permalink; threads use their native root. Thread slash callbacks use `root_id`.
-Flat slash invocations without a native source do not fabricate a link from their
-synthetic command ID. Links use the configured instance URL, including its subpath.
-
 OpenClaw 10.5 retires `conversationLink` from session storage and Gateway session
 rows, and passes only session identity to Control UI header accessories.
 `sessions.describe` cannot recover the former first-session launch link.
 The Web UI Mattermost origin shortcut is therefore unavailable on this build.
-The declared browser entry remains inert: it registers no accessory and performs
-no RPC reads. Restoring the shortcut would require a separate supported source
-of durable origin metadata. Existing inbound permalink metadata is retained for
-compatibility, but 10.5 does not persist or project it as a session launch link.
-Task-card child session links keep their existing purpose and behavior.
+The obsolete browser entry, manifest declaration, and unused inbound origin
+metadata have been removed. This reduces the candidate's declared Control UI
+capability surface; deployment must review that manifest change explicitly.
+Restoring the shortcut requires a separately designed durable origin source.
+Search result permalinks, authorized source-link hydration, native thread routing,
+and task-card child session links keep their existing purpose and behavior.
 
 ### Channel instructions and skill availability
 
@@ -343,6 +347,119 @@ quoted posts, and menu values do not become configured instructions.
 **A skill filter is not a security sandbox.** It controls skill availability and
 named skill invocation, not tool permissions or what an agent can accomplish
 using other tools. Existing sender and command authorization still applies.
+
+### Channel and sender tool policies
+
+The same effective account `groups` map also accepts the SDK's `tools` and
+`toolsBySender` fields:
+
+```json
+{
+  "channels": {
+    "mattermost": {
+      "groups": {
+        "*": { "tools": { "deny": ["exec"] } },
+        "cccccccccccccccccccccccccc": {
+          "tools": { "allow": ["read", "write"] },
+          "toolsBySender": {
+            "id:uuuuuuuuuuuuuuuuuuuuuuuuuu": { "allow": ["read"] }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Use stable Mattermost IDs with `id:` or `channel:mattermost:` keys. The shared
+resolver prefers channel-qualified IDs, then IDs, then other typed identities,
+then `"*"`. It checks sender policy before the same entry's `tools`, then falls
+back to the wildcard entry when no exact policy exists. An exact `tools: {}`
+is an explicit empty policy and stops that fallback. An empty allow list does
+not mean deny-all; use explicit `deny` rules for restrictions. These policies
+remain inside the host's global, agent, and runtime tool restrictions: a channel
+allow cannot restore a globally denied tool.
+
+Accounts inherit or replace the groups map using the published SDK's account
+rules. A nonempty account map replaces the channel-wide map. With multiple
+accounts an explicit empty account map also replaces it; the SDK preserves its
+legacy empty-map inheritance for a single configured account. Omitted policy
+fields preserve host behavior. Null policy objects and invalid field types are
+rejected. The shared schema still accepts legacy untyped sender keys, but the
+runtime resolver rejects them and requests `openclaw doctor --fix`; use typed
+keys in new configuration. Scheduled/internal sender-independent selection uses
+the host's `senderPolicyMode: "never"`. Skills remain a separate filter.
+
+### Inbound attachment size limit
+
+Each directly attached inbound file, including a video, uses the effective
+`channels.mattermost.mediaMaxMb` limit. An account's
+`channels.mattermost.accounts.<accountId>.mediaMaxMb` overrides the channel
+setting; accounts without an override inherit it. If neither is set,
+`agents.defaults.mediaMaxMb` applies, with an 8 MiB fallback when all are unset.
+The unit is MiB (1,048,576 bytes).
+
+For an explicit per-file ceiling of 1 GiB:
+
+```json
+{
+  "channels": {
+    "mattermost": {
+      "mediaMaxMb": 1024
+    }
+  }
+}
+```
+
+This raises the download/staging ceiling; it does not guarantee that a model
+can read a video or that its context and media-processing limits accept the
+file. Mattermost server and proxy upload limits still apply. Oversize inbound
+files retain their ordered metadata slots, and the agent-facing notice identifies
+the attachment position and effective byte limit; successfully downloaded
+siblings remain available. Other download failures retain the generic
+unavailable notice.
+
+Referenced attachment hydration keeps its separate aggregate cap of at most
+8 MiB and its existing file/time bounds, even when direct attachments allow
+1024 MiB. Outbound grouped-send budgets keep their existing behavior.
+
+### Silent sends and grouped attachments
+
+Message sends accept the host's per-send `silent: true` option. Outbound text,
+media and payload adapters carry it to `POST /posts?silent=true`; omitted or false
+keeps normal delivery. There is no account-wide silent default. Approval,
+question, and other interactive delivery remains normal unless that individual
+send explicitly requests silence. Mattermost 12 documents that silent posts stay
+visible and emit WebSocket events, while suppressing notifications and unread/
+mention increments. Only integration authors may request it; a human/PAT sender
+can receive HTTP 403. The plugin reports that rejection without retrying as a
+normal notification.
+
+For one post with multiple files, pass `mediaUrls` or `attachments` entries with
+supported media/path fields. Ordinary inbound reply collections use the same
+grouped sender. All authorized files upload in order before one post receives
+their ordered `file_ids`. The limit is ten files, with a combined byte budget
+of the smaller of the effective media limit and 20 MiB (20 MiB when no explicit
+limit exists). Single-file behavior retains its existing SDK limit and remote
+URL fallback. Grouped sends fail before post creation when any upload fails;
+they never silently create a partial attachment post. Local-root, SSRF,
+cancellation, and current sender checks apply between awaited operations.
+
+The first post carries the attachments, the first permitted Markdown text
+chunk, and supported presentation controls. Text overflow follows as text-only
+posts using the effective server/account limit and configured streaming chunk
+mode. Receipts preserve every known post identity, including when a later
+chunk fails. An accepted create with an unreadable/missing identity stops
+delivery without a blind create retry or deleting accepted attachments.
+Failed preparation can leave uploaded, unattached files: the verified provider
+file API has no standalone delete route, so cleanup remains server-managed.
+No cleanup REST endpoint or plugin capability was added.
+
+Signed delivery markers describe the actual post count when a single durable
+intent expands into caption overflow. For an already counted multi-payload
+intent that expands locally, markers are omitted rather than signing an
+incorrect batch count. Media unknown-send reconciliation remains unsupported;
+accepted receipts and accepted-without-ID failures keep their existing meaning.
 
 ### Native model and runtime picker
 
@@ -699,12 +816,15 @@ custom transports. Permanent rejections are not retried because their details
 mention transient errors; a dispatched post remains accepted if its sender
 retires while its response is in flight.
 
-The Control UI origin shortcut is disabled because the host retires
+The Control UI origin shortcut is unavailable because the host retires
 `conversationLink` from session storage and Gateway rows as well as removing
-`props.session`. The browser entry registers no accessory or reads.
+`props.session`. The subsequent porting audit removes the inert browser entry
+and unused metadata plumbing.
 Existing long-message limits, forms, commands, task cards and recovery behavior
 are preserved. The source comparison, decisions and validation are recorded in
-[the 10.5 upstream review](docs/upstream-2026.10.5.md).
+[the historical 10.5 upstream review](docs/upstream-2026.10.5.md); the current
+port inventory and cleanup decisions are in
+[the downstream porting audit](docs/porting-audit-2026.10.5.md).
 
 ### Previous OpenClaw 2026.10.4 adaptation
 
@@ -802,39 +922,6 @@ the published SDK omits declarations for several exported runtime subpaths, and
 this checkout also has existing type errors, including a task-card reader of
 the non-public `SessionEntry.lastRunId`. The runtime build checks actual SDK
 exports; tests and build success do not imply a clean TypeScript check.
-
-### Inbound attachment size limit
-
-Each directly attached inbound file, including a video, uses the effective
-`channels.mattermost.mediaMaxMb` limit. An account's
-`channels.mattermost.accounts.<accountId>.mediaMaxMb` overrides the channel
-setting; accounts without an override inherit it. If neither is set,
-`agents.defaults.mediaMaxMb` applies, with an 8 MiB fallback when all are unset.
-The unit is MiB (1,048,576 bytes).
-
-For an explicit per-file ceiling of 1 GiB:
-
-```json
-{
-  "channels": {
-    "mattermost": {
-      "mediaMaxMb": 1024
-    }
-  }
-}
-```
-
-This raises the download/staging ceiling; it does not guarantee that a model
-can read a video or that its context and media-processing limits accept the
-file. Mattermost server and proxy upload limits still apply. Oversize inbound
-files retain their ordered metadata slots, and the agent-facing notice identifies
-the attachment position and effective byte limit; successfully downloaded
-siblings remain available. Other download failures retain the generic
-unavailable notice.
-
-Referenced attachment hydration keeps its separate aggregate cap of at most
-8 MiB and its existing file/time bounds, even when direct attachments allow
-1024 MiB. Outbound grouped-send budgets keep their existing behavior.
 
 ## Docs
 

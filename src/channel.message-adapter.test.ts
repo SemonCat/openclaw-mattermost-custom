@@ -129,6 +129,14 @@ describe("mattermost channel message adapter", () => {
         payload: provePayload,
         text: () => undefined,
         media: () => undefined,
+        silent: async () => {
+          await requireTextSender(adapter)({
+            cfg: {}, to: "channel:team-1", text: "quiet", silent: true,
+          });
+          expect(sendMessageMattermostMock).toHaveBeenLastCalledWith(
+            "channel:team-1", "quiet", expect.objectContaining({ silent: true }),
+          );
+        },
         replyTo: () => undefined,
         thread: () => undefined,
         messageSendingHooks: () => {

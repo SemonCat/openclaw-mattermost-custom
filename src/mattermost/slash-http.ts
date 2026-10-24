@@ -1,4 +1,3 @@
-import { resolveMattermostConversationLink } from "./conversation-link.js";
 /**
  * HTTP callback handler for Mattermost slash commands.
  *
@@ -982,10 +981,6 @@ async function handleSlashCommandAsync(params: {
       Surface: "mattermost" as const,
       MessageSid: invocationSid,
       NativeChannelId: channelId,
-      ConversationLink: resolveMattermostConversationLink({
-        baseUrl: account.baseUrl,
-        threadRootId: rootId,
-      }),
       Timestamp: invocationTimestamp,
       WasMentioned: true,
       CommandAuthorized: commandAuthorized,

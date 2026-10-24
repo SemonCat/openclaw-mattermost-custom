@@ -31,6 +31,7 @@ describe("Mattermost custom plugin identity", () => {
     const manifest = readJson("./openclaw.plugin.json") as {
       id: string;
       icon?: string;
+      controlUi?: unknown;
       channels: string[];
       channelConfigs: { mattermost: { preferOver: string[] } };
     };
@@ -39,6 +40,7 @@ describe("Mattermost custom plugin identity", () => {
     expect(packageJson.private).toBe(true);
     expect(manifest.id).toBe("mattermost-custom");
     expect(manifest.icon).toBeUndefined();
+    expect(manifest.controlUi).toBeUndefined();
     expect(fs.readFileSync(new URL("./assets/icon.png", import.meta.url)).subarray(0, 8)).toEqual(
       Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
     );
@@ -54,7 +56,7 @@ describe("Mattermost custom plugin identity", () => {
     expect(packageJson.openclaw.setupEntry).toBe("./setup-entry.ts");
     expect(packageJson.openclaw.runtimeSetupEntry).toBe("./dist/setup-entry.js");
     expect(packageJson.openclaw.setupFeatures).toEqual({ configPromotion: true });
-    expect(packageJson.openclaw.install.minHostVersion).toBe(">=2026.10.5");
+    expect(packageJson.openclaw.install.minHostVersion).toBe(">=2026.10.6");
     expect(packageJson.openclaw.install.localPath).toBeUndefined();
     expect(packageJson.openclaw.install.defaultChoice).toBeUndefined();
     expect(packageJson.openclaw.install.allowInvalidConfigRecovery).toBeUndefined();
@@ -64,24 +66,24 @@ describe("Mattermost custom plugin identity", () => {
 
   it("aligns the artifact and host contracts with the validated published SDK", () => {
     expect(readJson("./package.json")).toMatchObject({
-      version: "2026.10.5",
-      devDependencies: { openclaw: "2026.10.5" },
-      peerDependencies: { openclaw: ">=2026.10.5" },
+      version: "2026.10.6",
+      devDependencies: { openclaw: "2026.10.6" },
+      peerDependencies: { openclaw: ">=2026.10.6" },
       openclaw: {
-        install: { minHostVersion: ">=2026.10.5" },
-        compat: { pluginApi: ">=2026.10.5" },
-        build: { openclawVersion: "2026.10.5", bundledDist: false },
+        install: { minHostVersion: ">=2026.10.6" },
+        compat: { pluginApi: ">=2026.10.6" },
+        build: { openclawVersion: "2026.10.6", bundledDist: false },
       },
     });
     expect(readJson("./package-lock.json")).toMatchObject({
-      version: "2026.10.5",
+      version: "2026.10.6",
       packages: {
         "": {
-          version: "2026.10.5",
-          devDependencies: { openclaw: "2026.10.5" },
-          peerDependencies: { openclaw: ">=2026.10.5" },
+          version: "2026.10.6",
+          devDependencies: { openclaw: "2026.10.6" },
+          peerDependencies: { openclaw: ">=2026.10.6" },
         },
-        "node_modules/openclaw": { version: "2026.10.5" },
+        "node_modules/openclaw": { version: "2026.10.6" },
       },
     });
   });

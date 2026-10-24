@@ -401,7 +401,11 @@ export function createMattermostClient(params: {
     if (typeof requestInit.body === "string" && !headers.has("Content-Type")) {
       headers.set("Content-Type", "application/json");
     }
-    const isMessagePost = path === "/posts" && requestInit.method?.toUpperCase() === "POST";
+    // Only the create endpoint (including its documented silent query) owns
+    // message dispatch evidence; other POST endpoints must not inherit it.
+    const isMessagePost =
+      (path === "/posts" || path === "/posts?silent=true") &&
+      requestInit.method?.toUpperCase() === "POST";
     const safeRetry = (requestInit.method ?? "GET").toUpperCase() === "GET" || retryRateLimit === true;
     const budgetMs = Math.min(30_000, resolveTimerTimeoutMs(requestInit.timeoutMs, requestTimeoutMs));
     const startedAt = Date.now();
@@ -958,6 +962,7 @@ export async function createMattermostPost(
     fileIds?: string[];
     props?: Record<string, unknown>;
     pendingPostId?: string;
+    silent?: boolean;
   },
 ): Promise<MattermostPost> {
   const payload: Record<string, unknown> = {
@@ -976,7 +981,9 @@ export async function createMattermostPost(
   if (params.pendingPostId) {
     payload.pending_post_id = params.pendingPostId;
   }
-  const post = await client.request<MattermostPost>("/posts", {
+  // The sender fences caller cancellation before dispatch. Let an initiated
+  // create settle so cancellation cannot discard its acceptance receipt.
+  const post = await client.request<MattermostPost>(params.silent === true ? "/posts?silent=true" : "/posts", {
     method: "POST",
     body: JSON.stringify(payload),
   });
@@ -1153,6 +1160,7 @@ export async function uploadMattermostFile(
     buffer: Buffer;
     fileName: string;
     contentType?: string;
+    signal?: AbortSignal;
   },
 ): Promise<MattermostFileInfo> {
   const form = new FormData();
@@ -1164,6 +1172,7 @@ export async function uploadMattermostFile(
   const headers = { Authorization: `Bearer ${client.token}` };
   const res = await client.fetchImpl(`${client.apiBaseUrl}/files`, {
     method: "POST",
+    signal: params.signal,
     headers,
     body: form,
   });

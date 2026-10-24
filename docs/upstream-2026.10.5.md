@@ -1,5 +1,9 @@
 # OpenClaw 2026.10.5 Mattermost adaptation
 
+Historical release adaptation record. Its source identities, decisions and
+validation describe that adaptation. Current retained ports and subsequent
+cleanup are tracked in [the porting audit](porting-audit-2026.10.5.md).
+
 Research date: 2026-10-20. Compared the complete official 10.4 and 10.5
 archives, the published npm manifests, consumed SDK facades, and release notes.
 The standalone development dependency is the exact published npm package,

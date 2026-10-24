@@ -28,7 +28,7 @@ describe("host-owned Mattermost continuation draft", () => {
     f.draft.push({ itemId: "requester:tool", kind: "tool", name: "exec", phase: "update", status: "running" });
     await vi.advanceTimersByTimeAsync(1500);
     expect(f.request.mock.calls.at(-1)?.[0]).toBe("/posts/retained-preview/patch");
-    expect(String(f.request.mock.calls.at(-1)?.[1]?.body)).toContain("Exec: running");
+    expect(String(f.request.mock.calls.at(-1)?.[1]?.body)).toContain("🛠️ Exec: running");
     for (let i = 0; i < 50; i++) f.draft.push({
       itemId: `child-${i}`, kind: "subagent", title: "Delegated work ".repeat(15), status: "running",
     });

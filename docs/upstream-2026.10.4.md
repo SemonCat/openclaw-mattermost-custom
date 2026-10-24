@@ -1,5 +1,9 @@
 # OpenClaw 2026.10.4 Mattermost adaptation
 
+Historical release adaptation record. Its source identities, decisions and
+validation describe that adaptation. Current retained ports and subsequent
+cleanup are tracked in [the porting audit](porting-audit-2026.10.5.md).
+
 Compared the complete official `v2026.10.3` and `v2026.10.4` tag archives,
 published package declarations, SDK export maps, and release notes before
 editing. The official Mattermost delta changes package declarations only.

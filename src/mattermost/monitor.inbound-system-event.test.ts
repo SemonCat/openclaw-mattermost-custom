@@ -903,7 +903,7 @@ describe("mattermost inbound user posts", () => {
       channels: {
         mattermost: {
           ...testConfig.channels?.mattermost,
-          streaming: { mode: "progress" },
+          streaming: { mode: "progress", progress: { toolProgress: true } },
         },
       },
     };
@@ -938,11 +938,27 @@ describe("mattermost inbound user posts", () => {
 
     await vi.waitFor(() => {
       expect(mockState.sendTypingIndicator).toHaveBeenCalledWith("chan-1", "root-1");
-      expect(draftStream.update).toHaveBeenCalled();
+      expect(draftStream.update.mock.calls.map(([text]) => String(text)).join("\n")).toContain("📖 Read");
     });
     expect(mockState.createMattermostDraftStream).toHaveBeenLastCalledWith(
       expect.objectContaining({ channelId: "chan-1", rootId: "root-1" }),
     );
+
+    emitAgentEvent({
+      runId: "restart-run-1",
+      mainSessionRestartRecovery: true,
+      stream: "item",
+      data: {
+        kind: "tool",
+        phase: "update",
+        itemId: "tool-2",
+        name: "exec",
+        status: "running",
+      },
+    });
+    await vi.waitFor(() => {
+      expect(draftStream.update.mock.calls.map(([text]) => String(text)).join("\n")).toContain("🛠️ Exec");
+    });
 
     emitAgentEvent({
       runId: "restart-run-1",
@@ -1799,8 +1815,8 @@ describe("mattermost inbound user posts", () => {
     expect(replyOptions?.allowProgressCallbacksWhenSourceDeliverySuppressed).toBe(true);
     expect(draftStream.clear).toHaveBeenCalled();
     const updates = draftStream.update.mock.calls.map((call) => String(call[0]));
-    expect(updates.at(-1)).toContain("Read");
-    expect(updates.at(-1)).toContain("Exec");
+    expect(updates.at(-1)).toContain("📖 Read");
+    expect(updates.at(-1)).toContain("🛠️ Exec");
     expect(updates.at(-1)).toContain("done");
     expect(updates.at(-1)).toContain("Checking");
     expect(updates.at(-1)).not.toContain("ThinkingChecking");

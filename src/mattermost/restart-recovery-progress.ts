@@ -333,6 +333,7 @@ function createMattermostRestartRecoveryRunUi(params: {
   });
   const progress = createChannelProgressDraftCompositor({
     entry: account.config,
+    toolIcons: true,
     mode: account.streamingMode,
     active: true,
     seed: `restart-recovery:${account.accountId}:${params.route.channelId}:${params.runId}`,
@@ -360,33 +361,41 @@ function createMattermostRestartRecoveryRunUi(params: {
       if (event.stream === "tool") {
         const name = readString(event.data.name);
         await progress.pushToolProgress(
-          buildChannelProgressDraftLineForEntry(account.config, {
-            event: "tool",
-            name,
-            phase: readString(event.data.phase),
-            toolCallId: readString(event.data.toolCallId),
-            itemId: readString(event.data.itemId),
-            args: readRecord(event.data.args),
-          }),
+          buildChannelProgressDraftLineForEntry(
+            account.config,
+            {
+              event: "tool",
+              name,
+              phase: readString(event.data.phase),
+              toolCallId: readString(event.data.toolCallId),
+              itemId: readString(event.data.itemId),
+              args: readRecord(event.data.args),
+            },
+            { toolIcons: true },
+          ),
           { toolName: name, startImmediately: true },
         );
         return;
       }
       if (event.stream === "item") {
         await progress.pushToolProgress(
-          buildChannelProgressDraftLineForEntry(account.config, {
-            event: "item",
-            itemKind: readString(event.data.kind),
-            meta: readString(event.data.meta),
-            name: readString(event.data.name),
-            title: readString(event.data.title),
-            status: readString(event.data.status),
-            phase: readString(event.data.phase),
-            summary: readString(event.data.summary),
-            toolCallId: readString(event.data.toolCallId),
-            itemId: readString(event.data.itemId),
-            progressText: readString(event.data.progressText),
-          }),
+          buildChannelProgressDraftLineForEntry(
+            account.config,
+            {
+              event: "item",
+              itemKind: readString(event.data.kind),
+              meta: readString(event.data.meta),
+              name: readString(event.data.name),
+              title: readString(event.data.title),
+              status: readString(event.data.status),
+              phase: readString(event.data.phase),
+              summary: readString(event.data.summary),
+              toolCallId: readString(event.data.toolCallId),
+              itemId: readString(event.data.itemId),
+              progressText: readString(event.data.progressText),
+            },
+            { toolIcons: true },
+          ),
           { startImmediately: true },
         );
       }

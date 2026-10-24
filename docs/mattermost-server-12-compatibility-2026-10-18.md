@@ -1,5 +1,9 @@
 # Mattermost Server 12.0.0 compatibility
 
+Dated server compatibility record for a separate server release artifact. The
+[plugin porting audit](porting-audit-2026.10.5.md) preserves this boundary and
+does not revalidate or change the server patch.
+
 Research date: 2026-10-18. This note evaluates the maintained
 `mattermost-custom` plugin and the native Mattermost dialog path against the
 latest stable Mattermost release available on that date.

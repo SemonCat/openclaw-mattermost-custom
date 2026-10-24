@@ -35,6 +35,7 @@ type SendMattermostMessage = (
     cfg: OpenClawConfig;
     accountId?: string;
     mediaUrl?: string;
+    mediaUrls?: readonly string[];
     mediaLocalRoots?: readonly string[];
     requireMediaUpload?: boolean;
     replyToId?: string;
@@ -155,13 +156,14 @@ export async function deliverMattermostReplyPayload(params: {
   const results: MattermostSendResult[] = [];
   const acceptedContents: string[] = [];
   const deliveryTarget = `channel:${params.channelId}`;
-  const sendAccepted = async (text: string, mediaUrl?: string) => {
+  const sendAccepted = async (text: string, mediaUrl?: string, mediaUrls?: readonly string[]) => {
     const result = await params.sendMessage(deliveryTarget, text, {
       cfg: params.cfg,
       accountId: params.accountId,
       ...(mediaUrl ? { mediaUrl, mediaLocalRoots } : {}),
+      ...(mediaUrls ? { mediaUrls, mediaLocalRoots, requireMediaUpload: true } : {}),
       ...(requiresMattermostMediaUpload(mediaUrl) ? { requireMediaUpload: true } : {}),
-      ...(results.length === 0 && reply.mediaUrls.length < 2 && buttons.length
+      ...(results.length === 0 && buttons.length
         ? { buttons }
         : {}),
       ...(results.length === 0 && questionId ? { questionId } : {}),
@@ -175,14 +177,19 @@ export async function deliverMattermostReplyPayload(params: {
   };
   let outcome: Exclude<MattermostReplyDeliveryOutcome, "reasoning_skipped">;
   try {
-    outcome = await deliverTextOrMediaReply({
-      payload: params.payload,
-      text: reply.text,
-      chunkText: (value) =>
-        params.core.channel.text.chunkMarkdownTextWithMode(value, params.textLimit, chunkMode),
-      sendText: sendAccepted,
-      sendMedia: ({ mediaUrl, caption }) => sendAccepted(caption ?? "", mediaUrl),
-    });
+    if (reply.mediaUrls.length > 1) {
+      await sendAccepted(reply.text, undefined, reply.mediaUrls);
+      outcome = "media";
+    } else {
+      outcome = await deliverTextOrMediaReply({
+        payload: params.payload,
+        text: reply.text,
+        chunkText: (value) =>
+          params.core.channel.text.chunkMarkdownTextWithMode(value, params.textLimit, chunkMode),
+        sendText: sendAccepted,
+        sendMedia: ({ mediaUrl, caption }) => sendAccepted(caption ?? "", mediaUrl),
+      });
+    }
   } catch (error: unknown) {
     const failedPartial = isChannelPartialDeliveryError(error) ? error.deliveryResult : undefined;
     if (results.length === 0 && failedPartial?.visibleReplySent !== true) {

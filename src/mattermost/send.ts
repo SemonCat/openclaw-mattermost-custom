@@ -1,7 +1,11 @@
 import { createHash, createHmac } from "node:crypto";
 import { resolveChannelMediaMaxBytes } from "openclaw/plugin-sdk/account-helpers";
 import type { ChannelOutboundContext } from "openclaw/plugin-sdk/channel-contract";
-import { createChannelPartialDeliveryError } from "openclaw/plugin-sdk/channel-inbound";
+import {
+  createAcceptedChannelDeliveryResult,
+  createChannelPartialDeliveryError,
+  isChannelPartialDeliveryError,
+} from "openclaw/plugin-sdk/channel-inbound";
 // Mattermost plugin module implements send behavior.
 import {
   createMessageReceiptFromOutboundResults,
@@ -15,6 +19,7 @@ import { pruneMapToMaxSize } from "openclaw/plugin-sdk/collection-runtime";
 import { resolveMarkdownTableMode } from "openclaw/plugin-sdk/markdown-table-runtime";
 import { extensionForMime } from "openclaw/plugin-sdk/media-mime";
 import { requireRuntimeConfig } from "openclaw/plugin-sdk/plugin-config-runtime";
+import { chunkMarkdownTextWithMode, resolveChunkMode } from "openclaw/plugin-sdk/reply-chunking";
 import { isPrivateNetworkOptInEnabled } from "openclaw/plugin-sdk/ssrf-runtime";
 import {
   normalizeLowercaseStringOrEmpty,
@@ -24,6 +29,10 @@ import { convertMarkdownTables, FormatCapabilityProfile } from "openclaw/plugin-
 import { getMattermostRuntime } from "../runtime.js";
 import { resolveMattermostAccount } from "./accounts.js";
 import { createMattermostPostWithButtonFallback } from "./button-delivery.js";
+import {
+  assertMattermostAttachmentCount,
+  MATTERMOST_GROUPED_MEDIA_MAX_BYTES,
+} from "./attachment-limits.js";
 import {
   detectMattermostBlocksSupport,
   resolveMattermostButtonFormat,
@@ -63,13 +72,14 @@ import { renderQuestionElements } from "./form-schema.js";
 
 type MattermostSendOpts = Pick<
   ChannelOutboundContext,
-  "assertDirectAdapterHandoff" | "onPlatformSendDispatch"
+  "assertDirectAdapterHandoff" | "onPlatformSendDispatch" | "signal" | "silent"
 > & {
   cfg: OpenClawConfig;
   botToken?: string;
   baseUrl?: string;
   accountId?: string;
   mediaUrl?: string;
+  mediaUrls?: readonly string[];
   mediaLocalRoots?: readonly string[];
   mediaReadFile?: (filePath: string) => Promise<Buffer>;
   workspaceDir?: string;
@@ -441,6 +451,7 @@ type MattermostSendContext = {
   cfg: OpenClawConfig;
   accountId: string;
   client: MattermostClient;
+  questionFinalizationClient?: MattermostClient;
   channelId: string;
   mediaMaxBytes?: number;
 };
@@ -475,11 +486,19 @@ async function resolveMattermostSendContext(
   }
 
   // Keep lookup, DM creation, and delivery on the same account transport policy.
-  const client = createMattermostClient({
+  const transport = {
     baseUrl,
     botToken: token,
     allowPrivateNetwork: isPrivateNetworkOptInEnabled(account.config),
-    assertRequestCurrent: opts.assertDirectAdapterHandoff,
+  };
+  const client = createMattermostClient({
+    ...transport,
+    assertRequestCurrent: opts.signal || opts.assertDirectAdapterHandoff
+      ? () => {
+          opts.signal?.throwIfAborted();
+          opts.assertDirectAdapterHandoff?.();
+        }
+      : undefined,
   });
   // Build retry options from account config, allowing opts to override
   const accountRetryConfig: CreateDmChannelRetryOptions | undefined = account.config.dmChannelRetry
@@ -517,6 +536,11 @@ async function resolveMattermostSendContext(
     cfg,
     accountId: account.accountId,
     client,
+    // Question retirement outlives this send. Keep account/network policy and
+    // normal ambient authority checks, without retaining its operation fence.
+    ...(opts.questionId
+      ? { questionFinalizationClient: createMattermostClient(transport) }
+      : {}),
     channelId,
     mediaMaxBytes: resolveChannelMediaMaxBytes({
       cfg,
@@ -533,7 +557,11 @@ export async function sendMessageMattermost(
 ): Promise<MattermostSendResult> {
   const core = getCore();
   const logger = core.logging.getChildLogger({ module: "mattermost" });
-  const { cfg, accountId, client, channelId, mediaMaxBytes } =
+  const mediaUrls = (opts.mediaUrls?.length ? opts.mediaUrls : [opts.mediaUrl ?? ""])
+    .map((url) => url.trim()).filter(Boolean);
+  assertMattermostAttachmentCount(mediaUrls);
+  opts.signal?.throwIfAborted();
+  const { cfg, accountId, client, questionFinalizationClient, channelId, mediaMaxBytes } =
     await resolveMattermostSendContext(to, opts);
   client.assertRequestCurrent?.();
   let props = opts.props;
@@ -584,43 +612,45 @@ export async function sendMessageMattermost(
       legacyButtonFallbackProps = buildButtonProps({ ...buttonParams, format: "legacy" });
     }
   }
-  props = withMattermostDeliveryMarker(props, {
-    queueId: opts.deliveryQueueId,
-    channelId,
-    rootId: opts.replyToId,
-    deliveryPartIndex: opts.deliveryPartIndex,
-    deliveryPartCount: opts.deliveryPartCount,
-  });
-  legacyButtonFallbackProps = withMattermostDeliveryMarker(legacyButtonFallbackProps, {
-    queueId: opts.deliveryQueueId,
-    channelId,
-    rootId: opts.replyToId,
-    deliveryPartIndex: opts.deliveryPartIndex,
-    deliveryPartCount: opts.deliveryPartCount,
-  });
   let message = normalizeOptionalString(text) ?? "";
   let fileIds: string[] | undefined;
   let uploadError: Error | undefined;
-  const mediaUrl = opts.mediaUrl?.trim();
-  if (mediaUrl) {
+  const grouped = mediaUrls.length > 1;
+  // Bound the complete group as well as each SDK media read. Single-file sends
+  // retain their existing SDK default/explicit limit and URL fallback.
+  let remainingBytes = grouped
+    ? Math.min(mediaMaxBytes ?? MATTERMOST_GROUPED_MEDIA_MAX_BYTES, MATTERMOST_GROUPED_MEDIA_MAX_BYTES)
+    : mediaMaxBytes;
+  for (const mediaUrl of mediaUrls) {
     try {
+      client.assertRequestCurrent?.();
+      if (remainingBytes !== undefined && remainingBytes <= 0) {
+        throw new Error("Mattermost attachment aggregate byte limit exceeded");
+      }
       const media = await loadOutboundMediaFromUrl(mediaUrl, {
-        maxBytes: mediaMaxBytes,
+        maxBytes: remainingBytes,
         mediaLocalRoots: opts.mediaLocalRoots,
         mediaReadFile: opts.mediaReadFile,
         workspaceDir: opts.workspaceDir,
       });
+      client.assertRequestCurrent?.();
+      if (remainingBytes !== undefined && media.buffer.length > remainingBytes) {
+        throw new Error("Mattermost attachment aggregate byte limit exceeded");
+      }
       const fileInfo = await uploadMattermostFile(client, {
         channelId,
         buffer: media.buffer,
         fileName: media.fileName ?? `upload${extensionForMime(media.contentType) ?? ""}`,
         contentType: media.contentType ?? undefined,
+        signal: opts.signal,
       });
-      fileIds = [fileInfo.id];
+      client.assertRequestCurrent?.();
+      (fileIds ??= []).push(fileInfo.id);
+      if (remainingBytes !== undefined) remainingBytes -= media.buffer.length;
     } catch (err) {
       client.assertRequestCurrent?.();
       uploadError = err instanceof Error ? err : new Error(String(err));
-      if (opts.requireMediaUpload || mediaMaxBytes !== undefined) {
+      if (grouped || opts.requireMediaUpload || mediaMaxBytes !== undefined) {
         throw new Error(`Mattermost media upload failed: ${uploadError.message}`, {
           cause: err,
         });
@@ -652,73 +682,106 @@ export async function sendMessageMattermost(
     throw new Error("Mattermost message is empty");
   }
 
-  client.assertRequestCurrent?.();
-  try {
-    await opts.onPlatformSendDispatch?.();
-  } catch (error) {
-    client.assertRequestCurrent?.();
-    throw error;
-  }
-  const created = await createMattermostPostWithButtonFallback({
-    client,
-    post: {
-      channelId,
-      message,
-      rootId: opts.replyToId,
-      fileIds,
-      props,
-    },
-    legacyProps: legacyButtonFallbackProps,
-    warn: (warning) => logger.warn?.(warning),
+  const chunks = grouped && message
+    ? chunkMarkdownTextWithMode(
+        message,
+        resolveMattermostTextLimit({
+          baseUrl: client.baseUrl,
+          textChunkLimit: resolveMattermostAccount({ cfg, accountId }).textChunkLimit,
+        }),
+        resolveChunkMode(cfg, "mattermost", accountId),
+      )
+    : [message];
+  const results: MattermostSendResult[] = [];
+  // A host-counted multi-payload batch cannot safely be renumbered locally.
+  // Media reconciliation is unsupported; omit markers for that nested fanout
+  // rather than sign a false total. A single intent can describe all its parts.
+  const canMark = chunks.length === 1 ||
+    ((opts.deliveryPartIndex ?? 0) === 0 && (opts.deliveryPartCount ?? 1) === 1);
+  const delivery = () => createAcceptedChannelDeliveryResult({
+    results: results.map((result) => ({ receipt: result.receipt })),
+    kind: "media",
+    ...(opts.replyToId ? { replyToId: opts.replyToId } : {}),
+    content: results.map((result) => result.content).filter(Boolean).join("\n"),
   });
-  const post = created.post;
-  props = created.props;
-
-  const messageId = post.id;
-  const receipt = createMattermostSendReceipt({
-    messageId,
-    channelId,
-    kind: resolveMattermostReceiptKind({
-      fileIds,
-      buttons: opts.buttons,
-      props,
-    }),
-    replyToId: opts.replyToId,
-  });
-  const result: MattermostSendResult = {
-    messageId,
-    channelId,
-    receipt,
-    content: post.message ?? message,
-  };
   try {
-    registerMattermostQuestionDelivery({
-      accountId,
-      client,
-      post: post.props == null && props ? { ...post, props } : post,
-      questionId: opts.questionId,
-    });
-  } catch {
-    // The provider already accepted the post. Terminal-control bookkeeping must
-    // not turn that accepted delivery into a retryable failure or duplicate it.
-    logger.warn?.("mattermost send: question finalization registration failed");
-  }
-  try {
-    // Core must learn the provider identity before local bookkeeping can fail;
-    // preserve the receipt if either post-send step rejects to prevent a duplicate retry.
-    await opts.onDeliveryResult?.(result);
-    recordMattermostOutboundActivity(accountId);
+    for (const [index, chunk] of chunks.entries()) {
+      client.assertRequestCurrent?.();
+      try {
+        await opts.onPlatformSendDispatch?.();
+      } catch (error) {
+        client.assertRequestCurrent?.();
+        throw error;
+      }
+      const marker = {
+        queueId: canMark ? opts.deliveryQueueId : undefined,
+        channelId,
+        rootId: opts.replyToId,
+        deliveryPartIndex: chunks.length > 1 ? index : opts.deliveryPartIndex,
+        deliveryPartCount: chunks.length > 1 ? chunks.length : opts.deliveryPartCount,
+      };
+      const partProps = withMattermostDeliveryMarker(index === 0 ? props : undefined, marker);
+      const created = await createMattermostPostWithButtonFallback({
+        client,
+        post: {
+          channelId,
+          message: chunk,
+          rootId: opts.replyToId,
+          fileIds: index === 0 ? fileIds : undefined,
+          props: partProps,
+          silent: opts.silent,
+        },
+        legacyProps: index === 0 && legacyButtonFallbackProps
+          ? withMattermostDeliveryMarker(legacyButtonFallbackProps, marker)
+          : undefined,
+        warn: (warning) => logger.warn?.(warning),
+      });
+      const post = created.post;
+      const receipt = createMattermostSendReceipt({
+        messageId: post.id,
+        channelId,
+        kind: resolveMattermostReceiptKind({
+          fileIds: index === 0 ? fileIds : undefined,
+          buttons: index === 0 ? opts.buttons : undefined,
+          props: index === 0 ? props : undefined,
+        }),
+        replyToId: opts.replyToId,
+      });
+      const result: MattermostSendResult = {
+        messageId: post.id,
+        channelId,
+        receipt,
+        content: post.message ?? chunk,
+      };
+      results.push(result);
+      try {
+        registerMattermostQuestionDelivery({
+          accountId,
+          client: questionFinalizationClient ?? client,
+          post: post.props == null && created.props ? { ...post, props: created.props } : post,
+          questionId: index === 0 ? opts.questionId : undefined,
+        });
+      } catch {
+        // Provider acceptance must survive fallible terminal-control bookkeeping.
+        logger.warn?.("mattermost send: question finalization registration failed");
+      }
+      await opts.onDeliveryResult?.(result);
+      recordMattermostOutboundActivity(accountId);
+    }
   } catch (error: unknown) {
-    // The provider post is already durable. Preserve its identity so callers do not
-    // retry and duplicate the visible message when local bookkeeping fails afterward.
-    throw createChannelPartialDeliveryError(error, {
-      messageIds: listMessageReceiptPlatformIds(receipt),
-      receipt,
-      visibleReplySent: true,
-      content: result.content,
-    });
+    const partial = isChannelPartialDeliveryError(error) ? error.deliveryResult : undefined;
+    if (!results.length) throw error;
+    throw createChannelPartialDeliveryError(error, createAcceptedChannelDeliveryResult({
+      results: results.map((result) => ({ receipt: result.receipt })),
+      deliveryResults: partial ? [partial] : [],
+      kind: grouped ? "media" : resolveMattermostReceiptKind({ fileIds, buttons: opts.buttons, props }),
+      ...(opts.replyToId ? { replyToId: opts.replyToId } : {}),
+      content: [...results.map((result) => result.content), partial?.content].filter(Boolean).join("\n"),
+    }));
   }
-  return result;
+  if (results.length === 1) return results[0]!;
+  const accepted = delivery();
+  return { ...results[0]!, receipt: accepted.receipt!, content: accepted.content ?? "" };
 }
 
 function resolveMattermostUnknownSendRootId(
@@ -765,13 +828,11 @@ export async function reconcileMattermostUnknownSend(
       retryable: false,
     };
   }
-  const { accountId, token, baseUrl, channelId, allowPrivateNetwork } =
-    await resolveMattermostSendContext(ctx.to, {
-      cfg: ctx.cfg,
-      accountId: ctx.accountId ?? undefined,
-    });
-  const client = createMattermostClient({ baseUrl, botToken: token, allowPrivateNetwork });
-  const botUser = await resolveBotUser(baseUrl, token, allowPrivateNetwork);
+  const { accountId, client, channelId } = await resolveMattermostSendContext(ctx.to, {
+    cfg: ctx.cfg,
+    accountId: ctx.accountId ?? undefined,
+  });
+  const botUser = await resolveBotUser(client);
   const rootId = resolveMattermostUnknownSendRootId(ctx);
   const searchStartedAt = ctx.platformSendStartedAt ?? ctx.enqueuedAt;
   const since = Math.max(1, Math.floor(searchStartedAt - MATTERMOST_RECONCILE_LOOKBACK_MS));

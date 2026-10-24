@@ -1,5 +1,9 @@
 # OpenClaw 2026.10.1 Mattermost adaptation
 
+Historical release adaptation record. Its source identities, decisions and
+validation describe that adaptation. Current retained ports and subsequent
+cleanup are tracked in [the porting audit](porting-audit-2026.10.5.md).
+
 Compared the official `v2026.9.8` and `v2026.10.1` tags and validated runtime
 imports against the published `openclaw@2026.10.1` npm dependency. This review
 covers the standalone Mattermost plugin; it does not install or restart a Gateway.

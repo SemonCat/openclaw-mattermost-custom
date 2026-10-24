@@ -329,7 +329,7 @@ describe("Mattermost question interactions", () => {
 });
 
 it.each(["bot", "foreign", undefined])(
-  "generic interaction source link requires verified bot post author %s",
+  "preserves generic interaction routing without retired origin metadata for author %s",
   async (author) => {
     vi.clearAllMocks();
     mocks.createHandler.mockImplementation(() => async () => {});
@@ -371,12 +371,11 @@ it.each(["bot", "foreign", undefined])(
       expect.objectContaining({
         ctxPayload: expect.objectContaining({
           MessageSid: `interaction:${postId}:custom`,
-          ConversationLink:
-            author === "bot"
-              ? { url: `https://chat.example/mm/_redirect/pl/${rootId}`, label: "Mattermost" }
-              : undefined,
+          NativeChannelId: "chan-1",
+          MessageThreadId: rootId,
         }),
       }),
     );
+    expect(dispatch.mock.calls[0][0].ctxPayload).not.toHaveProperty("ConversationLink");
   },
 );

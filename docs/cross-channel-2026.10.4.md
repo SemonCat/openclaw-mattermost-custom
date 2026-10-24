@@ -1,5 +1,9 @@
 # OpenClaw 2026.10.4 跨 channel 移植評估
 
+Historical research record. Current implementation and candidate status are
+superseded by [the porting audit](porting-audit-2026.10.5.md); original source
+evidence and research conclusions are preserved below.
+
 研究日期：2026-10-16。比較官方 `v2026.10.3` 與 `v2026.10.4` 的完整
 source archives，再對照目前 standalone Mattermost plugin。這份評估包含
 10.4 的新增差異，以及先前已有、目前仍值得移植的能力。

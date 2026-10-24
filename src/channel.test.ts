@@ -894,9 +894,9 @@ describe("mattermostPlugin", () => {
     it.each([
       ["buffer attachments", { buffer: "cmVwb3J0" }, "buffer/base64 payloads"],
       [
-        "multiple attachments",
-        { mediaUrls: ["https://example.com/one.png", "https://example.com/two.png"] },
-        "supports one attachment per message",
+        "too many attachments",
+        { mediaUrls: Array.from({ length: 11 }, (_, i) => `https://example.com/${i}.png`) },
+        "at most 10 attachments",
       ],
     ])("rejects unsupported %s before provider dispatch", async (_label, extraParams, error) => {
       const prepareSendPayload = mattermostPlugin.actions?.prepareSendPayload;
@@ -1589,11 +1589,10 @@ describe("mattermostPlugin", () => {
       expect(options.requireMediaUpload).toBeUndefined();
     });
 
-    it("rejects multiple Mattermost send attachments instead of dropping extras", async () => {
+    it("groups multiple Mattermost send attachments instead of dropping extras", async () => {
       const cfg = createMattermostTestConfig();
 
-      await expect(
-        runMattermostMessageAction(
+      await runMattermostMessageAction(
           createMattermostActionContext({
             action: "send",
             params: {
@@ -1605,9 +1604,9 @@ describe("mattermostPlugin", () => {
             accountId: "default",
             mediaLocalRoots: ["/tmp/workspace"],
           }),
-        ),
-      ).rejects.toThrow("supports one attachment per message");
-      expect(sendMessageMattermostMock).not.toHaveBeenCalled();
+        );
+      const options = expectSingleMattermostSend("channel:CHAN1", "reports");
+      expect(options.mediaUrls).toEqual(["/tmp/workspace/one.md", "/tmp/workspace/two.md"]);
     });
 
     it.each(["buffer", "base64"] as const)(
@@ -2137,7 +2136,7 @@ describe("mattermostPlugin", () => {
       expect(options.requireMediaUpload).toBe(true);
     });
 
-    it("keeps multi-media presentation payloads on the text/media fallback path", async () => {
+    it("keeps controls on the grouped multi-media presentation payload", async () => {
       const renderPresentation = requireMattermostRenderPresentation();
       const presentation = {
         blocks: [
@@ -2162,7 +2161,10 @@ describe("mattermostPlugin", () => {
             payload: { presentation },
           },
         }),
-      ).toBeNull();
+      ).toMatchObject({
+        mediaUrls: ["https://example.com/1.png", "https://example.com/2.png"],
+        channelData: { mattermost: { presentationButtons: [[expect.objectContaining({ text: "Open" })]] } },
+      });
     });
 
     it("chunks outbound text without requiring Mattermost runtime initialization", () => {

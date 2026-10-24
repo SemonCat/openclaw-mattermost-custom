@@ -11,6 +11,7 @@ type MattermostPostCreateInput = {
   rootId?: string;
   fileIds?: string[];
   props?: Record<string, unknown>;
+  silent?: boolean;
 };
 
 /**

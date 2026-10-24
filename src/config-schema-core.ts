@@ -16,8 +16,6 @@ import { buildSecretInputSchema } from "./secret-input.js";
 const MattermostGroupSchema = buildGroupEntrySchema({
   requireMentionInBotThreads: z.boolean().optional(),
 }).omit({
-  tools: true,
-  toolsBySender: true,
   enabled: true,
   allowFrom: true,
 });

@@ -1,5 +1,9 @@
 # OpenClaw 2026.10.1 跨 channel 移植評估
 
+Historical research record. Current implementation and candidate status are
+superseded by [the porting audit](porting-audit-2026.10.5.md); original source
+evidence and research conclusions are preserved below.
+
 研究日期：2026-10-11。比較官方 `v2026.9.8` 與 `v2026.10.1` 的
 Slack、Telegram、Discord 原始碼及測試，再對照本 repository 的 Mattermost
 實作。第一、二項已在 standalone plugin 實作並以 published SDK 驗證；

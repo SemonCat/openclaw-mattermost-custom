@@ -1,7 +1,6 @@
 {
   "id": "mattermost-custom",
   "categories": ["channels"],
-  "controlUi": { "entry": "./dist/control-ui/index.js" },
   "doctorContract": {
     "configRepair": true
   },

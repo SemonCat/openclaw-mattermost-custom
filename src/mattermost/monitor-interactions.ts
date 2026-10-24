@@ -244,12 +244,6 @@ export function registerMattermostInteractions(params: {
         senderId: button.userId,
         postId: sourcePostId,
         threadRootId: button.post.root_id,
-        // Historical callback rows lack author evidence: keep dispatch/recovery,
-        // but only expose a link for a verified native bot-authored source.
-        suppressConversationLink:
-          button.post.id !== button.postId ||
-          button.post.channel_id !== button.channelId ||
-          button.post.user_id !== monitor.botUserId,
         dropLabel: "interaction dispatch",
       });
       if (!eventPlan) {
