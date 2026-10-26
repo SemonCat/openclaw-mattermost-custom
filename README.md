@@ -764,9 +764,11 @@ stream stops that path rather than retrying and risking duplicate posts.
 ### Optional companion WebSocket previews
 
 The default preview transport remains REST. To add faster web previews, build
-and install the separate `mattermost-plugin-openclaw-stream` server/web plugin
-on Mattermost 12+, configure its **Allowed Mattermost bot IDs** with the channel
-bot's user ID, and enable the plugin. Then opt in on OpenClaw:
+the `openclaw-stream` server/web plugin from [companion/](companion/README.md)
+in this repository and install its separate Mattermost artifact on Mattermost
+12+. Configure its **Allowed Mattermost bot IDs** with the channel bot's user ID
+and enable the plugin. The companion source shares this Git repository but is
+not included in the root OpenClaw npm artifact. Then opt in on OpenClaw:
 
 ```json
 {

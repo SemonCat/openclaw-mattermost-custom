@@ -1,0 +1,23 @@
+{
+  "id": "openclaw-stream",
+  "name": "OpenClaw Stream",
+  "version": "0.1.0",
+  "description": "Low-latency web previews for OpenClaw Mattermost replies.",
+  "min_server_version": "12.0.0",
+  "server": {
+    "executables": {
+      "linux-amd64": "server/dist/plugin-linux-amd64",
+      "linux-arm64": "server/dist/plugin-linux-arm64",
+      "darwin-amd64": "server/dist/plugin-darwin-amd64",
+      "darwin-arm64": "server/dist/plugin-darwin-arm64"
+    }
+  },
+  "webapp": {"bundle_path": "webapp/dist/main.js"},
+  "settings_schema": {
+    "header": "Only configured OpenClaw Mattermost bot IDs can publish transient text snapshots.",
+    "footer": "The post message remains authoritative for clients without the web app.",
+    "settings": [
+      {"key": "AllowedBotIDs", "display_name": "Allowed Mattermost bot IDs", "type": "text", "help_text": "Comma-separated Mattermost bot user IDs authorized to publish OpenClaw stream snapshots. Empty denies all publishers.", "placeholder": "", "default": ""}
+    ]
+  }
+}

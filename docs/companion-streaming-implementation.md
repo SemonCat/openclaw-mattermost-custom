@@ -49,8 +49,8 @@ boundaries.
 
 ## Tasks
 
-1. Build the independent server/web companion in the sibling
-   `mattermost-plugin-openclaw-stream` checkout.
+1. Build the independent server/web companion from
+   [`companion/`](../companion/README.md) in this Git repository.
    Acceptance: authorized snapshots render; foreign users/posts are rejected;
    sequences, expiry, close, reconnect, and bounded state have tests.
    Verify: Go tests, web tests/typecheck, and a self-contained plugin package.
@@ -67,8 +67,9 @@ boundaries.
    Acceptance: independent review findings are resolved against real code;
    deployment instructions preserve explicit production installation permission.
 
-The channel and companion are separate writing scopes. Root owns the contract,
-security decisions, channel changes, cross-boundary tests, and final integration.
+The channel and companion have separate runtime and artifact boundaries within
+this Git repository. Root owns the contract, security decisions, channel changes,
+cross-boundary tests, and final integration.
 
 ## Channel validation
 
@@ -88,9 +89,13 @@ security decisions, channel changes, cross-boundary tests, and final integration
 
 ## Companion and real-server validation
 
-The independent source checkout is `../mattermost-plugin-openclaw-stream`.
-Its `openclaw-stream` 0.1.0 package contains Linux amd64/arm64 and macOS
-amd64/arm64 server binaries plus the web bundle. Go tests, 12 web tests,
+The companion's maintained source is [`companion/`](../companion/README.md) in
+this Git repository. From the repository root, run `cd companion` and follow
+its build and verification commands. It produces a separate Mattermost artifact
+at `companion/build/openclaw-stream-0.1.0.tar.gz`; the root OpenClaw npm package
+does not include the companion. Its `openclaw-stream` 0.1.0 package contains
+Linux amd64/arm64 and macOS amd64/arm64 server binaries plus the web bundle.
+Go tests, 12 web tests,
 TypeScript checking, package construction, and an independent Codex autoreview
 through P2 passed. Both independent reviews returned `scoped-clean`.
 
@@ -124,12 +129,18 @@ The compact, credential-free receipt is
 review reports, screenshots, and packages are under
 `/tmp/openclaw/companion-local-20261026/`.
 
-Artifact SHA-256:
+Historical artifact SHA-256 from the original local validation and subsequent
+deployment:
 
 ```text
 86560d5151f75354cecc1d4ceee8914a002bc0aaa9cc19782a6e802a7f38d0b2  openclaw-mattermost-custom-2026.10.7.tgz
 3dd023754043ca064e6cdfdff32ba9fcdf0f4126f2a2bbcd035e7370df237f1c  openclaw-stream-0.1.0.tar.gz
 ```
+
+These identify the original tested and deployed archives. They are not expected
+hashes for a rebuild from `companion/`: source relocation, the new Go module
+path, and the build toolchain can change binary and archive hashes without a
+runtime protocol change. The in-repository build has its own artifact identity.
 
 ## Acceptance boundary
 

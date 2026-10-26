@@ -1,0 +1,12 @@
+{
+  "name": "openclaw-stream-webapp",
+  "private": true,
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "npm run build && node --test src/stream-state.test.cjs",
+    "typecheck": "tsc --project tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}
