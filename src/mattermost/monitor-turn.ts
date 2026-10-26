@@ -249,6 +249,7 @@ export async function dispatchMattermostInboundTurn(
         }),
         beforeCreatePost: taskProgressCard.settleBeforeResultPostCreate,
         throttleMs: 1200,
+        companion: account.config.streaming?.transport === "companion",
         maxChars: textLimit,
         chunkText: (value) =>
           core.channel.text.chunkMarkdownTextWithMode(

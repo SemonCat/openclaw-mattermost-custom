@@ -3,6 +3,22 @@ import { describe, expect, it } from "vitest";
 import { MattermostConfigSchema } from "./config-schema-core.js";
 
 describe("MattermostConfigSchema", () => {
+  it.each([undefined, "rest", "companion"])("accepts preview transport %s without inserting a default", (transport) => {
+    const input = transport === undefined ? {} : { transport };
+    const result = MattermostConfigSchema.parse({
+      streaming: input,
+      accounts: { work: { streaming: input } },
+    });
+    expect(result.streaming).toEqual(input);
+    expect(result.accounts?.work?.streaming).toEqual(input);
+  });
+
+  it.each([null, true, "native", "websocket"])("rejects invalid preview transport %s", (transport) => {
+    expect(MattermostConfigSchema.safeParse({ streaming: { transport } }).success).toBe(false);
+    expect(MattermostConfigSchema.safeParse({
+      accounts: { work: { streaming: { transport } } },
+    }).success).toBe(false);
+  });
   it("accepts SecretRef botToken at top-level", () => {
     const result = MattermostConfigSchema.safeParse({
       botToken: { source: "env", provider: "default", id: "MATTERMOST_BOT_TOKEN" },

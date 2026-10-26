@@ -41,7 +41,7 @@ mkdir -p /tmp/openclaw/mattermost-custom
 npm run build
 npm pack --omit=dev --pack-destination /tmp/openclaw/mattermost-custom
 openclaw plugins install \
-  /tmp/openclaw/mattermost-custom/openclaw-mattermost-custom-2026.10.6.tgz --force
+  /tmp/openclaw/mattermost-custom/openclaw-mattermost-custom-2026.10.7.tgz --force
 ```
 
 Do not use `plugins install --link` or add this source checkout to
@@ -108,9 +108,9 @@ Compared with the official plugin, this build preserves:
 - Channel/sender tool policies through the published host's shared policy pipeline.
 - Up to ten ordered attachments on one post, including ordinary inbound replies.
 
-This artifact targets the published OpenClaw `2026.10.6` SDK and requires an
+This artifact targets the published OpenClaw `2026.10.7` SDK and requires an
 OpenClaw host at least that version. Its Node contract follows that release:
-`>=24.22.1 <25 || >=26.12.1`. Development checks use Node `24.22.1`; this does
+`>=24.22.1 <25 || >=26.12.1`. Development checks use Node `26.12.1`; this does
 not establish the runtime version of an installed Gateway.
 
 When `messages.statusReactions.enabled` is true, received posts show the configured
@@ -761,6 +761,53 @@ the editable result identity and card creation fails without disrupting final
 delivery. If Mattermost accepts the copy but returns no usable identity, the
 stream stops that path rather than retrying and risking duplicate posts.
 
+### Optional companion WebSocket previews
+
+The default preview transport remains REST. To add faster web previews, build
+and install the separate `mattermost-plugin-openclaw-stream` server/web plugin
+on Mattermost 12+, configure its **Allowed Mattermost bot IDs** with the channel
+bot's user ID, and enable the plugin. Then opt in on OpenClaw:
+
+```json
+{
+  "channels": {
+    "mattermost": {
+      "streaming": {
+        "transport": "companion"
+      }
+    }
+  }
+}
+```
+
+Account-level `streaming.transport` overrides are also supported. This option
+selects the preview transport; existing streaming mode and source-reply policy
+still determine which text may be shown. The implementation needs no core
+patch or new credential: authenticated requests use the existing Mattermost bot
+token at the configured server origin.
+
+Web previews carry cumulative text at a 250 ms minimum interval. The normal
+1,200 ms REST checkpoints remain for mobile, unsupported clients, and durable
+delivery. Missing/incompatible capabilities or a rejected snapshot switch that
+draft back to REST. WebSocket acceptance never counts as final delivery; the
+existing persistent edit, readback, and delivery receipt still own completion.
+Boundaries, finalization, and late-plan identity handoff close the old generation
+and preserve its text. The existing authorized `/stop` remains the cancellation
+entry point.
+
+The companion does not add the Agents plugin's native mobile streaming UI.
+Restart recovery and host-adopted progress continuation continue through their
+existing REST path. Transient snapshots are bounded, expire, and are local to a
+Mattermost server process; reconnect readback is best effort in a multi-node
+deployment. A durable post edit takes precedence over older preview state.
+
+Set `transport` to `"rest"` (or remove it) to roll back. Existing posts retain
+their durable message body when the companion is disabled or removed. Changes
+to production installations, allowlists, Gateway configuration, and restarts
+require explicit operator authorization. The implementation contract and local
+verification are recorded in
+[the companion implementation notes](docs/companion-streaming-implementation.md).
+
 OpenClaw 2026.9.4 restart-recovery runs also reconnect channel/group session
 events to the original Mattermost thread. Recovery keeps the typing indicator
 alive and restores tool progress in a temporary preview post; terminal recovery
@@ -783,8 +830,8 @@ The package build bundles plugin-owned TypeScript only. OpenClaw Plugin SDK,
 the plugin's declared runtime dependencies. This keeps OpenClaw core code and
 state migrations out of the plugin artifact.
 
-This release targets the published OpenClaw `2026.10.5` SDK and requires host
-and plugin API `>=2026.10.5`. Earlier hosts are not covered by this build's
+This release targets the published OpenClaw `2026.10.7` SDK and requires host
+and plugin API `>=2026.10.7`. Earlier hosts are not covered by this build's
 compatibility checks. The build verifies every emitted SDK subpath and named
 binding against the exact dev dependency in this checkout's `node_modules`;
 linked host checkouts and Gateway host overrides are not used.
@@ -806,9 +853,34 @@ changes in this repo's `src/`. Recheck the downstream command, callback,
 reaction, and trigger-cap behavior when upstream touches the corresponding
 files.
 
-### OpenClaw 2026.10.5 adaptation
+### OpenClaw 2026.10.7 adaptation
 
-This build targets the exact published 10.5 SDK and advances the package,
+The official Mattermost 10.6-to-10.7 delta changes package declarations only.
+This build advances the package version, exact published development SDK,
+minimum host, plugin API and build metadata together to 2026.10.7. The public
+SDK export map, SDK source, shared channel source and outbound source are
+unchanged. The build validates emitted SDK subpaths and named bindings against
+the exact installed npm dependency.
+
+The SDK adaptation itself introduces no Mattermost lifecycle changes. The
+separate opt-in companion transport described above adds WebSocket previews.
+Existing
+commands, callbacks, reactions, forms, attachment collections, silent delivery,
+streaming, task cards and recovery behavior are preserved. Session recovery,
+database continuity and update activation fixes remain host-owned. Source
+comparison, validation and deployment boundaries are recorded in
+[the 10.7 upstream review](docs/upstream-2026.10.7.md).
+
+### Previous OpenClaw 2026.10.6 adaptation
+
+The 10.6 build added explicit silent delivery, group/sender tool policies and
+ordered attachment collections on one post. Their implementation and verification
+boundaries are recorded in [the 10.6 adaptation](docs/upstream-2026.10.6.md).
+Those downstream behaviors remain part of this build.
+
+### Previous OpenClaw 2026.10.5 adaptation
+
+That build targets the exact published 10.5 SDK and advances the package,
 minimum host and plugin API contracts together. It ports the official
 asynchronous inbound session-envelope read, outer HTTP status precedence for
 DM retries, error-body failure handling, and effect-authority fencing for
@@ -902,7 +974,7 @@ shared Mattermost contract tests and the downstream behavior tests.
 ### Test status against the published npm SDK
 
 This repo builds and tests against the published `openclaw` npm package
-(`2026.10.5`), not the OpenClaw monorepo checkout. One category of tests
+(`2026.10.7`), not the OpenClaw monorepo checkout. One category of tests
 behaves differently from the monorepo for that reason:
 
 - Ten suites import test-only Plugin SDK subpaths (`channel-test-helpers`,

@@ -961,6 +961,7 @@ export async function createMattermostPost(
     rootId?: string;
     fileIds?: string[];
     props?: Record<string, unknown>;
+    type?: string;
     pendingPostId?: string;
     silent?: boolean;
   },
@@ -977,6 +978,9 @@ export async function createMattermostPost(
   }
   if (params.props) {
     payload.props = params.props;
+  }
+  if (params.type) {
+    payload.type = params.type;
   }
   if (params.pendingPostId) {
     payload.pending_post_id = params.pendingPostId;

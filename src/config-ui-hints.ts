@@ -35,6 +35,10 @@ export const mattermostChannelConfigUiHints = {
     label: "Native approval cards",
     help: '"auto" enables Mattermost approval cards when at least one stable approver id is configured.',
   },
+  "streaming.transport": {
+    label: "Preview transport",
+    help: '"rest" preserves ordinary post previews. "companion" adds faster web previews through the separate openclaw-stream Mattermost plugin, retaining REST checkpoints for mobile and fallback. Default: "rest".',
+  },
   "execApprovals.approvers": {
     label: "Approval users",
     help: "Stable 26-character Mattermost user ids allowed to approve or deny requests.",

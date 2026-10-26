@@ -1,0 +1,74 @@
+{
+  "executedAt": "2026-10-26T09:03:06.368Z",
+  "node": "v26.12.1",
+  "openclaw": "2026.10.7",
+  "casesPassed": 12,
+  "checks": [
+    "published SDK: ephemeral progress is not durable final delivery",
+    "official mobile: cumulative next replaces instead of appending",
+    "official mobile: full snapshot supports replacement",
+    "published SDK: same post identity finalizes without duplicate create",
+    "bridge lifecycle fence: sealed producer cannot restart ended stream",
+    "official web listener: same identity receives lifecycle and snapshots",
+    "official mobile: persisted readback can retire ephemeral state",
+    "official mobile: local Stop suppresses late text and reasoning",
+    "official mobile: cancel alone is not a producer fence",
+    "official mobile: missed start recovers from cumulative next and isolates servers",
+    "official web listener: text is not a replayable snapshot cache",
+    "published SDK: rejected persistence is not successful final delivery"
+  ],
+  "sources": [
+    {
+      "source": "mattermost-mobile-v2.45.0/app/products/agents/store/streaming_store.ts",
+      "sha256": "c3a8befe269ad90f74ae92df92c28468be2fc88b82b8f9eb58888f273e77c618"
+    },
+    {
+      "source": "mattermost-plugin-agents-v2.10.0/webapp/src/websocket.ts",
+      "sha256": "110d1fd98c5e4b71443c6e306c890ebd90cf02958bcb8d6c9c4c838e27c5a971"
+    },
+    {
+      "source": "mattermost-mobile-v2.45.0/app/products/agents/constants.ts",
+      "sha256": "7c055474fee4973e0e5c86ab5c471d58878c817bb06300181d091a902edd48d4"
+    },
+    {
+      "source": "mattermost-mobile-v2.45.0/app/products/agents/types/index.ts",
+      "sha256": "d7bb39aff2dd8c6972dbf41bee566a3da4f5a096dcb48d6f08abbfa60051e110"
+    },
+    {
+      "source": "node_modules/openclaw/dist/plugin-sdk/channel-outbound.js",
+      "sha256": "2e1c853089869d4828c6bb32133ca2fa813429989ec3d1827b4561a5cec28928"
+    }
+  ],
+  "sequence": [
+    {
+      "post_id": "result_identity_1",
+      "control": "start"
+    },
+    {
+      "post_id": "result_identity_1",
+      "next": "逐"
+    },
+    {
+      "post_id": "result_identity_1",
+      "next": "逐字 🐾"
+    },
+    {
+      "post_id": "result_identity_1",
+      "next": "更正後內容"
+    },
+    {
+      "persisted": "result_identity_1",
+      "message": "最終內容"
+    },
+    {
+      "post_id": "result_identity_1",
+      "control": "end"
+    }
+  ],
+  "limits": [
+    "Callbacks are synthetically invoked; no live model/Gateway.",
+    "Official mobile state and web event listener execute, not actual UI components.",
+    "Mock persistence and event fanout; no Mattermost server, authentication, transport, or plugin installation tested.",
+    "No credentials or live services used."
+  ]
+}

@@ -11,6 +11,7 @@ import {
   type MattermostClient,
 } from "./client.js";
 import { resolveMattermostTextLimit } from "./text-limits.js";
+import { createMattermostCompanionStream } from "./companion-stream.js";
 
 const DEFAULT_THROTTLE_MS = 1000;
 
@@ -113,6 +114,7 @@ export function createMattermostDraftStream(params: {
   postProps?: Record<string, unknown>;
   maxChars?: number;
   throttleMs?: number;
+  companion?: boolean;
   renderText?: (text: string) => string;
   chunkText?: (text: string) => string[];
   beforeCreatePost?: () => void | Promise<void>;
@@ -125,6 +127,9 @@ export function createMattermostDraftStream(params: {
   });
   const throttleMs = Math.max(250, params.throttleMs ?? DEFAULT_THROTTLE_MS);
   const streamState = { stopped: false, final: false };
+  const companion = params.companion
+    ? createMattermostCompanionStream(params)
+    : undefined;
   let terminalAcceptedDeliveryError: Error | undefined;
   const assertNoAcceptedDeliveryFailure = () => {
     if (terminalAcceptedDeliveryError !== undefined) {
@@ -152,12 +157,37 @@ export function createMattermostDraftStream(params: {
   const publishedAssistantParts = new Map<string, MattermostDraftPublishedPart>();
   const createStreamPost = async (message: string) => {
     await params.beforeCreatePost?.();
+    if (companion) return await companion.createPost(message);
     return await createMattermostPost(params.client, {
       channelId: params.channelId,
       message,
       rootId: params.rootId,
       props: params.postProps,
     });
+  };
+  const updateCompanion = (target: DraftGeneration) => {
+    if (!companion || !target.postId || streamState.stopped || streamState.final) return;
+    const rendered = params.renderText?.(target.latestSourceText) ?? target.latestSourceText;
+    const text = normalizeMattermostDraftText(rendered, maxChars);
+    if (text) companion.update(target.postId, text);
+  };
+  const finishCompanion = async (target: DraftGeneration, checkpoint: boolean) => {
+    if (!companion || !target.postId || !(await companion.freeze(target.postId))) return;
+    try {
+      if (checkpoint) {
+        const rendered = params.renderText?.(target.latestSourceText) ?? target.latestSourceText;
+        const text = normalizeMattermostDraftText(rendered, maxChars);
+        if (text && text !== target.lastProviderText) {
+          const updated = await updateMattermostPostMessageWithReadback(
+            params.client, target.postId, text,
+          );
+          target.lastProviderText = updated.message ?? text;
+          target.lastSentText = text;
+        }
+      }
+    } finally {
+      await companion.close(target.postId);
+    }
   };
 
   const sendOrEditStreamMessage = async (text: string): Promise<boolean> => {
@@ -191,6 +221,7 @@ export function createMattermostDraftStream(params: {
         target.lastProviderText = sent.message ?? normalized;
       }
       target.lastSentText = normalized;
+      updateCompanion(target);
       return true;
     } catch (err) {
       // Stop immediately so a discarded background failure cannot queue a second visible post.
@@ -267,6 +298,7 @@ export function createMattermostDraftStream(params: {
         assertNoAcceptedDeliveryFailure();
         await inFlightAtBoundary;
         assertNoAcceptedDeliveryFailure();
+        if (sealed.postId) await companion?.freeze(sealed.postId);
         if (streamState.stopped && !streamState.final) {
           assertNoAcceptedDeliveryFailure();
           return;
@@ -288,7 +320,7 @@ export function createMattermostDraftStream(params: {
             recordPublishedAssistantPart(sealed.postId, publishedContent, 0);
           }
           let providerFirstChunk = sealed.lastProviderText ?? firstChunk;
-          if (firstChunk !== sealed.lastSentText) {
+          if (firstChunk !== (companion ? sealed.lastProviderText : sealed.lastSentText)) {
             const updated = await updateMattermostPostMessageWithReadback(
               params.client,
               sealed.postId,
@@ -300,6 +332,7 @@ export function createMattermostDraftStream(params: {
         } else {
           const firstPost = await createStreamPost(firstChunk);
           recordPublishedAssistantPart(firstPost.id, firstPost.message ?? firstChunk, 0);
+          await companion?.close(firstPost.id);
         }
         for (const chunk of chunks.slice(1)) {
           const post = await createStreamPost(chunk);
@@ -308,6 +341,7 @@ export function createMattermostDraftStream(params: {
             post.message ?? chunk,
             publishedAssistantOffset,
           );
+          await companion?.close(post.id);
         }
         if (assistantText) {
           sealedAssistantTexts.push({ text: assistantText, requiresBlockBoundary: true });
@@ -336,6 +370,8 @@ export function createMattermostDraftStream(params: {
         if (acceptedDeliveryError) {
           throw acceptedDeliveryError;
         }
+      } finally {
+        if (sealed.postId) await companion?.close(sealed.postId);
       }
     })();
     currentGeneration = {
@@ -374,17 +410,22 @@ export function createMattermostDraftStream(params: {
     };
     const handoff = (async () => {
       try {
+        await finishCompanion(handedOff, true);
+        const visibleText = handedOff.lastProviderText ?? handedOff.lastSentText;
         // This post continues an identity that already exists, so it must not re-enter
         // the first-result ordering hook while the task-card publish is awaiting us.
-        const sent = await createMattermostPost(params.client, {
-          channelId: params.channelId,
-          message: preservedText,
-          rootId: params.rootId,
-          props: params.postProps,
-        });
+        const sent = companion
+          ? await companion.createPost(visibleText)
+          : await createMattermostPost(params.client, {
+              channelId: params.channelId,
+              message: visibleText,
+              rootId: params.rootId,
+              props: params.postProps,
+            });
         successor.postId = sent.id;
-        successor.lastSentText = preservedText;
-        successor.lastProviderText = sent.message ?? preservedText;
+        successor.lastSentText = visibleText;
+        successor.lastProviderText = sent.message ?? visibleText;
+        updateCompanion(successor);
         return handedOff.postId;
       } catch (err) {
         const acceptedDeliveryError = isChannelPartialDeliveryError(err)
@@ -429,6 +470,7 @@ export function createMattermostDraftStream(params: {
     await stopForClear();
     await currentGeneration.ready;
     assertNoAcceptedDeliveryFailure();
+    await finishCompanion(currentGeneration, false);
   };
   const clear = async () => {
     assertNoAcceptedDeliveryFailure();
@@ -445,6 +487,7 @@ export function createMattermostDraftStream(params: {
         await retiring.ready;
         await inFlight;
         assertNoAcceptedDeliveryFailure();
+        await finishCompanion(retiring, false);
       },
       {
         readMessageId: () => retiring.postId,
@@ -464,22 +507,28 @@ export function createMattermostDraftStream(params: {
     await sealLifecycle();
     await currentGeneration.ready;
     assertNoAcceptedDeliveryFailure();
+    await finishCompanion(currentGeneration, true);
   };
   const stop = async () => {
     assertNoAcceptedDeliveryFailure();
     await stopLifecycle();
     await currentGeneration.ready;
     assertNoAcceptedDeliveryFailure();
+    await finishCompanion(currentGeneration, true);
   };
   const update = (text: string) => {
+    if (companion && (streamState.stopped || streamState.final)) return;
     currentGeneration.latestSourceText = text;
     currentGeneration.latestAssistantText = undefined;
     updateLifecycle(text);
+    updateCompanion(currentGeneration);
   };
   const updateAssistantText = (text: string) => {
+    if (companion && (streamState.stopped || streamState.final)) return;
     currentGeneration.latestSourceText = text;
     currentGeneration.latestAssistantText = text;
     updateLifecycle(text);
+    updateCompanion(currentGeneration);
   };
   const settleBoundaries = async () => {
     assertNoAcceptedDeliveryFailure();

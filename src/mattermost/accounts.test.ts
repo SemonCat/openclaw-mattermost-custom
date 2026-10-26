@@ -288,4 +288,17 @@ describe("resolveMattermostReplyToMode", () => {
 
     expect(account.streamingMode).toBe("off");
   });
+
+  it("resolves companion transport and an explicit account REST override", () => {
+    const cfg = {
+      channels: {
+        mattermost: {
+          streaming: { mode: "partial", transport: "companion" },
+          accounts: { work: { streaming: { mode: "partial", transport: "rest" } } },
+        },
+      },
+    } as const;
+    expect(resolveMattermostAccount({ cfg, accountId: "default" }).config.streaming?.transport).toBe("companion");
+    expect(resolveMattermostAccount({ cfg, accountId: "work" }).config.streaming?.transport).toBe("rest");
+  });
 });

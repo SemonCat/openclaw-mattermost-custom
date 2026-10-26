@@ -1,0 +1,57 @@
+{
+  "verified_at": "2026-10-26T10:12:34.262Z",
+  "server": "Mattermost Team Edition 12.0.1",
+  "browser": {
+    "playwright": "1.63.0",
+    "chromium": "153.0.8010.12"
+  },
+  "scope": "Disposable Mattermost; synthetic test bot and channel callbacks; real HTTP, WebSocket and Mattermost web renderer; no production Gateway/model turn",
+  "artifacts": {
+    "openclaw-mattermost-custom-2026.10.7.tgz": "86560d5151f75354cecc1d4ceee8914a002bc0aaa9cc19782a6e802a7f38d0b2",
+    "openclaw-stream-0.1.0.tar.gz": "3dd023754043ca064e6cdfdff32ba9fcdf0f4126f2a2bbcd035e7370df237f1c"
+  },
+  "installed_payload_sha256": {
+    "./server/dist/plugin-linux-amd64": "47fb1ee93b6cbfbe4721bf8bff904b3801e1c43bf9aac3e0d7aeda0c9eff4f8e",
+    "./webapp/dist/main.js": "cb5d1e129d4f3cbc836c3350afe0e1f955301177d468a5083428c4a56db6242f"
+  },
+  "channel_tests": {
+    "full_files": 112,
+    "full_tests": 1414,
+    "subsequent_companion_tests": 16,
+    "build_sdk_bindings": 265,
+    "build_sdk_subpaths": 84
+  },
+  "companion_tests": {
+    "go_server": "passed",
+    "web_tests": 12,
+    "typecheck": "passed"
+  },
+  "reviews": {
+    "channel": "scoped-clean",
+    "companion": "scoped-clean"
+  },
+  "http_websocket_checks": [
+    "authenticated real WebSocket snapshot arrives before the REST checkpoint",
+    "authorized reconnect readback returns the latest cumulative snapshot",
+    "seal persists the preview, publishes close, and fences late callbacks",
+    "closed generation, ordinary reader publisher, and foreign generation are rejected",
+    "nonmember receives neither private-channel snapshot readback nor its WebSocket events",
+    "real task card predates result and finishes terminal (commentary first: false)",
+    "real task card predates result and finishes terminal (commentary first: true)"
+  ],
+  "web_checks": [
+    "real web renderer shows WS-only text and native Markdown before any durable edit",
+    "page reload reconstructs the active preview through authorized readback",
+    "reconnecting after an offline snapshot restores newer preview text without a REST edit",
+    "narrow web viewport renders the active preview",
+    "a newer durable edit replaces the active snapshot even without a close event",
+    "disabling the companion preserves durable text through the stock renderer"
+  ],
+  "web_page_errors": [],
+  "limitations": [
+    "No fresh inbound production Gateway/model turn",
+    "Official mobile app uses durable REST checkpoints; no native mobile stream UI",
+    "Transient state and five-minute close tombstones are process-local; single node or sticky routing",
+    "Recovery and host-adopted progress remain REST-only"
+  ]
+}

@@ -151,6 +151,7 @@ const MattermostStreamingBlockSchema = z
 const MattermostStreamingSchema = z
   .object({
     mode: MattermostStreamingModeSchema.optional(),
+    transport: z.enum(["rest", "companion"]).optional(),
     chunkMode: z.enum(["length", "newline"]).optional(),
     preview: MattermostStreamingPreviewSchema.optional(),
     progress: MattermostStreamingProgressSchema.optional(),
