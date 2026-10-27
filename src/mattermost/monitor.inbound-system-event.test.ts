@@ -154,6 +154,7 @@ const mockState = vi.hoisted(() => ({
   createMattermostPost: vi.fn(),
   createMattermostDraftStream: vi.fn(),
   deliveryPlanObserver: vi.fn(),
+  onModelSelected: vi.fn(),
   dispatchInboundMessage: vi.fn(),
   enqueueSystemEvent: vi.fn(),
   fetchMattermostMe: vi.fn(),
@@ -338,7 +339,7 @@ vi.mock("./runtime-api.js", async () => {
       upsertPairingRequest: vi.fn(async () => ({ code: "123456", created: true })),
     })),
     createChannelMessageReplyPipeline: vi.fn((params: { cfg: OpenClawConfig }) => ({
-      onModelSelected: vi.fn(),
+      onModelSelected: mockState.onModelSelected,
       typingCallbacks: {},
       resolveResponsePrefix: () => params.cfg.channels?.mattermost?.responsePrefix,
     })),
@@ -1116,153 +1117,38 @@ describe("mattermost inbound user posts", () => {
     expect(ctx?.BodyForAgent).toContain("[Begin untrusted Mattermost thread context]");
   });
 
-  it("appends the progress receipt after a routed final delivery is acknowledged", async () => {
+  it.each(["before", "after"])("forwards the pipeline model callback %s run start without owning a footer", async (order) => {
     const socket = new FakeWebSocket();
     const abortController = new AbortController();
     mockState.abortController = abortController;
-    mockState.dispatchInboundMessage.mockImplementation(async () => {
-      const delivery = mockState.deliveryPlanObserver.mock.calls.at(-1)?.[0] as
-        | {
-            onDelivered?: (
-              payload: ReplyPayload,
-              info: { kind: "final" },
-              result: {
-                messageIds: string[];
-                visibleReplySent: boolean;
-                content: string;
-              },
-            ) => Promise<void>;
-          }
-        | undefined;
-      await delivery?.onDelivered?.(
-        { text: "Routed final" },
-        { kind: "final" },
-        {
-          messageIds: ["routed-final-post"],
-          visibleReplySent: true,
-          content: "Routed final",
-        },
-      );
+    const selected = { provider: "configured-provider", model: "selected-model", thinkLevel: "high" };
+    mockState.dispatchInboundMessage.mockImplementation(async ({ replyOptions, ctx }) => {
+      expect(replyOptions.onModelSelected).toBe(mockState.onModelSelected);
+      if (order === "before") replyOptions.onModelSelected(selected);
+      replyOptions.onAgentRunStart("selected-run");
+      if (order === "after") replyOptions.onModelSelected(selected);
+      expect(mockState.agentEventListeners.length).toBeGreaterThan(0);
+      // Account-scoped task-card continuation still observes transcript changes.
+      expect(mockState.sessionTranscriptListeners).toHaveLength(1);
+      for (const listener of mockState.agentEventListeners) {
+        listener({ runId: "selected-run", sessionKey: ctx.SessionKey, stream: "usage", data: { inputTokens: 50, outputTokens: 100 } });
+      }
+      expect(mockState.deliveryPlanObserver.mock.calls.at(-1)![0].onDelivered).toBeUndefined();
       abortController.abort();
     });
 
     const monitor = monitorMattermostProvider({
-      config: testConfig,
-      runtime: testRuntime(),
-      abortSignal: abortController.signal,
+      config: testConfig, runtime: testRuntime(), abortSignal: abortController.signal,
       webSocketFactory: () => socket,
     });
-
-    await vi.waitFor(() => {
-      expect(socket.openListenerCount).toBeGreaterThan(0);
-    });
+    await vi.waitFor(() => expect(socket.openListenerCount).toBeGreaterThan(0));
     socket.emitOpen();
-    await emitMattermostChannelPost(socket, {
-      id: "post-routed-final-receipt",
-      message: "show the receipt",
-    });
+    await emitMattermostChannelPost(socket, { id: `model-${order}`, message: "reply" });
     socket.emitClose(1000);
     await monitor;
 
-    expect(mockState.updateMattermostPost).toHaveBeenCalledOnce();
-    expect(mockState.updateMattermostPost).toHaveBeenCalledWith(
-      {},
-      "routed-final-post",
-      {
-        message: expect.stringMatching(
-          /^Routed final\n⬆️ \? in · ⬇️ \? out · 🛠️ 0 tool calls\n⏱️ \d+s · 🧠 \d+\.\d+s · 🔧 0\.0s$/,
-        ),
-      },
-    );
-  });
-
-  it("uses assistant transcript usage for approximate TPS when agent usage events are absent", async () => {
-    const dateNow = vi.spyOn(Date, "now").mockReturnValue(0);
-    const socket = new FakeWebSocket();
-    const abortController = new AbortController();
-    const config: OpenClawConfig = {
-      ...testConfig,
-      channels: {
-        mattermost: {
-          ...testConfig.channels?.mattermost,
-          replyToMode: "all",
-        },
-      },
-    };
-    mockState.runtimeCore = createRuntimeCore(config);
-    mockState.abortController = abortController;
-    mockState.dispatchInboundMessage.mockImplementation(async (params) => {
-      const replyOptions = params.replyOptions as {
-        onAgentRunStart?: (runId: string) => void;
-      };
-      replyOptions.onAgentRunStart?.("codex-run-1");
-      const listener = mockState.sessionTranscriptListeners.at(-1);
-      listener?.({
-        target: {
-          agentId: "main",
-          sessionId: "session-1",
-          sessionKey: String(params.ctx.SessionKey),
-        },
-        messageId: "assistant-message-1",
-        messageSeq: 1,
-        message: {
-          role: "assistant",
-          usage: { input: 50, output: 100, totalTokens: 150 },
-        },
-      });
-      dateNow.mockReturnValue(5_000);
-      const delivery = mockState.deliveryPlanObserver.mock.calls.at(-1)?.[0] as
-        | {
-            onDelivered?: (
-              payload: ReplyPayload,
-              info: { kind: "final" },
-              result: {
-                messageIds: string[];
-                visibleReplySent: boolean;
-                content: string;
-              },
-            ) => Promise<void>;
-          }
-        | undefined;
-      await delivery?.onDelivered?.(
-        { text: "Codex final" },
-        { kind: "final" },
-        {
-          messageIds: ["codex-final-post"],
-          visibleReplySent: true,
-          content: "Codex final",
-        },
-      );
-      abortController.abort();
-    });
-
-    const monitor = monitorMattermostProvider({
-      config,
-      runtime: testRuntime(),
-      abortSignal: abortController.signal,
-      webSocketFactory: () => socket,
-    });
-
-    await vi.waitFor(() => {
-      expect(socket.openListenerCount).toBeGreaterThan(0);
-    });
-    socket.emitOpen();
-    await emitMattermostChannelPost(socket, {
-      id: "post-codex-transcript-usage",
-      message: "show approximate tps",
-    });
-    socket.emitClose(1000);
-    await monitor;
-
-    expect(mockState.updateMattermostPost).toHaveBeenCalledWith(
-      {},
-      "codex-final-post",
-      {
-        message:
-          "Codex final\n⬆️ 50 in · ⬇️ 100 out · 🛠️ 0 tool calls\n⏱️ 5s · 🧠 5.0s · 🔧 0.0s · ⚡ ≈20.0 tok/s",
-      },
-    );
-    dateNow.mockRestore();
+    expect(mockState.onModelSelected).toHaveBeenCalledExactlyOnceWith(selected);
+    expect(mockState.updateMattermostPost).not.toHaveBeenCalled();
   });
 
   it("formats current and pending-history timestamps in the configured user timezone", async () => {
@@ -2787,48 +2673,75 @@ describe("mattermost inbound user posts", () => {
     }
   });
 
-  it("does not create a task card for a final-only turn", async () => {
-    const socket = new FakeWebSocket();
-    const abortController = new AbortController();
-    mockState.abortController = abortController;
-    mockState.sendMessageMattermost.mockResolvedValue({
-      messageId: "final-only-post",
-      channelId: "chan-1",
-      receipt: createMessageReceiptFromOutboundResults({
-        results: [{ messageId: "final-only-post", channelId: "chan-1" }],
-        kind: "text",
-      }),
-      content: "Direct answer",
-    });
-    mockState.dispatchInboundMessage.mockImplementation(async () => {
-      const delivery = mockState.deliveryPlanObserver.mock.calls.at(-1)?.[0] as {
-        deliver: (payload: ReplyPayload, info: { kind: "final" }) => Promise<unknown>;
+  // These are already-formatted core payloads; mode/template resolution is core-owned.
+  it.each([
+    { layout: "off", text: "Direct answer" },
+    { layout: "model-only", text: "Direct answer\nModel: native-model" },
+    { layout: "full", text: "Direct answer\nUsage: 50 in / 100 out · est $0.0010" },
+  ].flatMap((entry) => [false, true].map((media) => ({ ...entry, media }))))(
+    "preserves the core $layout final through retry and acknowledgement (media=$media)",
+    async ({ text, media }) => {
+      const socket = new FakeWebSocket();
+      const abortController = new AbortController();
+      mockState.abortController = abortController;
+      const mediaUrls = ["https://example.com/one.png", "https://example.com/two.png"];
+      const payload: ReplyPayload = {
+        text,
+        replyToId: "reply-root",
+        ...(media ? { mediaUrls } : {}),
       };
-      await delivery.deliver({ text: "Direct answer" }, { kind: "final" });
-      return withAgentRunTerminalOutcome({ counts: { final: 1 } }, "completed");
-    });
+      const originalPayload = structuredClone(payload);
+      mockState.sendMessageMattermost
+        .mockRejectedValueOnce(new Error("temporary send failure"))
+        .mockResolvedValue({
+          messageId: "native-final-post",
+          channelId: "chan-1",
+          receipt: createMessageReceiptFromOutboundResults({
+            results: [{ messageId: "native-final-post", channelId: "chan-1" }],
+            kind: media ? "media" : "text",
+          }),
+          content: text,
+        });
+      mockState.dispatchInboundMessage.mockImplementation(async ({ replyOptions }) => {
+        replyOptions.onModelSelected({ provider: "provider", model: "different-selection", thinkLevel: undefined });
+        replyOptions.onAgentRunStart("final-run");
+        const delivery = mockState.deliveryPlanObserver.mock.calls.at(-1)![0];
+        await expect(delivery.deliver(payload, { kind: "final" })).rejects.toThrow("temporary send failure");
+        const result = await delivery.deliver(payload, { kind: "final" });
+        expect(result.visibleReplySent).toBe(true);
+        expect(result.content).toBe(text);
+        expect(delivery.onDelivered).toBeUndefined();
+        await delivery.onDelivered?.(payload, { kind: "final" }, result);
+        await delivery.onDelivered?.(payload, { kind: "final" }, result);
+        expect(payload).toEqual(originalPayload);
+        return withAgentRunTerminalOutcome({ counts: { final: 1 } }, "completed");
+      });
 
-    const monitor = monitorMattermostProvider({
-      config: testConfig,
-      runtime: testRuntime(),
-      abortSignal: abortController.signal,
-      webSocketFactory: () => socket,
-    });
-    await vi.waitFor(() => expect(socket.openListenerCount).toBeGreaterThan(0));
-    socket.emitOpen();
-    await emitMattermostChannelPost(socket, {
-      id: "post-without-plan",
-      message: "answer directly",
-    });
-    await vi.waitFor(() => expect(mockState.dispatchInboundMessage).toHaveBeenCalledOnce());
-    abortController.abort();
-    socket.emitClose(1000);
-    await monitor;
+      const monitor = monitorMattermostProvider({
+        config: testConfig,
+        runtime: testRuntime(),
+        abortSignal: abortController.signal,
+        webSocketFactory: () => socket,
+      });
+      await vi.waitFor(() => expect(socket.openListenerCount).toBeGreaterThan(0));
+      socket.emitOpen();
+      await emitMattermostChannelPost(socket, { id: "native-final", message: "answer directly" });
+      abortController.abort();
+      socket.emitClose(1000);
+      await monitor;
 
-    expect(mockState.createMattermostPost).not.toHaveBeenCalled();
-    expect(mockState.updateMattermostPost).not.toHaveBeenCalled();
-    expect(mockState.sendMessageMattermost).toHaveBeenCalledOnce();
-  });
+      expect(mockState.createMattermostPost).not.toHaveBeenCalled();
+      expect(mockState.updateMattermostPost).not.toHaveBeenCalled();
+      expect(mockState.sendMessageMattermost).toHaveBeenCalledTimes(2);
+      for (const call of mockState.sendMessageMattermost.mock.calls) {
+        expect(call[0]).toBe("channel:chan-1");
+        expect(call[1]).toBe(text);
+        expect(call[2]).toMatchObject({ replyToId: "reply-root" });
+        if (media) expect(call[2].mediaUrls).toEqual(mediaUrls);
+        else expect(call[2].mediaUrls).toBeUndefined();
+      }
+    },
+  );
 
   it("keeps final delivery successful when durable card creation fails", async () => {
     const socket = new FakeWebSocket();

@@ -18,7 +18,6 @@ import type { finalizeInboundContext } from "openclaw/plugin-sdk/reply-runtime";
 import { resolveInboundLastRouteSessionKey } from "openclaw/plugin-sdk/routing";
 import {
   fetchMattermostPost,
-  updateMattermostPost,
   type MattermostPost,
 } from "./client.js";
 import {
@@ -47,7 +46,6 @@ import {
   type MattermostTurnReactionGateFacts,
 } from "./monitor-turn-reactions.js";
 import type { MattermostMonitorContext } from "./monitor-types.js";
-import { createMattermostProgressReceipt } from "./progress-receipt.js";
 import { buildMattermostPostIdentityProps } from "./post-identity.js";
 import { deliverMattermostReplyPayload, joinMattermostVisibleContent } from "./reply-delivery.js";
 import type { HistoryEntry, ReplyPayload } from "./runtime-api.js";
@@ -57,29 +55,9 @@ import { retainMattermostProgressDraft } from "./monitor-progress-continuation.j
 import { withMattermostSessionAdmissionRetry } from "./session-admission-retry.js";
 import { recordMattermostThreadParticipation } from "./thread-participation.js";
 import {
-  createMattermostTranscriptUsageAccumulator,
-  type MattermostSessionTranscriptUpdate,
-} from "./transcript-usage.js";
-import {
   createMattermostTaskProgressCard,
   type MattermostVisibleWorkSession,
 } from "./task-progress-card.js";
-
-type MattermostAgentEventRuntime = {
-  events?: {
-    onAgentEvent?: (
-      listener: (event: {
-        runId?: string;
-        sessionKey?: string;
-        stream: string;
-        data: Record<string, unknown>;
-      }) => void,
-    ) => () => void;
-    onSessionTranscriptUpdate?: (
-      listener: (update: MattermostSessionTranscriptUpdate) => void,
-    ) => () => void;
-  };
-};
 
 type MattermostInboundTurnParams = {
   post: MattermostPost;
@@ -290,38 +268,13 @@ export async function dispatchMattermostInboundTurn(
     },
     deleteCurrent: () => draftStream.deleteCurrentMessage(),
   });
-  const progressReceipt = createMattermostProgressReceipt();
-  // Public, ungated agent-event bus (not the trusted-plugin-only `core.state.*`
-  // APIs this plugin already avoids relying on for durability): correlates
-  // cumulative output-token usage snapshots to this turn's run id.
-  const eventRuntime = core as unknown as MattermostAgentEventRuntime;
-  const transcriptUsage = createMattermostTranscriptUsageAccumulator({
-    sessionKey: thread.sessionKey,
-    onCumulativeUsage: (usage) => {
-      progressReceipt.noteTranscriptUsage(usage);
-    },
-  });
-  let usageEventsActive = true;
   unsubscribeAgentEvents =
-    eventRuntime.events?.onAgentEvent?.((evt) => {
+    core.events?.onAgentEvent?.((evt) => {
       taskProgressCard.noteAgentEvent(evt);
-      if (!usageEventsActive || evt.stream !== "usage") {
-        return;
-      }
-      if (typeof evt.runId === "string") {
-        progressReceipt.noteUsage(evt.runId, {
-          inputTokens:
-            typeof evt.data.inputTokens === "number" ? evt.data.inputTokens : undefined,
-          outputTokens:
-            typeof evt.data.outputTokens === "number" ? evt.data.outputTokens : undefined,
-        });
-      }
     }) ?? (() => {});
   if (agentEventsShouldStop) {
     stopAgentEvents();
   }
-  const unsubscribeTranscriptUpdates =
-    eventRuntime.events?.onSessionTranscriptUpdate?.(transcriptUsage.onUpdate) ?? (() => {});
   const enterBlockPreviewActivity = (activity: "reasoning" | "text" | "tool") => {
     if (account.streamingMode !== "block") {
       return undefined;
@@ -496,8 +449,6 @@ export async function dispatchMattermostInboundTurn(
     queuedFollowupDeliveryError = false;
     anyReplyDelivered = false;
     reactions.admitQueuedFollowup();
-    progressReceipt.reset();
-    transcriptUsage.reset();
   };
   const settleQueuedReactions = (result?: {
     dispatchError: boolean;
@@ -732,44 +683,6 @@ export async function dispatchMattermostInboundTurn(
       }
       return result;
     },
-    onDelivered: async (payloadEntry, info, result) => {
-      if (
-        info.kind !== "final" ||
-        progressDraftAdopted ||
-        payloadEntry.isError ||
-        result?.visibleReplySent === false
-      ) {
-        return;
-      }
-      const messageIds = result?.receipt
-        ? listMessageReceiptPlatformIds(result.receipt)
-        : (result?.messageIds ?? []).filter((messageId) => messageId.trim());
-      const messageId = messageIds.at(-1);
-      if (!messageId) {
-        return;
-      }
-      try {
-        const currentText =
-          messageIds.length === 1 && typeof result?.content === "string"
-            ? result.content
-            : ((await fetchMattermostPost(client, messageId)).message ?? "");
-        const prepared = progressReceipt.prepareFinalPayload({
-          ...payloadEntry,
-          text: currentText,
-        });
-        if (prepared.text === currentText) {
-          return;
-        }
-        await updateMattermostPost(client, messageId, { message: prepared.text });
-        progressReceipt.settleFinalDelivery(true);
-      } catch (error: unknown) {
-        // The reply is already visible. A metrics-only edit must never turn a
-        // successful delivery into a failed turn or trigger a duplicate send.
-        monitor.logVerboseMessage(
-          `mattermost progress receipt edit failed post=${messageId}: ${String(error)}`,
-        );
-      }
-    },
     onError: (err, info) => {
       if (info.kind === "final") {
         previewLifecycle.observeFailure();
@@ -842,8 +755,6 @@ export async function dispatchMattermostInboundTurn(
       deliveryFailed: dispatchError || finalDeliveryFailed || queuedFollowupDeliveryError,
     });
     continuationOwner?.finishInitial();
-    usageEventsActive = false;
-    unsubscribeTranscriptUpdates();
     await reactions.finish({
       dispatchError: dispatchError || finalDeliveryFailed || queuedFollowupDeliveryError,
       anyReplyDelivered: anyReplyDelivered || hasVisibleInboundReplyDispatch(dispatchResult),
@@ -945,7 +856,6 @@ export async function dispatchMattermostInboundTurn(
                   hasStartedWork = true;
                   reactions.noteRunStart(runId);
                   initialRunId ??= runId;
-                  progressReceipt.noteRunStart(runId);
                   taskProgressCard.noteRunStart(runId);
                 },
                 onVisibleWorkSessions: (sessions) => {
@@ -1049,9 +959,6 @@ export async function dispatchMattermostInboundTurn(
                   if (canUpdateReactionsFromRenderer() && !sourceQueuedLifecycleObserved) {
                     reactions.setTool(payloadValue.name);
                   }
-                  if (payloadValue.phase === "start") {
-                    progressReceipt.noteToolCall(payloadValue.name, payloadValue.toolCallId);
-                  }
                   if (!draftToolProgressEnabled) {
                     return false;
                   }
@@ -1063,7 +970,6 @@ export async function dispatchMattermostInboundTurn(
                 },
                 onItemEvent: async (payloadLocal) => {
                   if (payloadLocal.kind === "tool" && payloadLocal.phase === "end") {
-                    progressReceipt.noteToolCallEnd(payloadLocal.toolCallId);
                     if (payloadLocal.name === "progress_card") {
                       taskProgressCard.noteToolEnd(payloadLocal.toolCallId);
                     }
@@ -1094,11 +1000,6 @@ export async function dispatchMattermostInboundTurn(
                 onQueuedFollowupAdmitted: () => {
                   if (!sourceQueuedLifecycleSupported) {
                     admitQueuedReactions();
-                  } else if (!sourceQueuedLifecycleObserved) {
-                    // The refreshed runner still owns renderer bookkeeping, but
-                    // only a source correlation may admit this post's reactions.
-                    progressReceipt.reset();
-                    transcriptUsage.reset();
                   }
                 },
                 onQueuedFollowupSettled: async () => {

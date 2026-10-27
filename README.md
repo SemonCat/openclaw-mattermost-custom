@@ -652,6 +652,63 @@ uncompleted callbacks replay after restart. HMAC tokens and full post props are
 never written to the callback queue. A storage failure returns HTTP 503 so
 Mattermost can retry instead of losing an acknowledged action.
 
+### Native reply usage footer
+
+OpenClaw owns reply footers. This plugin sends the final `ReplyPayload` supplied
+by core, including any native usage footer, without appending its own statistics
+or issuing a footer-only post edit. Task cards, progress and response prefixes
+keep their existing behavior. No plugin-specific footer toggle is needed.
+
+Use native chat commands to choose a session's display:
+
+- `/usage off` disables the footer and persists that session override.
+- `/usage tokens` shows native token/cache counts without a custom template.
+- `/usage full` enables the native rich footer or configured template.
+- `/usage reset` clears the session override and inherits the configured default.
+
+The effective mode is the session override, then the channel entry in
+`messages.responseUsage`, then its `default`, then `off`. `/new` and `/reset`
+preserve the explicit usage preference; use `/usage reset` to clear it.
+
+For a future Mattermost-only default, retain the existing template path and
+change the native mode configuration to:
+
+```json
+{
+  "messages": {
+    "responseUsage": { "default": "off", "mattermost": "full" },
+    "usageTemplate": "~/.openclaw/usage-footer.json"
+  }
+}
+```
+
+An existing explicit `/usage off` still takes precedence; use `/usage full` or
+`/usage reset` in that session. `messages.usageTemplate` is global and applies
+only to `full`, not `tokens`. To display only a model name in Mattermost, **merge
+only this entry into the existing file's `output.surfaces` object**:
+
+```json
+"mattermost": [
+  { "when": "model.display_name", "text": "Model: {model.display_name}" }
+]
+```
+
+Preserve the file's existing `output.default`, `output.surfaces.discord`,
+aliases, reasoning/context/cost pieces and other settings. A surface without its
+own entry uses `output.default`. The fragment above is not a replacement file:
+a standalone template that omits or changes `output.default` can change other
+channels' layouts. Native templates also accept inline objects; file templates
+support `~` and reload dynamically when changed. No live configuration or
+template change is made by installing this plugin.
+
+Native footers remain usage-gated: if core has no qualifying usage, even a
+model-only template produces no footer. Other selectable native contract fields
+include token/cache counts, model/provider/reasoning, context, estimated cost
+and turn duration when available. Tool counts and model/tool timing breakdowns
+are not native contract fields. The model label reflects core's recorded model
+metadata; it is not independent proof of provider execution identity. Missing
+fields stay subject to native guards and fallback behavior.
+
 ### Unlicensed thread moves
 
 Run the following command from the reply box inside the source thread:

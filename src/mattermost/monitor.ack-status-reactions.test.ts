@@ -867,13 +867,6 @@ describe("mattermost lifecycle status reactions", () => {
     let source: { queuedDeliveryCorrelations: QueuedSourceCorrelation[];
       onToolStart: SourceReplyOptions["onToolStart"];
       onQueuedFollowupAdmitted: () => void; onQueuedFollowupSettled: () => Promise<void> } | undefined;
-    let sourceDelivery: {
-      onDelivered: (
-        payload: ReplyPayload,
-        info: { kind: "final" },
-        result: { visibleReplySent: true; messageIds: string[]; content: string },
-      ) => Promise<void>;
-    } | undefined;
     let releaseOwner: (() => void) | undefined;
     let ownerStarted = false;
     const ownerGate = new Promise<void>((resolve) => { releaseOwner = resolve; });
@@ -885,10 +878,6 @@ describe("mattermost lifecycle status reactions", () => {
       })
       .mockImplementationOnce(async (params) => {
         source = params.replyOptions;
-        const core = mockState.runtimeCore as ReturnType<typeof createRuntimeCore>;
-        const turn = core.channel.session.recordInboundSession.mock.calls.at(-1)?.[0] as
-          { delivery: NonNullable<typeof sourceDelivery> };
-        sourceDelivery = turn.delivery;
         return { queuedFinal: false, counts: {} };
       });
     const monitor = await startReactionMonitor();
@@ -925,16 +914,6 @@ describe("mattermost lifecycle status reactions", () => {
       );
       await source!.onToolStart({ name: "exec", phase: "start", toolCallId: "retry-tool" });
       await correlation.onAdmitted();
-      await sourceDelivery!.onDelivered(
-        { text: "retry final" },
-        { kind: "final" },
-        { visibleReplySent: true, messageIds: ["retry-result"], content: "retry final" },
-      );
-      const receiptEdit = mockState.request.mock.calls.find(
-        ([path, init]) => path === "/posts/retry-result/patch" && init?.method === "PUT",
-      );
-      expect(receiptEdit).toBeDefined();
-      expect(JSON.parse(String(receiptEdit![1]!.body)).message).toContain("1 tool call");
       releaseOwner?.();
       await owner;
       expect(requestedReactionsByPost(mockState.request).get("retry-source")).not.toContain("+white_check_mark");
