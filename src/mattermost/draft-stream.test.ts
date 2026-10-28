@@ -78,6 +78,70 @@ function createDeferred(): { promise: Promise<void>; resolve: () => void } {
 }
 
 describe("createMattermostDraftStream", () => {
+  it("coalesces updates arriving during a slow REST send into the next throttle window", async () => {
+    vi.useFakeTimers();
+    const first = createDeferred();
+    const { calls, stream } = createDraftStreamFixture({
+      throttleMs: 1000,
+      request: async (path, init) => {
+        calls.push({ path, init });
+        if (path === "/posts") await first.promise;
+        return { id: "post-1" } as never;
+      },
+    });
+    try {
+      stream.update("First");
+      await vi.advanceTimersByTimeAsync(0);
+      stream.update("Middle");
+      stream.update("Newest");
+      first.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(calls).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(999);
+      expect(calls).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(calls.map((call) => [call.path, parseRequestJson(call.init).message])).toEqual([
+        ["/posts", "First"],
+        ["/posts/post-1/patch", "Newest"],
+      ]);
+    } finally {
+      first.resolve();
+      await stream.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["flush", "forceNewMessage"] as const)(
+    "lets explicit %s flush updates queued behind a slow send without the background delay",
+    async (action) => {
+      vi.useFakeTimers();
+      const first = createDeferred();
+      const { calls, stream } = createDraftStreamFixture({
+        throttleMs: 1000,
+        request: async (path, init) => {
+          calls.push({ path, init });
+          if (path === "/posts" && calls.length === 1) await first.promise;
+          return { id: "post-1" } as never;
+        },
+      });
+      try {
+        stream.updateAssistantText("First");
+        await vi.advanceTimersByTimeAsync(0);
+        stream.updateAssistantText("Newest");
+        const flushed = stream[action]();
+        first.resolve();
+        await flushed;
+        expect(calls.map((call) => parseRequestJson(call.init).message)).toEqual([
+          "First", "Newest",
+        ]);
+      } finally {
+        first.resolve();
+        await stream.stop();
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it("adopts a recovered post identity and edits it instead of creating a duplicate", async () => {
     const { calls, stream } = createDraftStreamFixture({
       initialPost: { id: "recovered-result", message: "Old progress" },

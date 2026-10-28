@@ -369,13 +369,6 @@ export async function dispatchMattermostInboundTurn(
         alreadyDelivered: resolution.kind === "already-delivered",
       };
     }
-    if (
-      lastPartialText &&
-      lastPartialText.startsWith(trimmed) &&
-      trimmed.length < lastPartialText.length
-    ) {
-      return { deliveryText, confirmedDelivery, alreadyDelivered: false };
-    }
     return {
       editText: trimmed,
       deliveryText,
@@ -389,13 +382,7 @@ export async function dispatchMattermostInboundTurn(
     if (!cleaned || cleaned === lastPartialText) {
       return undefined;
     }
-    if (
-      lastPartialText &&
-      lastPartialText.startsWith(cleaned) &&
-      cleaned.length < lastPartialText.length
-    ) {
-      return undefined;
-    }
+    // Ordered snapshots replace this message's draft, including corrections that shorten it.
     const boundarySettled = enterBlockPreviewActivity("text");
     progressDraft.resetActivity({ suppressed: true });
     lastPartialText = cleaned;

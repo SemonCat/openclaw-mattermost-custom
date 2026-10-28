@@ -41,7 +41,7 @@ mkdir -p /tmp/openclaw/mattermost-custom
 npm run build
 npm pack --omit=dev --pack-destination /tmp/openclaw/mattermost-custom
 openclaw plugins install \
-  /tmp/openclaw/mattermost-custom/openclaw-mattermost-custom-2026.10.7.tgz --force
+  /tmp/openclaw/mattermost-custom/openclaw-mattermost-custom-2026.10.8.tgz --force
 ```
 
 Do not use `plugins install --link` or add this source checkout to
@@ -108,7 +108,7 @@ Compared with the official plugin, this build preserves:
 - Channel/sender tool policies through the published host's shared policy pipeline.
 - Up to ten ordered attachments on one post, including ordinary inbound replies.
 
-This artifact targets the published OpenClaw `2026.10.7` SDK and requires an
+This artifact targets the published OpenClaw `2026.10.8` SDK and requires an
 OpenClaw host at least that version. Its Node contract follows that release:
 `>=24.22.1 <25 || >=26.12.1`. Development checks use Node `26.12.1`; this does
 not establish the runtime version of an installed Gateway.
@@ -818,6 +818,11 @@ the editable result identity and card creation fails without disrupting final
 delivery. If Mattermost accepts the copy but returns no usable identity, the
 stream stops that path rather than retrying and risking duplicate posts.
 
+Ordered assistant snapshots may shorten an earlier draft, and a shorter final
+can still edit that preview in place. Slow REST preview writes coalesce newer
+background updates into the next throttle window; explicit final flushes and
+activity boundaries still wait for pending writes without that extra delay.
+
 ### Optional companion WebSocket previews
 
 The default preview transport remains REST. To add faster web previews, build
@@ -889,8 +894,8 @@ The package build bundles plugin-owned TypeScript only. OpenClaw Plugin SDK,
 the plugin's declared runtime dependencies. This keeps OpenClaw core code and
 state migrations out of the plugin artifact.
 
-This release targets the published OpenClaw `2026.10.7` SDK and requires host
-and plugin API `>=2026.10.7`. Earlier hosts are not covered by this build's
+This release targets the published OpenClaw `2026.10.8` SDK and requires host
+and plugin API `>=2026.10.8`. Earlier hosts are not covered by this build's
 compatibility checks. The build verifies every emitted SDK subpath and named
 binding against the exact dev dependency in this checkout's `node_modules`;
 linked host checkouts and Gateway host overrides are not used.
@@ -912,7 +917,23 @@ changes in this repo's `src/`. Recheck the downstream command, callback,
 reaction, and trigger-cap behavior when upstream touches the corresponding
 files.
 
-### OpenClaw 2026.10.7 adaptation
+### OpenClaw 2026.10.8 adaptation
+
+This build advances the artifact version, exact published development SDK,
+minimum host, plugin API and build metadata together to 2026.10.8. It ports
+the official Mattermost secret contract fix: a root bot credential and base URL
+keep the implicit default account's SecretRef active after adding a named
+account. Explicit default-account overrides and disabled accounts retain their
+existing authority boundaries.
+
+The host supplies the updated ingress recovery retry policy and source delivery
+planning. This repository continues to use the public SDK and does not copy
+host internals. Native reply footers, companion previews, commands, task cards,
+reactions and delivery behavior keep their existing owners. Source comparison
+and validation are recorded in
+[the 10.8 upstream review](docs/upstream-2026.10.8.md).
+
+### Previous OpenClaw 2026.10.7 adaptation
 
 The official Mattermost 10.6-to-10.7 delta changes package declarations only.
 This build advances the package version, exact published development SDK,
@@ -1033,7 +1054,7 @@ shared Mattermost contract tests and the downstream behavior tests.
 ### Test status against the published npm SDK
 
 This repo builds and tests against the published `openclaw` npm package
-(`2026.10.7`), not the OpenClaw monorepo checkout. One category of tests
+(`2026.10.8`), not the OpenClaw monorepo checkout. One category of tests
 behaves differently from the monorepo for that reason:
 
 - Ten suites import test-only Plugin SDK subpaths (`channel-test-helpers`,

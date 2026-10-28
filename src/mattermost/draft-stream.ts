@@ -260,6 +260,7 @@ export function createMattermostDraftStream(params: {
     seal: sealLifecycle,
   } = createFinalizableDraftLifecycle({
     throttleMs,
+    coalesceInFlight: true,
     state: streamState,
     sendOrEditStreamMessage,
     readMessageId: () => currentGeneration.postId,
@@ -557,7 +558,12 @@ export function createMattermostDraftStream(params: {
     }
     const currentText = currentGeneration.latestAssistantText?.trim() ?? "";
     const remaining = remainingText.trim();
-    if (currentText && !remaining.startsWith(currentText)) {
+    // A cumulative final may shorten the current draft without repeating sealed prose.
+    if (
+      currentText &&
+      !remaining.startsWith(currentText) &&
+      (!remaining || !currentText.startsWith(remaining))
+    ) {
       return { kind: "full" as const, text, publishedParts };
     }
     return remaining
