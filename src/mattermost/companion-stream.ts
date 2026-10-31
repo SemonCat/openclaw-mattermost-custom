@@ -21,6 +21,7 @@ export function createMattermostCompanionStream(params: {
   channelId: string;
   rootId?: string;
   postProps?: Record<string, unknown>;
+  resolvePostProps?: () => Record<string, unknown> | undefined;
   warn?: (message: string) => void;
 }) {
   type Entry = {
@@ -90,8 +91,12 @@ export function createMattermostCompanionStream(params: {
         rootId: params.rootId,
         message,
         ...(generation ? { type: POST_TYPE } : {}),
-        props: generation
-          ? { ...params.postProps, openclaw_stream: { version: 1, generation } }
+        props: generation || params.resolvePostProps
+          ? {
+              ...params.postProps,
+              ...params.resolvePostProps?.(),
+              ...(generation ? { openclaw_stream: { version: 1, generation } } : {}),
+            }
           : params.postProps,
       });
       if (generation) {

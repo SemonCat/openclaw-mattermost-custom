@@ -15,6 +15,8 @@ mkdirSync(dist, {recursive: true});
 execFileSync(process.execPath, [typescript, ...compilerArgs], {cwd: webappRoot, stdio: 'inherit'});
 const bundle = [
     readFileSync(path.join(dist, 'stream-state.js'), 'utf8'),
+    `window.OpenClawTaskProgressCSS = ${JSON.stringify(readFileSync(path.join(webappRoot, 'src', 'task-progress.css'), 'utf8'))};`,
+    readFileSync(path.join(webappRoot, 'src', 'task-progress.js'), 'utf8'),
     readFileSync(path.join(webappRoot, 'src', 'plugin.js'), 'utf8'),
 ].join('\n');
 writeFileSync(path.join(dist, 'main.js'), bundle);

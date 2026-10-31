@@ -40,6 +40,7 @@ import {
 import { createMattermostModelPickerInteractionHandler } from "./monitor-model-picker.js";
 import { createMattermostPostHandler } from "./monitor-posts.js";
 import { createMattermostReactionHandler } from "./monitor-reactions.js";
+import { createMattermostPostMutationHandler } from "./post-mutations.js";
 import { attachMattermostRestartRecoveryProgress } from "./restart-recovery-progress.js";
 import { createMattermostMonitorResources } from "./monitor-resources.js";
 import { registerMattermostMonitorSlashCommands } from "./monitor-slash.js";
@@ -273,6 +274,7 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
   };
   const handlePost = createMattermostPostHandler(monitor);
   const handleReactionEvent = createMattermostReactionHandler(monitor);
+  const handlePostMutation = createMattermostPostMutationHandler(monitor);
   const resolveIngressThreadId = ({ postId, rootId, channelType }: MattermostIngressLaneFacts) => {
     const resolvedChannelType = normalizeOptionalString(channelType);
     if (!resolvedChannelType) {
@@ -345,6 +347,10 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
     abortSignal: opts.abortSignal,
     resolveThreadId: resolveIngressThreadId,
     dispatch: async (post, payload, turnAdoptionLifecycle) => {
+      if (payload.event === "post_edited" || payload.event === "post_deleted") {
+        await handlePostMutation(post, payload, turnAdoptionLifecycle.abortSignal);
+        return;
+      }
       // Deferred claims settle through lifecycle callbacks, so terminal flush
       // errors spend the drain's bounded retry budget before dead-lettering.
       await debouncer.enqueue({ post, payload, turnAdoptionLifecycle });
@@ -367,6 +373,7 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
     nextSeq: () => sequence++,
     getBotUpdateAt: async () => (await fetchMattermostMe(client)).update_at ?? 0,
     onPosted: ingress.receive,
+    onPostMutation: ingress.receive,
     onReaction: handleReactionEvent,
   });
 

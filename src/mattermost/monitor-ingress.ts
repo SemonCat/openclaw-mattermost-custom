@@ -12,6 +12,7 @@ import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 import { getMattermostRuntime } from "../runtime.js";
 import type { MattermostPost } from "./client.js";
 import { createMattermostIngressQueue } from "./ingress-queue.js";
+import { mattermostPostMutationId } from "./post-mutations.js";
 import {
   parseMattermostEventPayload,
   parseMattermostPost,
@@ -185,12 +186,18 @@ function inspectMattermostIngressEvent(
   laneKey: string;
 } | null {
   const envelope = parseRawObject(rawEvent, "Mattermost WebSocket event");
-  if (envelope.event !== "posted") {
+  if (!["posted", "post_edited", "post_deleted"].includes(String(envelope.event))) {
     return null;
   }
   const data = isRecord(envelope.data) ? envelope.data : null;
   const post = parseRawPost(data?.post);
-  const eventId = requiredString(post.id, "post.id");
+  const postId = requiredString(post.id, "post.id");
+  const eventId = envelope.event === "posted"
+    ? postId
+    : mattermostPostMutationId(String(envelope.event), post);
+  if (!eventId) {
+    throw new MattermostIngressPermanentError("invalid-event", "Mattermost mutation has no revision.");
+  }
   requiredString(post.user_id, "post.user_id");
   // Mattermost can carry the channel id on the post, the event data, or the
   // broadcast envelope (the monitor dispatch honors all three). Rejecting the
@@ -207,7 +214,7 @@ function inspectMattermostIngressEvent(
   const channelType = optionalString(data?.channel_type);
   const facts = {
     channelId,
-    postId: eventId,
+    postId,
     ...(rootId ? { rootId } : {}),
     ...(channelType ? { channelType } : {}),
   } satisfies MattermostIngressLaneFacts;
@@ -224,7 +231,7 @@ function parseClaimedEvent(
   payload: MattermostEventPayload;
 } {
   const payload = parseMattermostEventPayload(rawEvent);
-  if (!payload || payload.event !== "posted") {
+  if (!payload || !["posted", "post_edited", "post_deleted"].includes(payload.event ?? "")) {
     throw new MattermostIngressPermanentError(
       "invalid-event",
       `Mattermost ingress row ${eventId} is not a posted event.`,
@@ -238,7 +245,8 @@ function parseClaimedEvent(
     payload.data?.channel_id?.trim() ||
     payload.broadcast?.channel_id?.trim();
   const senderId = post?.user_id?.trim();
-  if (!post || post.id !== eventId || !senderId || !claimedChannelId) {
+  const claimedId = payload.event === "posted" ? post?.id : post && mattermostPostMutationId(payload.event, post);
+  if (!post || claimedId !== eventId || !senderId || !claimedChannelId) {
     throw new MattermostIngressPermanentError(
       "invalid-event",
       `Mattermost ingress row ${eventId} has invalid post identity.`,

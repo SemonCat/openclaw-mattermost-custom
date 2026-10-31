@@ -344,7 +344,6 @@ export function createMattermostTaskProgressCard(params: {
   let publishedRevision = 0;
   let resultPostStarted = false;
   let taskPostId: string | undefined;
-  let taskPostNeedsIdentityUpdate = false;
   let writeTail = Promise.resolve(true);
   const workSessions = new Map<string, MattermostTaskProgressWorkSession>();
 
@@ -362,6 +361,23 @@ export function createMattermostTaskProgressCard(params: {
       return Boolean(taskPostId);
     }
     const message = renderMattermostTaskProgressCard(snapshot);
+    const props = {
+      ...params.postProps,
+      openclaw_task_progress: {
+        version: 1,
+        source_message: message,
+        title: snapshot.title,
+        explanation: normalizeExplanation(snapshot.explanation),
+        status: snapshot.status,
+        steps: snapshot.steps,
+        work_sessions: (snapshot.workSessions ?? [])
+          .slice(0, MAX_RENDERED_WORK_SESSIONS)
+          .map(({ label, url, status, progress }) => ({ label, url, status, progress })),
+        hidden_work_sessions: Math.max(
+          0, (snapshot.workSessions?.length ?? 0) - MAX_RENDERED_WORK_SESSIONS,
+        ),
+      },
+    };
     if (taskPostId && message === publishedMessage) {
       publishedRevision = snapshot.revision;
       return true;
@@ -375,7 +391,6 @@ export function createMattermostTaskProgressCard(params: {
       }
       try {
         taskPostId = await params.claimResultPost();
-        taskPostNeedsIdentityUpdate = Boolean(taskPostId);
       } catch (error: unknown) {
         logFailure("handoff", error);
         return false;
@@ -394,7 +409,7 @@ export function createMattermostTaskProgressCard(params: {
           channelId: params.channelId,
           message,
           rootId: params.rootId,
-          props: params.postProps,
+          props,
         });
         taskPostId = post.id;
         publishedMessage = message;
@@ -413,9 +428,8 @@ export function createMattermostTaskProgressCard(params: {
     try {
       await updateMattermostPost(params.client, taskPostId, {
         message,
-        ...(taskPostNeedsIdentityUpdate ? { props: params.postProps } : {}),
+        props,
       });
-      taskPostNeedsIdentityUpdate = false;
       publishedMessage = message;
       publishedRevision = snapshot.revision;
       return true;
@@ -747,7 +761,7 @@ export function createMattermostTaskProgressCard(params: {
     settleBeforeResultPostCreate: (): Promise<void> | undefined =>
       settleBeforeResultPost(true),
     finish: async (result: {
-      outcome?: "completed" | "failed";
+      outcome?: "completed" | "failed" | "cancelled";
       deliveryFailed?: boolean;
       isCurrent?: () => boolean;
     }): Promise<void> => {
@@ -761,7 +775,7 @@ export function createMattermostTaskProgressCard(params: {
       const nominallyCompleted =
         result.outcome === "completed" || lifecycleTerminal === "completed";
       parentTerminalStatus =
-        lifecycleTerminal === "cancelled"
+        lifecycleTerminal === "cancelled" || result.outcome === "cancelled"
           ? "cancelled"
           : result.deliveryFailed || result.outcome === "failed" || lifecycleTerminal === "failed"
             ? "failed"

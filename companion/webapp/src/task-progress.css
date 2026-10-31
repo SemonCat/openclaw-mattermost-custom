@@ -1,0 +1,104 @@
+.oc-task-card {
+    --oc-task-blue: #168fbd;
+    --oc-task-muted: rgba(var(--center-channel-color-rgb, 63, 67, 80), 0.64);
+    max-width: 640px;
+    padding: 8px 0 4px;
+    color: var(--center-channel-color, #3f4350);
+    font-family: inherit;
+}
+.oc-task-heading {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+    margin-bottom: 14px;
+}
+.oc-task-card .oc-task-title {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 700;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+}
+.oc-task-status {
+    color: var(--oc-task-muted);
+    font-size: 12px;
+    font-weight: 600;
+}
+.oc-task-status--in_progress { color: var(--oc-task-blue); }
+.oc-task-status--failed { color: var(--error-text, #c43133); }
+.oc-task-explanation {
+    margin-bottom: 14px;
+    font-size: 14px;
+}
+.oc-task-card .oc-task-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+.oc-task-card .oc-task-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    margin: 0;
+    padding: 0;
+    font-size: 16px;
+    font-weight: 600;
+    line-height: 1.5;
+}
+.oc-task-row-content { min-width: 0; overflow-wrap: anywhere; }
+.oc-task-icon {
+    display: inline-flex;
+    flex: 0 0 21px;
+    align-items: center;
+    justify-content: center;
+    width: 21px;
+    height: 21px;
+    margin-top: 2px;
+    border: 1.5px solid rgba(var(--center-channel-color-rgb, 63, 67, 80), 0.26);
+    border-radius: 4px;
+}
+.oc-task-icon svg { width: 20px; height: 20px; }
+.oc-task-icon--completed {
+    border-color: var(--oc-task-blue);
+    background: var(--oc-task-blue);
+    color: #fff;
+}
+.oc-task-icon--in_progress, .oc-task-icon--running {
+    border: 2px solid rgba(22, 143, 189, 0.2);
+    border-top-color: var(--oc-task-blue);
+    border-right-color: var(--oc-task-blue);
+    border-radius: 50%;
+}
+.oc-task-icon--spin { animation: oc-task-spin 1s linear infinite; }
+.oc-task-icon--failed { color: var(--error-text, #c43133); border-color: currentColor; }
+.oc-task-icon--cancelled { color: var(--oc-task-muted); }
+.oc-task-row--active .oc-task-row-content { color: var(--oc-task-blue); }
+.oc-task-subtasks { margin-top: 20px; }
+.oc-task-card .oc-task-subtitle {
+    margin: 0 0 10px;
+    color: var(--oc-task-muted);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+.oc-task-card .oc-task-row--subtask { font-size: 14px; font-weight: 500; }
+.oc-task-work-status, .oc-task-work-progress, .oc-task-overflow {
+    color: var(--oc-task-muted);
+    font-size: 12px;
+    font-weight: 400;
+}
+.oc-task-summary { margin-top: 18px; color: var(--oc-task-muted); font-size: 14px; }
+.oc-task-footer { margin-top: 5px; color: var(--oc-task-muted); font-size: 12px; font-style: italic; }
+@keyframes oc-task-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+    .oc-task-icon--spin { animation: none; }
+}
+@media (max-width: 480px) {
+    .oc-task-card .oc-task-row { gap: 10px; font-size: 15px; }
+    .oc-task-card .oc-task-title { font-size: 17px; }
+}

@@ -139,16 +139,31 @@ describe("MattermostConfigSchema", () => {
     expect(result.success).toBe(true);
   });
 
-  it("accepts account-scoped message read action toggles", () => {
+  it("accepts account-scoped message and file action toggles", () => {
     const result = MattermostConfigSchema.safeParse({
-      actions: { messages: false, edit: false, delete: false, pins: false },
+      actions: { messages: false, downloadFiles: false, edit: false, delete: false, pins: false },
       accounts: {
         reader: {
-          actions: { messages: true, edit: true, delete: true, pins: true },
+          actions: { messages: true, downloadFiles: true, edit: true, delete: true, pins: true },
         },
       },
     });
     expect(result.success).toBe(true);
+  });
+
+  it("keeps omitted downloadFiles unset for runtime defaulting and account inheritance", () => {
+    const parsed = MattermostConfigSchema.parse({
+      accounts: {
+        inherited: {},
+        partial: { actions: { messages: false } },
+        disabled: { actions: { downloadFiles: false } },
+      },
+    });
+
+    expect(parsed).not.toHaveProperty("actions");
+    expect(parsed.accounts?.inherited).not.toHaveProperty("actions");
+    expect(parsed.accounts?.partial?.actions).toEqual({ messages: false });
+    expect(parsed.accounts?.disabled?.actions).toEqual({ downloadFiles: false });
   });
 
   it("preserves omitted search and reference media fields for runtime inheritance", () => {

@@ -564,6 +564,30 @@ describe("mattermost websocket monitor", () => {
     expect(decode.mock.calls.length).toBeLessThanOrEqual(1);
   });
 
+  it("hands edit/delete envelopes to durable mutation ingress without treating them as new posts", async () => {
+    const socket = new FakeWebSocket();
+    const onPosted = vi.fn(async () => {});
+    const onPostMutation = vi.fn(async () => {});
+    const connected = createMattermostConnectOnce({
+      wsUrl: "wss://example.invalid/api/v4/websocket",
+      botToken: "token", runtime: testRuntime(), nextSeq: () => 1,
+      onPosted, onPostMutation, webSocketFactory: () => socket,
+    })();
+    socket.emitOpen();
+    socket.emitMessage(authOkFrame(1));
+    for (const event of ["post_edited", "post_deleted"]) {
+      socket.emitMessage(Buffer.from(JSON.stringify({
+        event, data: { post: JSON.stringify({
+          id: "source", channel_id: "room", user_id: "alice", edit_at: 100, delete_at: 200,
+        }) },
+      })));
+    }
+    await vi.waitFor(() => expect(onPostMutation).toHaveBeenCalledTimes(2));
+    expect(onPosted).not.toHaveBeenCalled();
+    socket.emitClose(1000);
+    await connected;
+  });
+
   it("terminates when bot update_at changes (disable/enable cycle)", async () => {
     vi.useFakeTimers();
     const socket = new FakeWebSocket();

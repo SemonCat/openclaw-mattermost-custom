@@ -12,11 +12,12 @@ import type { HistoryEntry, OpenClawConfig } from "./runtime-api.js";
 
 const cfg = { channels: { mattermost: { groupPolicy: "open" } } } as OpenClawConfig;
 
-function createFixture(request = vi.fn()) {
+function createFixture(request = vi.fn(), config = cfg, historyLimit = 10) {
   const channelHistories = new Map<string, HistoryEntry[]>();
   const monitor = {
-    account: { accountId: "default", config: { groupPolicy: "open" } },
-    cfg,
+    account: { accountId: "default", config: config.channels?.mattermost ?? {} },
+    cfg: config,
+    botUserId: "bot",
     client: { request },
     groupPolicy: "open",
     pairing: { readAllowFromStore: vi.fn(async () => []) },
@@ -25,7 +26,7 @@ function createFixture(request = vi.fn()) {
   const recover = createMattermostThreadBackfill({
     monitor,
     channelHistories,
-    historyLimit: 10,
+    historyLimit,
   });
   return { channelHistories, monitor, recover, request };
 }
@@ -119,5 +120,113 @@ describe("Mattermost thread backfill", () => {
     expect(monitor.logVerboseMessage).toHaveBeenCalledWith(
       expect.stringContaining("thread recovery gave up"),
     );
+  });
+});
+
+function roomTurn() {
+  return {
+    ...turn(),
+    threadRootId: undefined,
+    excludedMessageIds: ["batched-1"],
+  };
+}
+
+function roomPage() {
+  return {
+    order: ["post-3", "old", "reply", "deleted", "system", "bot-post", "future", "batched-1"],
+    posts: {
+      "post-3": { id: "post-3", channel_id: "chan-1", user_id: "user-1", create_at: 300, message: "current" },
+      old: { id: "old", channel_id: "chan-1", user_id: "user-1", create_at: 100, message: "earlier discussion" },
+      reply: { id: "reply", channel_id: "chan-1", user_id: "user-1", create_at: 120, root_id: "old", message: "another thread" },
+      deleted: { id: "deleted", channel_id: "chan-1", user_id: "user-1", create_at: 130, delete_at: 200, message: "removed" },
+      system: { id: "system", channel_id: "chan-1", user_id: "user-1", create_at: 140, type: "system_join_channel", message: "joined" },
+      "bot-post": { id: "bot-post", channel_id: "chan-1", user_id: "bot", create_at: 150, message: "preview" },
+      future: { id: "future", channel_id: "chan-1", user_id: "user-1", create_at: 400, message: "newer" },
+      "batched-1": { id: "batched-1", channel_id: "chan-1", user_id: "user-1", create_at: 250, message: "already in turn" },
+    },
+  };
+}
+
+describe("Mattermost room history recovery", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getSessionEntry.mockReturnValue(undefined);
+  });
+
+  it("takes one bounded prior channel page and retains only visible root messages", async () => {
+    const { recover, request } = createFixture(vi.fn(async () => roomPage()));
+    const result = await recover(roomTurn());
+    expect(result).toEqual({
+      current: true,
+      history: [
+        { sender: "user-1", body: "earlier discussion", timestamp: 100, messageId: "old" },
+      ],
+    });
+    expect(request).toHaveBeenCalledOnce();
+    expect(request.mock.calls[0]?.[0]).toBe("/channels/chan-1/posts?per_page=11&before=post-3");
+    await recover(roomTurn());
+    expect(request).toHaveBeenCalledOnce();
+  });
+
+  it("applies the current sender visibility policy before including history", async () => {
+    const config = {
+      channels: {
+        mattermost: {
+          groupPolicy: "allowlist", groupAllowFrom: ["other-user"],
+          contextVisibility: "allowlist",
+        },
+      },
+    } as OpenClawConfig;
+    const { recover } = createFixture(vi.fn(async () => roomPage()), config);
+    expect(await recover({ ...roomTurn(), cfg: config })).toEqual({
+      current: true,
+      history: [],
+    });
+  });
+
+  it.each(["foreign", "wrong-id", "invalid-time", "oversized", "missing-ordered-post"])(
+    "omits the entire page on %s provider data, including rows outside the output window",
+    async (violation) => {
+      const page = roomPage();
+      const posts = page.posts as Record<string, Record<string, unknown>>;
+      if (violation === "foreign") {
+        posts.hidden = { id: "hidden", channel_id: "different", create_at: 500 };
+      } else if (violation === "wrong-id") {
+        posts.hidden = { id: "different", channel_id: "chan-1", create_at: 500 };
+      } else if (violation === "invalid-time") {
+        posts.hidden = { id: "hidden", channel_id: "chan-1", create_at: -1 };
+      } else if (violation === "missing-ordered-post") {
+        page.order.push("missing");
+      } else {
+        for (let i = 0; i < 201; i++) {
+          posts[`hidden-${i}`] = { id: `hidden-${i}`, channel_id: "chan-1", create_at: 500 };
+        }
+      }
+      const { recover, channelHistories } = createFixture(vi.fn(async () => page));
+      expect(await recover(roomTurn())).toEqual({ current: true, history: undefined });
+      expect(channelHistories.size).toBe(0);
+    },
+  );
+
+  it("does not publish a room snapshot after a turn is cancelled", async () => {
+    let release!: (value: unknown) => void;
+    const { recover, channelHistories } = createFixture(
+      vi.fn(() => new Promise((resolve) => { release = resolve; })),
+    );
+    const controller = new AbortController();
+    const pending = recover({ ...roomTurn(), abortSignal: controller.signal });
+    controller.abort();
+    release(roomPage());
+    expect(await pending).toEqual({ current: false, history: undefined });
+    expect(channelHistories.size).toBe(0);
+  });
+
+  it("does not read channel history for flat DMs or disabled history", async () => {
+    const { recover, request } = createFixture();
+    await recover({ ...roomTurn(), kind: "direct" });
+    expect(request).not.toHaveBeenCalled();
+    const disabled = createFixture(vi.fn(), cfg, 0);
+    await disabled.recover(roomTurn());
+    expect(disabled.request).not.toHaveBeenCalled();
   });
 });

@@ -20,6 +20,10 @@ vi.mock("openclaw/plugin-sdk/channel-inbound", async (importOriginal) => ({
   ...(await importOriginal<typeof import("openclaw/plugin-sdk/channel-inbound")>()),
   resolveInboundSessionEnvelopeContextAsync: resolveEnvelope,
 }));
+vi.mock("openclaw/plugin-sdk/session-store-runtime", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("openclaw/plugin-sdk/session-store-runtime")>()),
+  getSessionEntry: () => undefined,
+}));
 
 describe("Mattermost bot-owned thread mention policy", () => {
   beforeEach(() => {
@@ -218,5 +222,33 @@ describe("Mattermost bot-owned thread mention policy", () => {
     await fixture.receive();
 
     expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("recovers room history for a new root turn through the real post handler", async () => {
+    const fixture = setup({
+      requireMention: false, historyLimit: 3, replyToMode: "all",
+      referenceMedia: { enabled: false }, permalinkHydration: { enabled: false },
+    });
+    fixture.request.mockImplementation(async (endpoint: string) => {
+      expect(endpoint).toBe("/channels/room/posts?per_page=4&before=new-root");
+      return {
+        order: ["earlier-root"],
+        posts: {
+          "earlier-root": {
+            id: "earlier-root", channel_id: "room", user_id: "sender",
+            create_at: 1, message: "Discussion before the restart",
+          },
+        },
+      } as never;
+    });
+    await fixture.receive({ id: "new-root", root_id: "", create_at: 2, message: "@bot continue" });
+    expect(dispatch).toHaveBeenCalledOnce();
+    expect(dispatch.mock.calls[0]![1].ctxPayload).toMatchObject({
+      MessageThreadId: "new-root",
+      InboundHistory: [
+        expect.objectContaining({ body: "Discussion before the restart", messageId: "earlier-root" }),
+      ],
+    });
+    expect(fixture.request).toHaveBeenCalledOnce();
   });
 });

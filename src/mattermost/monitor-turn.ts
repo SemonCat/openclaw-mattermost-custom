@@ -54,6 +54,7 @@ import { sendMessageMattermost } from "./send.js";
 import { retainMattermostProgressDraft } from "./monitor-progress-continuation.js";
 import { withMattermostSessionAdmissionRetry } from "./session-admission-retry.js";
 import { recordMattermostThreadParticipation } from "./thread-participation.js";
+import { createMattermostPreviewStop } from "./preview-stop.js";
 import {
   createMattermostTaskProgressCard,
   type MattermostVisibleWorkSession,
@@ -182,6 +183,9 @@ export async function dispatchMattermostInboundTurn(
     (hookRunner?.hasHooks("message_sending") ?? false)
   );
   const draftPreviewEnabled = allowProviderPreview && account.streamingMode !== "off";
+  const previewStop = createMattermostPreviewStop({
+    monitor, channelId, senderId, sessionKey: thread.sessionKey,
+  });
   const draftToolProgressEnabled =
     draftPreviewEnabled && shouldUpdateMattermostDraftToolProgress(account);
   const suppressDefaultToolProgressMessages =
@@ -226,6 +230,8 @@ export async function dispatchMattermostInboundTurn(
           ...(effectiveReplyToId ? { threadId: effectiveReplyToId } : {}),
         }),
         beforeCreatePost: taskProgressCard.settleBeforeResultPostCreate,
+        resolvePostProps: previewStop.props,
+        onPostCreated: previewStop.notePost,
         throttleMs: 1200,
         companion: account.config.streaming?.transport === "companion",
         maxChars: textLimit,
@@ -489,6 +495,10 @@ export async function dispatchMattermostInboundTurn(
   const deferredTurnAdoptionLifecycle = ingressReplyOptions?.turnAdoptionLifecycle
     ? {
         ...ingressReplyOptions.turnAdoptionLifecycle,
+        abortSignal: AbortSignal.any([
+          ingressReplyOptions.turnAdoptionLifecycle.abortSignal!,
+          previewStop.signal,
+        ]),
         // Core owns a deferred follow-up after the initial dispatch returns. Its
         // terminal settlement is the safe point to release this turn's provider
         // presentation resources, including plan/tool callbacks and subscriptions.
@@ -699,6 +709,7 @@ export async function dispatchMattermostInboundTurn(
     } catch (err) {
       monitor.logVerboseMessage(`mattermost draft preview cleanup failed: ${String(err)}`);
     }
+    await previewStop.finish();
     const dispatchResult = turnResult?.dispatched
       ? (turnResult.dispatchResult as MattermostReplyDispatchResult)
       : undefined;
@@ -738,7 +749,7 @@ export async function dispatchMattermostInboundTurn(
       );
     }
     await taskProgressCard.finish({
-      outcome: readAgentRunTerminalOutcome(dispatchResult),
+      outcome: previewStop.stopped ? "cancelled" : readAgentRunTerminalOutcome(dispatchResult),
       deliveryFailed: dispatchError || finalDeliveryFailed || queuedFollowupDeliveryError,
     });
     continuationOwner?.finishInitial();
@@ -812,6 +823,7 @@ export async function dispatchMattermostInboundTurn(
               dispatcherOptions,
               delivery,
               replyOptions: {
+                abortSignal: previewStop.signal,
                 skillFilter: replyOptions.skillFilter,
                 progressPreambleEnabled: draftToolProgressEnabled,
                 commentaryProgressEnabled: progressDraft.commentaryProgressEnabled,
@@ -843,6 +855,7 @@ export async function dispatchMattermostInboundTurn(
                   hasStartedWork = true;
                   reactions.noteRunStart(runId);
                   initialRunId ??= runId;
+                  if (draftPreviewEnabled) previewStop.activate(runId);
                   taskProgressCard.noteRunStart(runId);
                 },
                 onVisibleWorkSessions: (sessions) => {

@@ -3,6 +3,7 @@ import {
   normalizeMattermostBaseUrl,
   fetchMattermostChannel,
   fetchMattermostFileInfo,
+  fetchMattermostMe,
   fetchMattermostPost,
   fetchMattermostPostThread,
   fetchMattermostUsersByIds,
@@ -12,6 +13,7 @@ import {
   type MattermostPost,
   type MattermostUser,
 } from "./client.js";
+import { restoreMattermostTaskMessage } from "./task-progress-projection.js";
 
 const MATTERMOST_POST_ID_PATTERN = /^[a-z0-9]{26}$/i;
 const MATTERMOST_URL_PATTERN = /https?:\/\/[^\s<>"']+/giu;
@@ -226,7 +228,10 @@ export async function fetchMattermostThreadContext(params: {
     ),
   ];
   const boundedFileIds = fileIds.slice(0, MAX_THREAD_FILES);
-  const [users, fileInfos] = await Promise.all([
+  const hasTaskProjection = messages.some(
+    (post) => post.type === "custom_openclaw_task" && post.props?.openclaw_task_mobile !== undefined,
+  );
+  const [users, fileInfos, botUserId] = await Promise.all([
     fetchMattermostUsersByIds(params.client, userIds).catch(() => []),
     Promise.all(
       boundedFileIds.map(async (fileId) => {
@@ -237,6 +242,11 @@ export async function fetchMattermostThreadContext(params: {
         }
       }),
     ),
+    hasTaskProjection
+      ? fetchMattermostMe(params.client)
+          .then((user) => typeof user?.id === "string" ? user.id : undefined)
+          .catch(() => undefined)
+      : undefined,
   ]);
   const usersById = new Map(users.map((user) => [user.id, user]));
   const filesById = new Map(fileInfos.map((file) => [file.id, normalizeAttachment(file)]));
@@ -244,7 +254,7 @@ export async function fetchMattermostThreadContext(params: {
   let remainingMessageChars = MAX_THREAD_MESSAGE_CHARS;
   let messageContentTruncated = false;
   const posts = messages.map((post): MattermostThreadPostContext => {
-    const rawMessage = post.message ?? "";
+    const rawMessage = (botUserId ? restoreMattermostTaskMessage(post, botUserId) : post).message ?? "";
     const message = rawMessage.slice(0, remainingMessageChars);
     const messageTruncated = message.length < rawMessage.length;
     remainingMessageChars = Math.max(0, remainingMessageChars - message.length);

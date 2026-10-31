@@ -6,6 +6,7 @@ export {
 export { monitorMattermostProvider } from "./mattermost/monitor.js";
 export { probeMattermost } from "./mattermost/probe.js";
 export { addMattermostReaction, removeMattermostReaction } from "./mattermost/reactions.js";
+export { downloadMattermostPostAttachment } from "./mattermost/file-action.js";
 export {
   deleteMattermostMessageAction,
   editMattermostMessageAction,

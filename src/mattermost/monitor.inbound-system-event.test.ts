@@ -1813,7 +1813,7 @@ describe("mattermost inbound user posts", () => {
       expect.objectContaining({
         channelId: "chan-1",
         rootId: "thread-root-1",
-        props: {
+        props: expect.objectContaining({
           openclaw_mattermost: {
             version: 1,
             kind: "task_progress",
@@ -1822,7 +1822,12 @@ describe("mattermost inbound user posts", () => {
             channelId: "chan-1",
             threadId: "thread-root-1",
           },
-        },
+          openclaw_task_progress: expect.objectContaining({
+            version: 1,
+            status: "in_progress",
+            steps: [{ step: "Inspect", status: "in_progress" }],
+          }),
+        }),
       }),
     );
     expect(mockState.createMattermostDraftStream).toHaveBeenCalledWith(

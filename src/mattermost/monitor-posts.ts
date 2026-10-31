@@ -452,20 +452,22 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
       envelope: envelopeOptions,
     });
     const backfill =
-      historyKey && effectiveReplyToId
+      historyKey && (effectiveReplyToId || kind !== "direct")
         ? await recoverThread({
             cfg,
             historyKey,
-            threadRootId: effectiveReplyToId,
+            threadRootId: kind === "direct" || threadRootId ? effectiveReplyToId : undefined,
             currentPostId: post.id,
             currentPostTimestamp: post.create_at ?? 0,
+            excludedMessageIds: allMessageIds,
+            abortSignal: turnAdoptionLifecycle?.abortSignal,
             agentId: route.agentId,
             channelId,
             kind,
           })
         : undefined;
     if (backfill && !backfill.current) {
-      monitor.logVerboseMessage("mattermost: drop stale thread turn after session rotation");
+      monitor.logVerboseMessage("mattermost: drop stale history turn after session rotation");
       return;
     }
     const turnHistories = new Map<string, HistoryEntry[]>(

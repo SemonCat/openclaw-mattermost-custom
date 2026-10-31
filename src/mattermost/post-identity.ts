@@ -4,6 +4,7 @@ import {
   type MattermostClient,
   type MattermostPost,
 } from "./client.js";
+import { restoreMattermostTaskMessage } from "./task-progress-projection.js";
 
 const MATTERMOST_IDENTITY_PROP = "openclaw_mattermost";
 const MATTERMOST_IDENTITY_VERSION = 1;
@@ -128,7 +129,9 @@ export function findMattermostRecoveryPostIdentity(params: {
   agentId: string;
 }): MattermostRecoveryPostIdentity | undefined {
   const routed = sortNewestFirst(
-    params.posts.filter((post) => isExactRoutePost({ ...params, post })),
+    params.posts
+      .filter((post) => isExactRoutePost({ ...params, post }))
+      .map((post) => restoreMattermostTaskMessage(post, params.botUserId)),
   );
   const taggedTask = routed.find((post) => {
     const identity = readPostIdentity(post);

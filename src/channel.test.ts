@@ -4,8 +4,13 @@ import { renderMessagePresentationFallbackText } from "openclaw/plugin-sdk/inter
 import type { OpenClawConfig } from "../runtime-api.js";
 import { createChannelMessageReplyPipeline } from "../runtime-api.js";
 
-const { sendMessageMattermostMock, mockFetchGuard } = vi.hoisted(() => ({
+const {
+  sendMessageMattermostMock,
+  downloadMattermostPostAttachmentMock,
+  mockFetchGuard,
+} = vi.hoisted(() => ({
   sendMessageMattermostMock: vi.fn(),
+  downloadMattermostPostAttachmentMock: vi.fn(),
   mockFetchGuard: vi.fn(async (p: { url: string; init?: RequestInit }) => {
     const response = await globalThis.fetch(p.url, p.init);
     return { response, release: async () => {}, finalUrl: p.url };
@@ -15,6 +20,10 @@ const { sendMessageMattermostMock, mockFetchGuard } = vi.hoisted(() => ({
 vi.mock("./mattermost/send.js", () => ({
   reconcileMattermostUnknownSend: vi.fn(),
   sendMessageMattermost: sendMessageMattermostMock,
+}));
+
+vi.mock("./mattermost/file-action.js", () => ({
+  downloadMattermostPostAttachment: downloadMattermostPostAttachmentMock,
 }));
 
 vi.mock("openclaw/plugin-sdk/ssrf-runtime", async () => {
@@ -254,6 +263,8 @@ describe("mattermostPlugin", () => {
       messageId: "post-1",
       channelId: "channel-1",
     });
+    downloadMattermostPostAttachmentMock.mockReset();
+    downloadMattermostPostAttachmentMock.mockResolvedValue({ details: { ok: true } });
   });
 
   it("keeps channel model overrides dynamic while account config restarts stay scoped", () => {
@@ -792,6 +803,7 @@ describe("mattermostPlugin", () => {
       expect(actions).toContain("react");
       expect(actions).toContain("reactions");
       expect(actions).not.toContain("read");
+      expect(actions).toContain("download-file");
       expect(actions).toContain("edit");
       expect(actions).toContain("delete");
       expect(actions).toContain("pin");
@@ -800,7 +812,84 @@ describe("mattermostPlugin", () => {
       expect(actions).toContain("send");
       expect(mattermostPlugin.actions?.supportsAction?.({ action: "react" })).toBe(true);
       expect(mattermostPlugin.actions?.supportsAction?.({ action: "read" })).toBe(true);
+      expect(mattermostPlugin.actions?.supportsAction?.({ action: "download-file" })).toBe(true);
       expect(mattermostPlugin.actions?.supportsAction?.({ action: "send" })).toBe(false);
+    });
+
+    it("describes the current-conversation post and file identifiers for downloads", () => {
+      const cfg = createMattermostTestConfig(`download-discovery-${++reactionActionSequence}`);
+      const discovery = mattermostPlugin.actions?.describeMessageTool?.({ cfg });
+
+      expect(discovery?.actions).toContain("download-file");
+      expect(discovery?.schema).toMatchObject({
+        properties: {
+          fileId: { type: "string" },
+          postId: { type: "string" },
+          messageId: { type: "string" },
+        },
+        actions: ["download-file"],
+        visibility: "current-channel",
+      });
+    });
+
+    it("dispatches download-file with the trusted current-conversation context", async () => {
+      const cfg = createMattermostTestConfig(`download-dispatch-${++reactionActionSequence}`);
+      const context = createMattermostActionContext({
+        action: "download-file",
+        params: {
+          postId: "p".repeat(26),
+          fileId: "f".repeat(26),
+          to: "channel:CURRENT",
+        },
+        cfg,
+        accountId: "default",
+        requesterAccountId: "default",
+        requesterSenderId: "u".repeat(26),
+        conversationReadOrigin: "delegated",
+        toolContext: {
+          currentChannelProvider: "mattermost",
+          currentChannelId: "CURRENT",
+        },
+      });
+
+      await expect(mattermostPlugin.actions?.handleAction?.(context)).resolves.toMatchObject({
+        details: { ok: true },
+      });
+      expect(downloadMattermostPostAttachmentMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          accountId: "default",
+          requesterAccountId: "default",
+          requesterSenderId: "u".repeat(26),
+          postId: "p".repeat(26),
+          fileId: "f".repeat(26),
+          authorizedTarget: "channel:CURRENT",
+          toolContext: {
+            currentChannelProvider: "mattermost",
+            currentChannelId: "CURRENT",
+          },
+        }),
+      );
+    });
+
+    it("blocks download-file when the account disables attachment downloads", async () => {
+      const cfg = createMattermostTestConfig(`download-disabled-${++reactionActionSequence}`);
+      const mattermostConfig = cfg.channels?.mattermost;
+      if (!mattermostConfig) {
+        throw new Error("expected Mattermost config fixture");
+      }
+      mattermostConfig.actions = { downloadFiles: false };
+
+      await expect(
+        mattermostPlugin.actions?.handleAction?.(
+          createMattermostActionContext({
+            action: "download-file",
+            params: { postId: "p".repeat(26), fileId: "f".repeat(26) },
+            cfg,
+            accountId: "default",
+          }),
+        ),
+      ).rejects.toThrow("Mattermost attachment downloads are disabled in config");
+      expect(downloadMattermostPostAttachmentMock).not.toHaveBeenCalled();
     });
 
     it("hides react when mattermost is not configured", () => {
@@ -829,7 +918,10 @@ describe("mattermostPlugin", () => {
 
       const discovery = mattermostPlugin.actions?.describeMessageTool?.({ cfg });
       expect(discovery?.capabilities).toContain("presentation");
-      expect(discovery?.schema).toBeUndefined();
+      expect(discovery?.schema).toMatchObject({
+        actions: ["download-file"],
+        visibility: "current-channel",
+      });
     });
 
     it("prepares supported sends for the core durable lifecycle", async () => {
@@ -959,7 +1051,7 @@ describe("mattermostPlugin", () => {
             enabled: true,
             botToken: "test-token-placeholder",
             baseUrl: "https://chat.example.com",
-            actions: { edit: false, delete: false, pins: false },
+            actions: { downloadFiles: false, edit: false, delete: false, pins: false },
           },
         },
       };
@@ -1009,7 +1101,7 @@ describe("mattermostPlugin", () => {
         channels: {
           mattermost: {
             enabled: true,
-            actions: { reactions: false },
+            actions: { reactions: false, downloadFiles: false },
             accounts: {
               default: {
                 enabled: true,
@@ -1031,7 +1123,7 @@ describe("mattermostPlugin", () => {
         channels: {
           mattermost: {
             enabled: true,
-            actions: { reactions: false },
+            actions: { reactions: false, downloadFiles: false },
             accounts: {
               default: {
                 enabled: true,
@@ -1043,7 +1135,7 @@ describe("mattermostPlugin", () => {
                 enabled: true,
                 botToken: "work-token",
                 baseUrl: "https://chat.example.com",
-                actions: { reactions: true },
+                actions: { reactions: true, downloadFiles: true },
               },
             },
           },
@@ -1063,6 +1155,7 @@ describe("mattermostPlugin", () => {
         "send",
         "react",
         "reactions",
+        "download-file",
         "search",
         "edit",
         "delete",

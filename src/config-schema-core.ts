@@ -200,6 +200,7 @@ export const MattermostAccountSchemaBase = z
     actions: z
       .object({
         messages: z.boolean().optional(),
+        downloadFiles: z.boolean().optional(),
         search: z.boolean().optional(),
         reactions: z.boolean().optional(),
         edit: z.boolean().optional(),

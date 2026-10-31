@@ -1,5 +1,6 @@
 import { getSessionEntry, resolveStorePath } from "openclaw/plugin-sdk/session-store-runtime";
 import { z } from "zod";
+import { resolveMattermostAccount } from "./accounts.js";
 import { isRetryableError, MattermostPostSchema, type MattermostUser } from "./client.js";
 import {
   resolveMattermostMonitorInboundAccess,
@@ -31,9 +32,11 @@ type ThreadTurn = {
   agentId: string;
   channelId: string;
   kind: ChatType;
-  threadRootId: string;
+  threadRootId?: string;
   currentPostId: string;
   currentPostTimestamp: number;
+  excludedMessageIds?: readonly string[];
+  abortSignal?: AbortSignal;
 };
 type BackfillResult = {
   current: boolean;
@@ -93,26 +96,60 @@ export function createMattermostThreadBackfill(params: {
   };
 
   const fetchEntries = async (turn: ThreadTurn, signal: AbortSignal): Promise<HistoryEntry[]> => {
-    const query = new URLSearchParams({
-      perPage: String(Math.min(historyLimit + 1, MAX_THREAD_POSTS)),
-      direction: "up",
-      fromPost: turn.currentPostId,
-      fromCreateAt: String(turn.currentPostTimestamp),
+    const currentAccount = resolveMattermostAccount({
+      cfg: turn.cfg,
+      accountId: account.accountId,
     });
+    const query = turn.threadRootId
+      ? new URLSearchParams({
+          perPage: String(Math.min(historyLimit + 1, MAX_THREAD_POSTS)),
+          direction: "up",
+          fromPost: turn.currentPostId,
+          fromCreateAt: String(turn.currentPostTimestamp),
+        })
+      : new URLSearchParams({
+          per_page: String(Math.min(historyLimit + 1, MAX_THREAD_POSTS)),
+          before: turn.currentPostId,
+        });
     const raw = await client.request<unknown>(
-      `/posts/${encodeURIComponent(turn.threadRootId)}/thread?${query}`,
+      turn.threadRootId
+        ? `/posts/${encodeURIComponent(turn.threadRootId)}/thread?${query}`
+        : `/channels/${encodeURIComponent(turn.channelId)}/posts?${query}`,
       { signal, timeoutMs: TIMEOUT_MS },
     );
     signal.throwIfAborted();
     const thread = ThreadSchema.parse(raw);
+    if (!turn.threadRootId) {
+      // Validate the whole page before filtering; a hidden foreign row must not
+      // turn a broken provider scope into apparently valid supplemental context.
+      if (
+        thread.order.length > MAX_THREAD_POSTS ||
+        Object.keys(thread.posts).length > MAX_THREAD_POSTS ||
+        new Set(thread.order).size !== thread.order.length ||
+        thread.order.some((id) => !thread.posts[id]) ||
+        Object.entries(thread.posts).some(
+          ([id, post]) =>
+            post.id !== id ||
+            post.channel_id !== turn.channelId ||
+            !Number.isSafeInteger(post.create_at) ||
+            post.create_at! < 0,
+        )
+      ) {
+        throw new Error("Unexpected Mattermost channel history scope.");
+      }
+    }
+    const excluded = new Set([turn.currentPostId, ...(turn.excludedMessageIds ?? [])]);
     const candidates = thread.order.slice(0, MAX_THREAD_POSTS).flatMap((id) => {
       const post = thread.posts[id];
       if (
         !post ||
         post.id !== id ||
-        post.id === turn.currentPostId ||
+        excluded.has(post.id) ||
         post.channel_id !== turn.channelId ||
-        (post.id !== turn.threadRootId && post.root_id !== turn.threadRootId) ||
+        (turn.threadRootId
+          ? post.id !== turn.threadRootId && post.root_id !== turn.threadRootId
+          : Boolean(post.root_id) || post.user_id === monitor.botUserId) ||
+        post.delete_at ||
         post.type ||
         !post.user_id ||
         typeof post.create_at !== "number" ||
@@ -125,7 +162,7 @@ export function createMattermostThreadBackfill(params: {
     });
     const senderIds = [...new Set(candidates.map((post) => post.user_id!))];
     let users: MattermostUser[] = [];
-    if (senderIds.length && isDangerousNameMatchingEnabled(account.config)) {
+    if (senderIds.length && isDangerousNameMatchingEnabled(currentAccount.config)) {
       users = await client.request<MattermostUser[]>("/users/ids", {
         method: "POST",
         body: JSON.stringify(senderIds),
@@ -148,13 +185,16 @@ export function createMattermostThreadBackfill(params: {
           try {
             signal.throwIfAborted();
             const access = await resolveMattermostMonitorInboundAccess({
-              account,
+              account: currentAccount,
               cfg: turn.cfg,
               senderId,
               senderName: names.get(senderId) ?? senderId,
               channelId: turn.channelId,
               kind: turn.kind,
-              groupPolicy: monitor.groupPolicy,
+              groupPolicy:
+                currentAccount.config.groupPolicy ??
+                turn.cfg.channels?.defaults?.groupPolicy ??
+                "allowlist",
               readStoreAllowFrom,
               allowTextCommands: false,
               hasControlCommand: false,
@@ -190,8 +230,12 @@ export function createMattermostThreadBackfill(params: {
   };
 
   return async (turn: ThreadTurn): Promise<BackfillResult> => {
+    const current = () =>
+      !turn.abortSignal?.aborted && !monitor.abortSignal?.aborted;
+    if (!current()) return { current: false };
     if (
       historyLimit <= 0 ||
+      (!turn.threadRootId && turn.kind === "direct") ||
       !Number.isFinite(turn.currentPostTimestamp) ||
       turn.currentPostTimestamp <= 0
     ) {
@@ -222,7 +266,7 @@ export function createMattermostThreadBackfill(params: {
     touch(turn.historyKey, recovery);
     if (recovery.completion) {
       const history = await recovery.completion;
-      return { current: owns(turn, recovery), history };
+      return { current: current() && owns(turn, recovery), history };
     }
     if (recovery.status === "settled") {
       return { current: true };
@@ -242,6 +286,11 @@ export function createMattermostThreadBackfill(params: {
     recovery.nextAttemptAt = Date.now() + COOLDOWN_MS;
     const owner = recovery;
     const controller = new AbortController();
+    const signal = AbortSignal.any(
+      [controller.signal, turn.abortSignal, monitor.abortSignal].filter(
+        (value): value is AbortSignal => Boolean(value),
+      ),
+    );
     const deadlineAt = performance.now() + TIMEOUT_MS;
     let timer: ReturnType<typeof setTimeout>;
     const deadline = new Promise<never>((_, reject) => {
@@ -251,7 +300,7 @@ export function createMattermostThreadBackfill(params: {
         reject(error);
       }, TIMEOUT_MS);
     });
-    const operation = fetchEntries(turn, controller.signal);
+    const operation = fetchEntries(turn, signal);
     inFlight.add(operation);
     void operation.then(
       () => inFlight.delete(operation),
@@ -260,6 +309,7 @@ export function createMattermostThreadBackfill(params: {
     owner.completion = (async () => {
       try {
         const entries = await Promise.race([operation, deadline]);
+        signal.throwIfAborted();
         if (performance.now() >= deadlineAt) {
           throw new DOMException("Mattermost thread recovery deadline", "TimeoutError");
         }
@@ -306,6 +356,6 @@ export function createMattermostThreadBackfill(params: {
       }
     })();
     const history = await owner.completion;
-    return { current: owns(turn, owner), history };
+    return { current: current() && owns(turn, owner), history };
   };
 }

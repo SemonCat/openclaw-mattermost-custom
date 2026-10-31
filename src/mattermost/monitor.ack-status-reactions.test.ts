@@ -451,6 +451,7 @@ const baseConfig: OpenClawConfig = {
       chatmode: "onmessage",
       dmPolicy: "open",
       groupPolicy: "open",
+      historyLimit: 0,
     },
   },
 };

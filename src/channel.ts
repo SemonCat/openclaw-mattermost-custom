@@ -182,6 +182,13 @@ function describeMattermostMessageTool({
   if (hasMessageCapableAccount) {
     actions.push("read");
   }
+  if (
+    enabledAccounts.some(
+      (account) => account.config.actions?.downloadFiles ?? actionsConfig?.downloadFiles ?? true,
+    )
+  ) {
+    actions.push("download-file");
+  }
   if (enabledAccounts.some((account) => account.config.actions?.search ?? actionsConfig?.search ?? true)) {
     actions.push("search");
   }
@@ -203,6 +210,30 @@ function describeMattermostMessageTool({
   return {
     actions,
     capabilities: enabledAccounts.length > 0 ? ["presentation"] : [],
+    ...(actions.includes("download-file")
+      ? {
+          schema: {
+            properties: {
+              fileId: {
+                type: "string",
+                description:
+                  "Mattermost file ID from the attachment metadata of the post to download.",
+              },
+              postId: {
+                type: "string",
+                description:
+                  "Mattermost post ID that currently owns the file. Required together with fileId.",
+              },
+              messageId: {
+                type: "string",
+                description: "Alias for postId for download-file.",
+              },
+            },
+            actions: ["download-file"],
+            visibility: "current-channel",
+          } as never,
+        }
+      : {}),
   };
 }
 
@@ -419,8 +450,9 @@ async function listMattermostDirectoryPeers(params: MattermostDirectoryListParam
 }
 
 const mattermostMessageActions: ChannelMessageActionAdapter = {
-  providerOwnedReadGates: ["read"],
+  providerOwnedReadGates: ["read", "download-file"],
   readAuthorityActions: ["read"],
+  requiresTrustedRequesterSender: ({ action }) => action === "download-file",
   describeMessageTool: describeMattermostMessageTool,
   extractToolSend: ({ args }) => extractMattermostToolSend(args),
   extractToolSendResult: ({ result, send }) => extractMattermostToolSendResult(result, send),
@@ -454,6 +486,7 @@ const mattermostMessageActions: ChannelMessageActionAdapter = {
       "reactions",
       "read",
       "search",
+      "download-file",
       "edit",
       "delete",
       "pin",
@@ -469,7 +502,47 @@ const mattermostMessageActions: ChannelMessageActionAdapter = {
     conversationReadOrigin,
     requesterAccountId,
     toolContext,
+    requesterSenderId,
+    assertDirectAdapterHandoff,
   }) => {
+    if (action === "download-file") {
+      const resolvedAccountId = accountId ?? resolveDefaultMattermostAccountId(cfg);
+      const account = resolveMattermostAccount({ cfg, accountId: resolvedAccountId });
+      const mattermostConfig = cfg.channels?.mattermost as MattermostConfig | undefined;
+      const filesEnabled =
+        account.config.actions?.downloadFiles ??
+        mattermostConfig?.actions?.downloadFiles ??
+        true;
+      if (!filesEnabled) {
+        throw new Error("Mattermost attachment downloads are disabled in config");
+      }
+      const postId =
+        readStringParam(params, "postId") ??
+        readStringParam(params, "messageId") ??
+        readStringParam(params, "message_id");
+      if (!postId) {
+        throw new Error("Mattermost download-file requires postId and fileId.");
+      }
+      const fileId = readStringParam(params, "fileId", { required: true });
+      const authorizedTarget = normalizeOptionalString(
+        readStringParam(params, "to") ?? readStringParam(params, "channelId"),
+      );
+      return await (
+        await loadMattermostChannelRuntime()
+      ).downloadMattermostPostAttachment({
+        cfg,
+        accountId: resolvedAccountId,
+        requesterAccountId,
+        requesterSenderId,
+        conversationReadOrigin,
+        toolContext,
+        postId,
+        fileId,
+        authorizedTarget,
+        assertCurrent: assertDirectAdapterHandoff,
+      });
+    }
+
     if (action === "reactions") {
       const { resolvedAccountId, account, channelActions } = resolveMattermostActionAccount({
         cfg,

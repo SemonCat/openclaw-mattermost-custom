@@ -112,6 +112,8 @@ export function createMattermostDraftStream(params: {
   rootId?: string;
   initialPost?: { id: string; message?: string | null };
   postProps?: Record<string, unknown>;
+  resolvePostProps?: () => Record<string, unknown> | undefined;
+  onPostCreated?: (postId: string) => void;
   maxChars?: number;
   throttleMs?: number;
   companion?: boolean;
@@ -155,15 +157,20 @@ export function createMattermostDraftStream(params: {
   };
   const sealedAssistantTexts: Array<{ text: string; requiresBlockBoundary: boolean }> = [];
   const publishedAssistantParts = new Map<string, MattermostDraftPublishedPart>();
-  const createStreamPost = async (message: string) => {
-    await params.beforeCreatePost?.();
-    if (companion) return await companion.createPost(message);
-    return await createMattermostPost(params.client, {
-      channelId: params.channelId,
-      message,
-      rootId: params.rootId,
-      props: params.postProps,
-    });
+  const createStreamPost = async (message: string, successor = false) => {
+    if (!successor) await params.beforeCreatePost?.();
+    const sent = companion
+      ? await companion.createPost(message)
+      : await createMattermostPost(params.client, {
+          channelId: params.channelId,
+          message,
+          rootId: params.rootId,
+          props: params.resolvePostProps
+            ? { ...params.postProps, ...params.resolvePostProps() }
+            : params.postProps,
+        });
+    params.onPostCreated?.(sent.id);
+    return sent;
   };
   const updateCompanion = (target: DraftGeneration) => {
     if (!companion || !target.postId || streamState.stopped || streamState.final) return;
@@ -415,14 +422,7 @@ export function createMattermostDraftStream(params: {
         const visibleText = handedOff.lastProviderText ?? handedOff.lastSentText;
         // This post continues an identity that already exists, so it must not re-enter
         // the first-result ordering hook while the task-card publish is awaiting us.
-        const sent = companion
-          ? await companion.createPost(visibleText)
-          : await createMattermostPost(params.client, {
-              channelId: params.channelId,
-              message: visibleText,
-              rootId: params.rootId,
-              props: params.postProps,
-            });
+        const sent = await createStreamPost(visibleText, true);
         successor.postId = sent.id;
         successor.lastSentText = visibleText;
         successor.lastProviderText = sent.message ?? visibleText;

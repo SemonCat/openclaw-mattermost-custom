@@ -41,7 +41,7 @@ mkdir -p /tmp/openclaw/mattermost-custom
 npm run build
 npm pack --omit=dev --pack-destination /tmp/openclaw/mattermost-custom
 openclaw plugins install \
-  /tmp/openclaw/mattermost-custom/openclaw-mattermost-custom-2026.10.8.tgz --force
+  /tmp/openclaw/mattermost-custom/openclaw-mattermost-custom-2026.10.9.tgz --force
 ```
 
 Do not use `plugins install --link` or add this source checkout to
@@ -86,6 +86,8 @@ Compared with the official plugin, this build preserves:
 - Unknown-send reconciliation for durable text delivery, using opaque signed
   post metadata rather than matching visible message text.
 - Message edit, delete, and pin actions enabled by default, plus reaction reads.
+- Explicit `download-file` access to attachments on posts in the current
+  conversation, with sender visibility, size, timeout, and download checks.
 - Owner-only `/move_thread #channel` verified copy-then-delete moves without the
   licensed Mattermost move endpoint.
 - Durable plan-backed task progress cards that remain after the final answer and
@@ -96,7 +98,9 @@ Compared with the official plugin, this build preserves:
 - Native Mattermost 12 multi-select and multi-question dialogs, plus a
   `mattermost_form` tool for checkbox groups and row/column matrices.
 - Durable interactive callback admission and replay across Gateway restarts.
-- Bounded Mattermost thread-history recovery after Gateway restart or session reset.
+- Bounded Mattermost thread and top-level room history recovery after Gateway restart or session reset.
+- Signed preview Stop controls bound to the source user and current turn.
+- Durable edit/delete notices for existing channel and thread sessions.
 - The Mattermost slash-trigger length cap fix.
 - Mention-prefixed text commands such as `@bot /new`, without debounce or prose misrouting.
 - Configurable mention gating for threads rooted in the receiving bot's own posts.
@@ -108,7 +112,7 @@ Compared with the official plugin, this build preserves:
 - Channel/sender tool policies through the published host's shared policy pipeline.
 - Up to ten ordered attachments on one post, including ordinary inbound replies.
 
-This artifact targets the published OpenClaw `2026.10.8` SDK and requires an
+This artifact targets the published OpenClaw `2026.10.9` SDK and requires an
 OpenClaw host at least that version. Its Node contract follows that release:
 `>=24.22.1 <25 || >=26.12.1`. Development checks use Node `26.12.1`; this does
 not establish the runtime version of an installed Gateway.
@@ -139,6 +143,7 @@ personal downstream plugin. Each gate can still be disabled globally or per acco
     "mattermost": {
       "actions": {
         "messages": false,
+        "downloadFiles": true,
         "search": false,
         "reactions": true,
         "edit": true,
@@ -150,8 +155,12 @@ personal downstream plugin. Each gate can still be disabled globally or per acco
 }
 ```
 
-`messages` remains opt-in for channel reads, `search` defaults to enabled independently,
-`reactions` enables add/remove/list, and action gates can be overridden per account.
+`messages` remains opt-in for channel reads, `downloadFiles` defaults to enabled
+for explicit current-conversation attachment downloads, `search` defaults to
+enabled independently, `reactions` enables add/remove/list, and action gates
+can be overridden per account. A download requires the owning post ID and file
+ID from its attachment metadata; each file is capped by the configured media
+limit and 20 MiB, with a 10-second deadline.
 
 ### Message length and model hints
 
@@ -529,6 +538,65 @@ returned snippets. `truncated` reports local result/text truncation.
 and provider caps and index freshness are unknown. API/index errors are reported
 as errors, rather than represented as an empty successful search.
 
+### Room history and source corrections
+
+The first admitted top-level room turn after restart or session reset can recover
+one page of earlier root messages, using the existing `historyLimit` (zero
+disables recovery). The request is capped at 200 posts and five seconds, and the
+retained context fits the configured history window. It excludes the current
+debounce batch, other threads, bot progress/results, deleted/system posts and
+future timestamps. Sender/context visibility and session rotation fences apply.
+Native thread recovery keeps its existing endpoint; flat DMs do not gain room
+recovery.
+
+`post_edited` and `post_deleted` events use durable ingress revision identities,
+so reconnect replay does not produce duplicate notices. For an existing routed
+session, edits add bounded, quoted, untrusted replacement text; deletions add
+identity-only notices. Bot and system mutations are ignored. Notices do not
+rewrite consumed transcripts or start an agent response, and cancellation or a
+session reset during admission prevents publication into a replacement session.
+
+### Explicit historical attachment downloads
+
+The `message` action `download-file` takes `postId` (or `messageId`) and `fileId`
+from a prior metadata read. It is enabled by default, independently of
+`actions.messages`; set `actions.downloadFiles: false` globally or per account
+to disable it.
+
+```json
+{
+  "action": "download-file",
+  "channel": "mattermost",
+  "postId": "pppppppppppppppppppppppppp",
+  "fileId": "ffffffffffffffffffffffffff"
+}
+```
+
+Downloads require the trusted originating sender and exact current Mattermost
+account/conversation, even for public channels. The plugin verifies post/file
+ownership and sender-history visibility, uses the trusted media saver with the
+private-network opt-in, then confirms the post still owns the file. Each action
+has a ten-second total deadline and a 20 MiB ceiling, reduced by the effective
+Mattermost/agent media limit. Cancellation, stale authority, changed ownership
+or an oversized save rejects the result and removes any unclaimed temporary
+file. Images return host image content; other files return a local media result
+for analysis. Metadata reads do not automatically download files.
+
+### Preview Stop
+
+REST and companion previews offer a signed Stop button after the source turn
+starts executing. Only the original sender can use it, subject to current
+Mattermost command authorization. It cancels the source-owned SDK abort signal,
+including its deferred lifecycle, and never looks up a replacement run to abort
+by session ID.
+
+Controls expire on completion, replacement, session reset or Gateway restart.
+Durable stale callback replay is consumed without starting another agent turn.
+Cleanup removes only that turn's Stop control, preserving final text and other
+post properties. Task-card handoff keeps the card above the result; a stopped
+turn leaves its plan card cancelled. If a provider cleanup request fails, a
+visible button can remain but is already inert.
+
 ### Referenced attachment content
 
 Admitted inbound turns materialize attachment content from one same-channel
@@ -795,6 +863,26 @@ and expiry still fence queued writes. Neither activity adoption nor card observa
 assistant transcript prose. Continuation commentary remains subject to the
 host's source-reply policy, and final answers keep their own delivery path.
 
+### Styled task cards on web and desktop
+
+The optional `openclaw-stream` companion 0.3.0 in [companion/](companion/README.md)
+renders task cards with blue completion checks, a spinning current step, terminal
+status, subtask links, and the last update time. It follows the Mattermost theme,
+supports narrow web layouts and reduced motion, and works with either REST or
+companion reply streaming. The channel artifact and companion artifact must both
+contain this feature; no remote development backend is needed.
+
+Card updates persist versioned presentation props and the full Markdown checklist
+together on the existing task post. Companion 0.3.0 also projects a native
+attachment card for the official mobile app: a theme-aware border, status and
+progress count, single-column steps, static status symbols, and safe subtask links.
+The official app cannot run the web spinner or custom CSS. The persisted Markdown
+remains complete; disabling the companion restores it without a duplicate checklist.
+Invalid or stale presentation data retains Markdown. Bot-owned restart recovery
+restores the full checklist before deciding Completed versus Incomplete, and its
+terminal-heading edits remain authoritative.
+Installation and Gateway restarts require separate operator authorization.
+
 ### Task-card ordering and late-plan handoff
 
 Plan and result callbacks do not always arrive in visual order. Core can enter
@@ -894,8 +982,8 @@ The package build bundles plugin-owned TypeScript only. OpenClaw Plugin SDK,
 the plugin's declared runtime dependencies. This keeps OpenClaw core code and
 state migrations out of the plugin artifact.
 
-This release targets the published OpenClaw `2026.10.8` SDK and requires host
-and plugin API `>=2026.10.8`. Earlier hosts are not covered by this build's
+This release targets the published OpenClaw `2026.10.9` SDK and requires host
+and plugin API `>=2026.10.9`. Earlier hosts are not covered by this build's
 compatibility checks. The build verifies every emitted SDK subpath and named
 binding against the exact dev dependency in this checkout's `node_modules`;
 linked host checkouts and Gateway host overrides are not used.
@@ -917,7 +1005,27 @@ changes in this repo's `src/`. Recheck the downstream command, callback,
 reaction, and trigger-cap behavior when upstream touches the corresponding
 files.
 
-### OpenClaw 2026.10.8 adaptation
+### OpenClaw 2026.10.9 adaptation
+
+The official Mattermost 10.8-to-10.9 delta changes package declarations only.
+This build advances the artifact version, exact published development SDK,
+minimum host, plugin API and build metadata together to 2026.10.9. The public
+SDK export map, SDK source, shared channel source and outbound source are
+unchanged. The build validates emitted SDK subpaths and named bindings against
+the exact installed npm dependency.
+
+This maintenance release adds no Mattermost feature to port. Security patches,
+workspace tool restrictions, model refresh synchronization, ACP working-directory
+selection, database and disk-full recovery, transcript migration and safe update
+rollback remain host-owned. Existing downstream commands, forms, task cards,
+reactions, native footers and companion previews retain their current behavior.
+Source comparison and standalone validation are recorded in
+[the 10.9 upstream review](docs/upstream-2026.10.9.md).
+This candidate also implements the four separately selected cross-channel
+enhancements above; their contracts and validation are recorded in
+[the cross-channel implementation notes](docs/cross-channel-2026.10.9.md).
+
+### Previous OpenClaw 2026.10.8 adaptation
 
 This build advances the artifact version, exact published development SDK,
 minimum host, plugin API and build metadata together to 2026.10.8. It ports
@@ -1054,7 +1162,7 @@ shared Mattermost contract tests and the downstream behavior tests.
 ### Test status against the published npm SDK
 
 This repo builds and tests against the published `openclaw` npm package
-(`2026.10.8`), not the OpenClaw monorepo checkout. One category of tests
+(`2026.10.9`), not the OpenClaw monorepo checkout. One category of tests
 behaves differently from the monorepo for that reason:
 
 - Ten suites import test-only Plugin SDK subpaths (`channel-test-helpers`,

@@ -105,6 +105,12 @@
         }, [post.id, snapshot?.expires_at]);
 
         const message = window.OpenClawStreamState.messageForPost(post, snapshot, persistedPost);
+        return renderMarkdown(props, message);
+    }
+
+    function renderMarkdown(props, message) {
+        const React = window.React;
+        const post = props.post;
         const state = props.getState?.();
         const channel = state?.entities?.channels?.channels?.[post.channel_id];
         const team = state?.entities?.teams?.teams?.[channel?.team_id];
@@ -145,19 +151,38 @@
         return React.createElement('div', {onClick: handleInternalLink}, rendered || React.createElement('p'));
     }
 
+    function TaskProgressPost(props) {
+        return window.OpenClawTaskProgress.renderCard(window.React, props.post,
+            (text) => renderMarkdown(props, text)) || renderMarkdown(props, props.post.message);
+    }
+
     class Plugin {
         initialize(registry, store) {
             mattermostStore = store;
+            if (window.document) {
+                this.style = window.document.createElement('style');
+                this.style.textContent = window.OpenClawTaskProgressCSS;
+                window.document.head.appendChild(this.style);
+            }
             registry.registerPostTypeComponent(postType, (props) => window.React.createElement(StreamPost, {
                 ...props,
                 getState: () => mattermostStore?.getState?.(),
             }));
+            registry.registerPostTypeComponent('custom_openclaw_task',
+                (props) => window.React.createElement(TaskProgressPost, {
+                    ...props,
+                    getState: () => mattermostStore?.getState?.(),
+                }));
             registry.registerWebSocketEventHandler(updateEvent, (message) => {
                 streamStore.publish(message?.data);
             });
             registry.registerReconnectHandler(() => {
                 streamStore.refreshAll();
             });
+        }
+
+        uninitialize() {
+            this.style?.remove();
         }
     }
 

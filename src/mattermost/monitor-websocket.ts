@@ -114,6 +114,7 @@ type CreateMattermostConnectOnceOpts = {
   runtime: RuntimeEnv;
   nextSeq: () => number;
   onPosted: (rawEvent: string) => Promise<void>;
+  onPostMutation?: (rawEvent: string) => Promise<void>;
   onReaction?: (payload: MattermostEventPayload) => Promise<void>;
   webSocketFactory?: MattermostWebSocketFactory;
   /**
@@ -389,11 +390,13 @@ export function createMattermostConnectOnce(
             return;
           }
 
-          if (payload.event !== "posted") {
+          const mutation = payload.event === "post_edited" || payload.event === "post_deleted";
+          const receive = mutation ? opts.onPostMutation : payload.event === "posted" ? opts.onPosted : undefined;
+          if (!receive) {
             return;
           }
           try {
-            await opts.onPosted(raw);
+            await receive(raw);
           } catch (err) {
             // Mattermost cannot nack or replay a failed WebSocket event. Tear the
             // connection down loudly so the outage is operator-visible instead of

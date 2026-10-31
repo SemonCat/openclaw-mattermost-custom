@@ -298,6 +298,26 @@ describe("Mattermost question interactions", () => {
     expect(response).toEqual({ ephemeral_text: "picker" });
   });
 
+  it("consumes an expired durable Stop callback without starting a new agent turn", async () => {
+    captureOptions();
+    const registered = mocks.createProcessor.mock.calls[0][0] as Parameters<typeof createMattermostInteractionProcessor>[0];
+    const actual = await vi.importActual<typeof import("./interactions.js")>("./interactions.js");
+    const enqueue = vi.fn();
+    const dispatch = vi.fn();
+    const request = vi.fn(async () => ({}));
+    setMattermostRuntime({ system: { enqueueSystemEvent: enqueue } } as never);
+    const process = actual.createMattermostInteractionProcessor({
+      ...registered, client: { request } as never, dispatchButtonClick: dispatch,
+    });
+    await process(questionInteraction({ openclaw_preview_stop: "expired-runtime-token" }));
+    expect(request).toHaveBeenCalledWith("/posts/ephemeral", expect.objectContaining({
+      body: expect.stringContaining("This Stop button has expired."),
+    }));
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(mocks.resolveOption).not.toHaveBeenCalled();
+  });
+
   it("dispatches slash-shaped menu values as prose with the configured prompt and empty skill filter", async () => {
     const channelCfg = { channels: { mattermost: { groups: { "chan-1": { systemPrompt: "Configured instructions", skills: [] } } } } };
     const dispatch = vi.fn(async (_params: { ctxPayload: Record<string, unknown>; replyOptions: { skillFilter?: string[] } }) => { });

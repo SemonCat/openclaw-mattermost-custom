@@ -31,6 +31,7 @@ import type { ReplyPayload } from "./runtime-api.js";
 import { registerPluginHttpRoute } from "./runtime-api.js";
 import { createMattermostSecretDialogController } from "./secret-dialog.js";
 import { sendMessageMattermost } from "./send.js";
+import { handleMattermostPreviewStop } from "./preview-stop.js";
 
 type MattermostInteractionDispatch = NonNullable<
   Parameters<typeof createMattermostInteractionHandler>[0]["handleInteraction"]
@@ -173,6 +174,7 @@ export function registerMattermostInteractions(params: {
         ? questionDialog.handleSubmission(payload)
         : secretDialog.handleSubmission(payload),
     handleInteraction: async (interaction) =>
+      (await handleMattermostPreviewStop(monitor, interaction)) ??
       (await handleApprovalInteraction(interaction)) ??
       (await handleQuestionInteraction(interaction)) ??
       (await params.handleModelPickerInteraction(interaction)),

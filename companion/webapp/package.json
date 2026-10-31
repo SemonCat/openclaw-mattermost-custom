@@ -3,7 +3,7 @@
   "private": true,
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "npm run build && node --test src/stream-state.test.cjs",
+    "test": "npm run build && node --test src/*.test.cjs",
     "typecheck": "tsc --project tsconfig.json --noEmit"
   },
   "devDependencies": {

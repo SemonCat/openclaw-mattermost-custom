@@ -7,6 +7,8 @@ import { resolveMattermostAccount } from "./accounts.js";
 import { sendMattermostTyping, type MattermostClient, type MattermostPost } from "./client.js";
 import { buildMattermostEventPlan } from "./monitor-event-plan.js";
 import { dispatchMattermostInboundTurn } from "./monitor-turn.js";
+import { handleMattermostPreviewStop } from "./preview-stop.js";
+import { setInteractionSecret } from "./interactions.js";
 import { createMattermostReactionLifecycleStore } from "./monitor-turn-reactions.js";
 import type { MattermostMonitorContext } from "./monitor-types.js";
 import type { OpenClawConfig } from "./runtime-api.js";
@@ -90,8 +92,13 @@ function fixture(mode: "block" | "partial" | "off", transport: "rest" | "compani
   const sessionKey = "agent:main:mattermost:channel:channel-1";
   const core = {
     capabilities: ["queued-source-lifecycle-v1"],
-    agent: { session: { listSessionEntries: () => [] } },
+    config: { current: () => cfg },
+    agent: { session: {
+      listSessionEntries: () => [],
+      getSessionEntry: () => ({ sessionId: "test-session", lifecycleRevision: 1 }),
+    } },
     channel: {
+      commands: { shouldHandleTextCommands: () => true },
       routing: {
         resolveAgentRoute: () => ({
           accountId: "default",
@@ -135,6 +142,7 @@ function fixture(mode: "block" | "partial" | "off", transport: "rest" | "compani
     core,
     account: resolveMattermostAccount({ cfg }),
     botUserId: "bot",
+    pairing: { readAllowFromStore: async () => [] },
     groupPolicy: "open",
     runtime: { log: vi.fn(), error: vi.fn(), exit: vi.fn() },
     logDebugMessage: vi.fn(),
@@ -184,6 +192,76 @@ function fixture(mode: "block" | "partial" | "off", transport: "rest" | "compani
 }
 
 describe("Mattermost monitor streaming boundaries", () => {
+  it.each(["before-result", "after-commentary"] as const)(
+    "keeps a late %s plan above the Stop-owning result and finalizes cancellation",
+    async (boundary) => {
+      vi.useFakeTimers();
+      const f = fixture("partial");
+      f.monitor.cfg.channels!.mattermost!.allowFrom = ["user-1"];
+      setInteractionSecret("default", "test-token");
+      await f.run(async (params) => {
+        params.replyOptions?.onAgentRunStart?.("run-plan-stop");
+        if (boundary === "after-commentary") {
+          await params.replyOptions?.onPartialReply?.({ text: "Early commentary" });
+          await vi.advanceTimersByTimeAsync(1200);
+        }
+        await params.replyOptions?.onPlanUpdate?.({
+          steps: [{ step: "Inspect", status: "in_progress" }],
+        });
+        await params.replyOptions?.onPartialReply?.({ text: "Still working" });
+        await vi.advanceTimersByTimeAsync(1200);
+        expect(f.posts.get("post-1")?.message).toContain("Task progress");
+        expect(f.posts.get("post-1")?.props?.openclaw_mattermost).toMatchObject({ kind: "task_progress" });
+        const result = f.posts.get("post-2")!;
+        expect(result.props?.openclaw_mattermost).toMatchObject({ kind: "turn_result" });
+        const attachments = result.props!.attachments as Array<{
+          actions: Array<{ integration: { context: Record<string, unknown> } }>;
+        }>;
+        expect(await handleMattermostPreviewStop(f.monitor, {
+          context: attachments[0]!.actions[0]!.integration.context,
+          payload: { user_id: "user-1", channel_id: "channel-1", post_id: result.id },
+          userName: "user-1",
+        })).toEqual({ ephemeral_text: "Stop requested." });
+        await f.final(params, "Stopped.");
+      });
+      expect(f.posts.get("post-1")?.message).toContain("Cancelled");
+      expect(f.posts.get("post-2")?.message).toBe("Stopped.");
+      expect(f.posts.get("post-2")?.props?.attachments).toEqual([]);
+      expect(f.calls.filter((call) => call.path === "/posts")).toHaveLength(2);
+      const writes = f.calls.filter((call) => call.method === "PUT");
+      expect(writes.some((call) => call.path === "/posts/post-2/patch" && call.body.message === "Stopped.")).toBe(true);
+    },
+  );
+
+  it.each(["rest", "companion"] as const)(
+    "emits a signed Stop for the owned run and removes it after %s delivery",
+    async (transport) => {
+      vi.useFakeTimers();
+      const f = fixture("partial", transport);
+      f.monitor.cfg.channels!.mattermost!.allowFrom = ["user-1"];
+      setInteractionSecret("default", "test-token");
+      await f.run(async (params) => {
+        params.replyOptions?.onAgentRunStart?.("run-stop");
+        await params.replyOptions?.onPartialReply?.({ text: "Working" });
+        await vi.advanceTimersByTimeAsync(1200);
+        const post = f.posts.get("post-1")!;
+        const attachments = post.props!.attachments as Array<{
+          actions: Array<{ integration: { context: Record<string, unknown> } }>;
+        }>;
+        const result = await handleMattermostPreviewStop(f.monitor, {
+          context: attachments[0]!.actions[0]!.integration.context,
+          payload: { user_id: "user-1", channel_id: "channel-1", post_id: post.id },
+          userName: "user-1",
+        });
+        expect(result).toEqual({ ephemeral_text: "Stop requested." });
+        expect(params.replyOptions?.abortSignal?.aborted).toBe(true);
+        await f.final(params, "Stopped.");
+      });
+      expect(f.posts.get("post-1")!.message).toBe("Stopped.");
+      expect(f.posts.get("post-1")!.props!.attachments).toEqual([]);
+      expect(f.calls.filter((call) => call.path === "/posts")).toHaveLength(1);
+    },
+  );
   it.each(["rest", "companion"] as const)(
     "retains pre-tool prose and final post ownership with %s previews",
     async (transport) => {

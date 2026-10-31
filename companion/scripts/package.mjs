@@ -5,7 +5,7 @@ import {fileURLToPath} from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const packageRoot = path.join(root, 'build', 'package');
-const artifact = path.join(root, 'build', 'openclaw-stream-0.1.0.tar.gz');
+const artifact = path.join(root, 'build', 'openclaw-stream-0.3.0.tar.gz');
 const targets = [
     ['linux', 'amd64', 'plugin-linux-amd64'],
     ['linux', 'arm64', 'plugin-linux-arm64'],

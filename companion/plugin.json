@@ -1,8 +1,8 @@
 {
   "id": "openclaw-stream",
   "name": "OpenClaw Stream",
-  "version": "0.1.0",
-  "description": "Low-latency web previews for OpenClaw Mattermost replies.",
+  "version": "0.3.0",
+  "description": "Low-latency reply previews and live task cards for OpenClaw Mattermost.",
   "min_server_version": "12.0.0",
   "server": {
     "executables": {
