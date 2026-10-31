@@ -125,7 +125,7 @@
             mentionHighlight: true,
             atMentions: true,
             team,
-            unsafeLinks: true,
+            unsafeLinks: false,
             minimumHashtagLength: 1000000000,
             siteURL: site,
         });
