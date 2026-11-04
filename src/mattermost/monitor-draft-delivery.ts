@@ -47,6 +47,9 @@ type MattermostDraftPreviewDeliverParams = {
   // place (onPreviewFinalized) without ever calling deliverPayload; this lets the
   // caller record thread participation on that path too.
   recordThreadParticipation?: () => Promise<void> | void;
+  findPostAfterPreview?: (previewPostId: string) => Promise<string | undefined>;
+  preservePreview?: () => Promise<void>;
+  mustSendFinalAsNewPost?: () => boolean;
 };
 
 function combineMattermostVisibleDeliveryResults(
@@ -77,6 +80,13 @@ export async function deliverMattermostReplyWithDraftPreview(
       visibleReplySent: false,
       suppression: { reason: "no_visible_result" },
     };
+  }
+
+  if (params.info.kind === "final" && params.payload.isStatusNotice === true) {
+    // Status text ends dispatch, but it is not an authoritative replacement answer.
+    params.previewLifecycle.beginFinalDelivery();
+    params.previewLifecycle.retainPreview();
+    await params.preservePreview?.();
   }
 
   let outcome: "text" | "media" = "text";
@@ -121,6 +131,7 @@ export async function deliverMattermostReplyWithDraftPreview(
             typeof previewFinalText !== "string" ||
             payload.isError ||
             payload.presentation ||
+            params.mustSendFinalAsNewPost?.() ||
             !canFinalizeMattermostPreviewInPlace({
               kind: params.kind,
               previewRootId: params.effectiveReplyToId,
@@ -133,6 +144,20 @@ export async function deliverMattermostReplyWithDraftPreview(
           return { message: previewFinalText };
         },
         editFinal: async (previewPostId, edit) => {
+          const newerPostId = await params
+            .findPostAfterPreview?.(previewPostId)
+            .catch((err: unknown) => {
+              params.logVerboseMessage(
+                `mattermost preview order check failed; finalizing in place (${String(err)})`,
+              );
+              return undefined;
+            });
+          if (newerPostId) {
+            params.logVerboseMessage(
+              `mattermost preview ${previewPostId} is above newer post ${newerPostId}; sending the final as a new post`,
+            );
+            return { visibleReplySent: false };
+          }
           if (typeof edit.message !== "string") {
             throw new Error("Mattermost preview final edit requires message text");
           }

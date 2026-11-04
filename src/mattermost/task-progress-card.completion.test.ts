@@ -36,7 +36,8 @@ describe("task-card explicit parent completion across continuation", () => {
     card.noteAgentEvent({ runId: "next-parent", stream: "lifecycle", data: { phase: "end" } });
     await card.finish({ outcome: "completed" });
     expect(JSON.parse(String(request.mock.calls.at(-1)?.[1]?.body)).message).toContain("Task progress · Completed");
-    expect(request.mock.calls.filter(([path]) => path === "/posts")).toHaveLength(2);
+    expect(request.mock.calls.filter(([path]) => path === "/posts?silent=true")).toHaveLength(1);
+    expect(request.mock.calls.filter(([path]) => path === "/posts")).toHaveLength(1);
     expect(request.mock.calls.slice(resultIndex + 1).every(([path]) => path === "/posts/original-card/patch")).toBe(true);
   });
 
@@ -149,7 +150,7 @@ describe("task-card explicit parent completion across continuation", () => {
 
       expect(card.postId()).toBe("original-card");
       const paths = request.mock.calls.map(([path]) => path);
-      expect(paths.filter((path) => path === "/posts")).toHaveLength(1);
+      expect(paths.filter((path) => path === "/posts?silent=true")).toHaveLength(1);
       expect(paths.slice(1).every((path) => path === "/posts/original-card/patch")).toBe(true);
       const terminal = JSON.parse(String(request.mock.calls.at(-1)?.[1]?.body));
       // Completion comes from an explicit later parent plan, with no children.

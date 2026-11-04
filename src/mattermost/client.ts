@@ -599,6 +599,7 @@ export async function fetchMattermostChannelPosts(
     limit?: number;
     before?: string;
     after?: string;
+    skipFetchThreads?: boolean;
   } = {},
 ): Promise<{ messages: MattermostPost[]; hasMore: boolean }> {
   const before = normalizeOptionalString(options.before);
@@ -617,6 +618,9 @@ export async function fetchMattermostChannelPosts(
   }
   if (after) {
     query.set("after", after);
+  }
+  if (options.skipFetchThreads) {
+    query.set("skipFetchThreads", "true");
   }
   const response = await client.request<unknown>(
     `/channels/${encodeURIComponent(channelId)}/posts?${query.toString()}`,
@@ -1077,6 +1081,60 @@ export async function deleteMattermostPost(
     method: "DELETE",
     discardResponse: true,
   });
+}
+
+/** Only for a transient post whose identity is held by the preview owner. */
+export async function deleteMattermostPreview(
+  client: MattermostClient,
+  postId: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const deadline = performance.now() + 10_000;
+  const cleanupSignal = AbortSignal.any([
+    AbortSignal.timeout(10_000),
+    ...(signal ? [signal] : []),
+  ]);
+  const remaining = () => {
+    cleanupSignal.throwIfAborted();
+    client.assertRequestCurrent?.();
+    return Math.max(1, Math.ceil(deadline - performance.now()));
+  };
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await client.request<void>(`/posts/${postId}`, {
+        method: "DELETE",
+        discardResponse: true,
+        signal: cleanupSignal,
+        timeoutMs: remaining(),
+      });
+      return;
+    } catch (error: unknown) {
+      cleanupSignal.throwIfAborted();
+      if (!(error instanceof Error) || !isRetryableError(error)) {
+        throw error;
+      }
+      // A lost response can follow a committed soft delete. A first DELETE 404,
+      // or an unreadable/forbidden readback, is never evidence of cleanup success.
+      try {
+        const post = MattermostPostSchema.parse(await client.request<unknown>(`/posts/${postId}`, {
+          signal: cleanupSignal,
+          timeoutMs: remaining(),
+        }));
+        if (post.id !== postId) throw error;
+        if (post.delete_at && post.delete_at > 0) return;
+      } catch (readError: unknown) {
+        cleanupSignal.throwIfAborted();
+        if (parseMattermostApiStatus(readError) === 404) return;
+        throw error;
+      }
+      if (attempt === 1) throw error;
+      const delay = error instanceof MattermostApiError && error.status === 429
+        ? error.retryAfterMs ?? 1000
+        : 250;
+      if (delay >= remaining()) throw error;
+      await waitForRateLimit(delay, cleanupSignal);
+    }
+  }
 }
 
 export async function fetchMattermostPostReactions(

@@ -1,7 +1,7 @@
 // The host supplies audience-prepared items; Mattermost retains only its confirmed draft.
 import { createChannelProgressDraftCompositor } from "openclaw/plugin-sdk/channel-outbound";
 import type { ReplyDispatchRuntimeInfo } from "openclaw/plugin-sdk/reply-runtime";
-import { deleteMattermostPost, type MattermostClient } from "./client.js";
+import { deleteMattermostPreview, type MattermostClient } from "./client.js";
 import { createMattermostDraftStream } from "./draft-stream.js";
 
 type CompositorParams = Parameters<typeof createChannelProgressDraftCompositor>[0];
@@ -14,6 +14,7 @@ export function retainMattermostProgressDraft(params: {
   rootId?: string;
   postId: string;
   text: string;
+  silent?: boolean;
   snapshot: NonNullable<CompositorParams["initialSnapshot"]>;
   entry: CompositorParams["entry"];
   seed: string;
@@ -36,7 +37,8 @@ export function retainMattermostProgressDraft(params: {
     },
     channelId: params.channelId,
     rootId: params.rootId,
-    initialPost: { id: params.postId, message: params.text },
+    initialPost: { id: params.postId, message: params.text, silent: params.silent },
+    silentProgress: true,
     maxChars: params.maxChars,
     throttleMs: 1200,
     warn: params.log,
@@ -71,7 +73,7 @@ export function retainMattermostProgressDraft(params: {
     // Stop timers and join an already accepted edit before deleting this transient identity.
     tail = tail.then(async () => {
       await stream.discardPending();
-      if (deletePost) await deleteMattermostPost(params.client, params.postId);
+      if (deletePost) await deleteMattermostPreview(params.client, params.postId);
     }).catch((error: unknown) => params.log(`mattermost retained progress cleanup failed: ${String(error)}`));
   };
   const retire = () => dispose(true);

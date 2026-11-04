@@ -13,7 +13,8 @@ import {
 } from "openclaw/plugin-sdk/number-runtime";
 import { finalizeInboundContext } from "openclaw/plugin-sdk/reply-runtime";
 import { safeEqualSecret } from "openclaw/plugin-sdk/security-runtime";
-import { getSessionEntry, resolveStorePath } from "openclaw/plugin-sdk/session-store-runtime";
+import { getSessionEntryAsync, resolveStorePath } from "openclaw/plugin-sdk/session-store-runtime";
+import { recordDeliveredCommandExchange } from "openclaw/plugin-sdk/session-transcript-runtime";
 import { isPrivateNetworkOptInEnabled } from "openclaw/plugin-sdk/ssrf-runtime";
 import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
 import { resolveMattermostGroupContext } from "../group-context.js";
@@ -41,6 +42,7 @@ import {
 } from "./model-session-pin.js";
 import {
   authorizeMattermostCommandInvocation,
+  MATTERMOST_PAIRING_QUEUE_FULL_TEXT,
   normalizeMattermostAllowList,
 } from "./monitor-auth.js";
 import { resolveMattermostThreadSessionContext } from "./monitor-context.js";
@@ -582,11 +584,13 @@ async function authorizeSlashInvocation(params: {
         ...decision,
         denyResponse: {
           response_type: "ephemeral",
-          text: core.channel.pairing.buildPairingReply({
-            channel: "mattermost",
-            idLine: `Your Mattermost user id: ${senderId}`,
-            code,
-          }),
+          text: code
+            ? core.channel.pairing.buildPairingReply({
+                channel: "mattermost",
+                idLine: `Your Mattermost user id: ${senderId}`,
+                code,
+              })
+            : MATTERMOST_PAIRING_QUEUE_FULL_TEXT,
         },
       };
     }
@@ -737,7 +741,7 @@ export function createSlashCommandHttpHandler(params: SlashHttpHandlerParams) {
     const groupContext = resolveMattermostGroupContext({
       cfg: currentCfg, accountId: account.accountId, channelId, kind: auth.kind,
     });
-    if (!isMattermostNativeSkillAllowed({ cfg: currentCfg, commandText, skillFilter: groupContext.skillFilter })) {
+    if (!(await isMattermostNativeSkillAllowed({ cfg: currentCfg, commandText, skillFilter: groupContext.skillFilter }))) {
       sendJsonResponse(res, 200, { response_type: "ephemeral", text: "This skill is not available in this Mattermost channel." });
       return;
     }
@@ -865,22 +869,35 @@ async function handleSlashCommandAsync(params: {
   const to = kind === "direct" ? `user:${senderId}` : `channel:${channelId}`;
   const pickerEntry = resolveMattermostModelPickerEntry(commandText);
   if (pickerEntry) {
-    const sessionEntry = getSessionEntry({
+    const messageSid = triggerId ?? `slash-${Date.now()}`;
+    const sessionEntry = await getSessionEntryAsync({
+      agentId: route.agentId,
       storePath: resolveStorePath(cfg.session?.store, { agentId: route.agentId }),
       sessionKey: thread.sessionKey,
       readConsistency: "latest",
     });
     const data = await buildModelsProviderData(cfg, route.agentId, { sessionEntry });
     if (data.providers.length === 0) {
-      await sendMessageMattermost(`channel:${channelId}`, "No models available.", {
+      const delivered = await sendMessageMattermost(`channel:${channelId}`, "No models available.", {
         cfg,
         accountId: account.accountId,
         replyToId: thread.effectiveReplyToId,
       });
+      await recordDeliveredCommandExchange({
+        config: cfg,
+        agentId: route.agentId,
+        sessionKey: thread.sessionKey,
+        expectedSessionId: sessionEntry?.sessionId,
+        expectedLifecycleRevision: sessionEntry?.lifecycleRevision,
+        commandText,
+        commandId: `mattermost:${account.accountId}:${channelId}:${messageSid}`,
+        replyId: "model-picker",
+        replyText: delivered.content,
+      });
       return;
     }
 
-    const currentModel = resolveMattermostModelPickerCurrentModel({
+    const currentModel = await resolveMattermostModelPickerCurrentModel({
       cfg,
       route: {
         agentId: route.agentId,
@@ -908,11 +925,25 @@ async function handleSlashCommandAsync(params: {
               currentModel,
             });
 
-    await sendMessageMattermost(`channel:${channelId}`, view.text, {
+    const delivered = await sendMessageMattermost(`channel:${channelId}`, view.text, {
       cfg,
       accountId: account.accountId,
       buttons: view.buttons,
       replyToId: thread.effectiveReplyToId,
+    });
+    await recordDeliveredCommandExchange({
+      config: cfg,
+      agentId: route.agentId,
+      sessionKey: thread.sessionKey,
+      expectedSessionId: sessionEntry?.sessionId,
+      expectedLifecycleRevision: sessionEntry?.lifecycleRevision,
+      commandText,
+      commandId: `mattermost:${account.accountId}:${channelId}:${messageSid}`,
+      replyId: "model-picker",
+      replyText: [
+        delivered.content,
+        ...view.buttons.map((row) => row.map((button) => button.text).join(", ")),
+      ].join("\n"),
     });
     runtime.log?.(`delivered model picker to ${to}`);
     return;
@@ -927,12 +958,12 @@ async function handleSlashCommandAsync(params: {
   const invocationSid = triggerId ?? `slash-${Date.now()}`;
   const invocationTimestamp = Date.now();
 
-  const resolveDispatchAttempt = () => {
+  const resolveDispatchAttempt = async () => {
     const attemptCfg = getMattermostRuntime().config.current() as OpenClawConfig;
     const groupContext = resolveMattermostGroupContext({
       cfg: attemptCfg, accountId: account.accountId, channelId, kind,
     });
-    if (!isMattermostNativeSkillAllowed({ cfg: attemptCfg, commandText, skillFilter: groupContext.skillFilter })) {
+    if (!(await isMattermostNativeSkillAllowed({ cfg: attemptCfg, commandText, skillFilter: groupContext.skillFilter }))) {
       throw new Error("This skill is not available in this Mattermost channel.");
     }
     const attemptRoute = core.channel.routing.resolveAgentRoute({
@@ -1004,13 +1035,13 @@ async function handleSlashCommandAsync(params: {
   // admission and started user-visible work. A session-admission retry below must never
   // re-run past that point.
   let hasStartedWork = false;
-  let lastAttempt: ReturnType<typeof resolveDispatchAttempt> | undefined;
+  let lastAttempt: Awaited<ReturnType<typeof resolveDispatchAttempt>> | undefined;
 
   try {
     await withMattermostSessionAdmissionRetry({
       hasStartedWork: () => hasStartedWork,
-      run: () => {
-        const attempt = resolveDispatchAttempt();
+      run: async () => {
+        const attempt = await resolveDispatchAttempt();
         let modelPinResult: ReturnType<typeof pinMattermostExplicitDefaultModelSelection> | undefined;
         lastAttempt = attempt;
         const textLimit = resolveMattermostTextLimit({

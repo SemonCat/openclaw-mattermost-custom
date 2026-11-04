@@ -16,7 +16,7 @@ import type { OpenClawConfig } from "./runtime-api.js";
 const dispatch = vi.hoisted(() => vi.fn());
 const skillCommands = vi.hoisted(() => vi.fn(() => [{ name: "review_code", skillName: "code-review" }]));
 vi.mock("./monitor-turn.js", () => ({ dispatchMattermostInboundTurn: dispatch }));
-vi.mock("./runtime-api.js", async original => ({ ...await original<typeof import("./runtime-api.js")>(), listSkillCommandsForAgents: skillCommands }));
+vi.mock("./runtime-api.js", async original => ({ ...await original<typeof import("./runtime-api.js")>(), prepareSkillCommandsForAgents: skillCommands }));
 vi.mock("./thread-participation.js", () => ({ hasMattermostThreadParticipation: async () => false }));
 vi.mock("./permalink-hydration.js", () => ({ hydrateMattermostPermalinks: async () => "[existing attachment metadata]" }));
 vi.mock("openclaw/plugin-sdk/channel-inbound", async original => ({ ...await original<typeof import("openclaw/plugin-sdk/channel-inbound")>(), resolveInboundSessionEnvelopeContextAsync: async () => ({ envelopeOptions: {} }) }));

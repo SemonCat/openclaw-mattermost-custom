@@ -59,7 +59,7 @@ describe("mattermost monitor slash", () => {
 
   beforeEach(() => {
     buildMattermostNativeCommandSpecs.mockReset();
-    buildMattermostNativeCommandSpecs.mockReturnValue([
+    buildMattermostNativeCommandSpecs.mockResolvedValue([
       { trigger: "ping", description: "ping" },
       { trigger: "ping", description: "duplicate" },
     ]);

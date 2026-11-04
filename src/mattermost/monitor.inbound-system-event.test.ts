@@ -1488,7 +1488,7 @@ describe("mattermost inbound user posts", () => {
     },
   );
 
-  it("keeps verbose inbound previews on complete UTF-16 boundaries", async () => {
+  it("logs inbound identity and length without copying message content", async () => {
     const socket = new FakeWebSocket();
     const abortController = new AbortController();
     const verboseDebug = vi.fn();
@@ -1531,8 +1531,9 @@ describe("mattermost inbound user posts", () => {
     await monitor;
 
     expect(verboseDebug).toHaveBeenCalledWith(
-      `mattermost inbound: from=mattermost:channel:chan-1 len=205 preview="${"a".repeat(199)}"`,
+      "mattermost inbound: from=mattermost:channel:chan-1 id=post-verbose-preview len=205",
     );
+    expect(verboseDebug.mock.calls.flat().join("\n")).not.toContain("a".repeat(199));
   });
 
   it("dispatches a bare bot mention whose body is empty after normalization as a wake event", async () => {
@@ -2103,7 +2104,7 @@ describe("mattermost inbound user posts", () => {
     }));
     const posts = new Map<string, MattermostPost>();
     const request = vi.fn(async (path: string, init?: RequestInit) => {
-      if (path === "/posts" && init?.method === "POST") {
+      if (path.split("?")[0] === "/posts" && init?.method === "POST") {
         const body = JSON.parse(String(init.body));
         const post = { ...body, id: `post-${posts.size + 1}`, user_id: "bot-user" };
         posts.set(post.id, post);
@@ -2181,14 +2182,15 @@ describe("mattermost inbound user posts", () => {
       await original;
       if (adoption === "read-failure") expect(adopt).not.toHaveBeenCalled();
       else expect(adopt).toHaveBeenCalledOnce();
-      expect(mockState.sendMessageMattermost).not.toHaveBeenCalled();
-      const creates = () => request.mock.calls.filter(([path, init]) => path === "/posts" && init?.method === "POST");
-      expect(creates()).toHaveLength(2);
+      const creates = () => request.mock.calls.filter(([path, init]) => path.split("?")[0] === "/posts" && init?.method === "POST");
+      const fallsBackToFinal = adoption === "rejected" || adoption === "read-failure";
+      expect(mockState.sendMessageMattermost).toHaveBeenCalledTimes(fallsBackToFinal ? 1 : 0);
+      expect(creates()).toHaveLength(fallsBackToFinal ? 3 : 2);
       expect(posts.get("post-1")?.message).toContain("Task progress · In progress");
-      expect(posts.get("post-2")?.message).not.toContain("Task progress");
-      if (adoption === "rejected" || adoption === "read-failure") {
-        expect(posts.get("post-2")?.message).toBe("Waiting for delegated work");
-        expect(request.mock.calls.some(([, init]) => init?.method === "DELETE")).toBe(false);
+      if (fallsBackToFinal) {
+        expect(posts.has("post-2")).toBe(false);
+        expect(posts.get("post-3")?.message).toBe("Waiting for delegated work");
+        expect(request.mock.calls.some(([, init]) => init?.method === "DELETE")).toBe(true);
         if (adoption === "read-failure") return;
         const count = request.mock.calls.length;
         retained!.push({ itemId: "rejected", kind: "tool", name: "exec", status: "running" });
@@ -2197,6 +2199,7 @@ describe("mattermost inbound user posts", () => {
         expect(request.mock.calls).toHaveLength(count);
         return;
       }
+      expect(posts.get("post-2")?.message).not.toContain("Task progress");
       if (adoption === "reset") {
         for (const listener of [...mockState.sessionTranscriptListeners]) listener({
           target: { ...target, sessionId: "replaced-session" }, messageSeq: ++seq,
@@ -3548,6 +3551,102 @@ describe("mattermost inbound user posts", () => {
     const replyOptions = mockState.dispatchInboundMessage.mock.calls.at(0)?.[0].replyOptions;
     expect(replyOptions?.disableBlockStreaming).toBe(false);
     expect(replyOptions?.preserveProgressCallbackStartOrder).toBeUndefined();
+  });
+
+  it.each([
+    { mode: "partial", status: true }, { mode: "block", status: true },
+    { mode: "partial", status: false }, { mode: "block", status: false },
+  ] as const)(
+    "accumulates ACP chunks and replaces snapshots in $mode mode (status: $status)", async ({ mode, status }) => {
+    const cfg: OpenClawConfig = { ...testConfig, channels: { mattermost: {
+      ...testConfig.channels?.mattermost, streaming: { mode },
+    } } };
+    const posts = new Map<string, MattermostPost>();
+    const calls: string[] = [];
+    let completed = false;
+    const chunkResults: unknown[] = [];
+    let streamedAnswer: string | null | undefined;
+    let finalResult: unknown;
+    const request = vi.fn(async (path: string, init?: RequestInit) => {
+      calls.push(`${init?.method ?? "GET"} ${path}`);
+      if (path.startsWith("/channels/")) return { order: [], posts: {} };
+      const body = typeof init?.body === "string" ? JSON.parse(init.body) : {};
+      if (path.split("?")[0] === "/posts") {
+        const post = { ...body, id: `post-${posts.size + 1}`, user_id: "bot-user" };
+        posts.set(post.id, post);
+        return post;
+      }
+      const id = path.split("/")[2];
+      if (init?.method === "DELETE") { posts.delete(id); return; }
+      const post = posts.get(id);
+      if (!post) throw new Error("Unknown test post");
+      if (init?.method === "PUT") Object.assign(post, body);
+      return { ...post };
+    });
+    mockState.createMattermostClient.mockReturnValue({
+      baseUrl: "https://mattermost.example.com", apiBaseUrl: "https://mattermost.example.com/api/v4",
+      token: "test-token", request, fetchImpl: vi.fn(),
+    });
+    const actualClient = await vi.importActual<typeof import("./client.js")>("./client.js");
+    mockState.createMattermostPost.mockImplementation(actualClient.createMattermostPost);
+    mockState.fetchMattermostPost.mockImplementation(actualClient.fetchMattermostPost);
+    mockState.updateMattermostPostMessageWithReadback.mockImplementation(actualClient.updateMattermostPostMessageWithReadback);
+    const actualDraft = await vi.importActual<typeof import("./draft-stream.js")>("./draft-stream.js");
+    mockState.createMattermostDraftStream.mockImplementationOnce(actualDraft.createMattermostDraftStream);
+    mockState.sendMessageMattermost.mockImplementation(async (_to, text) => {
+      const post = await request("/posts", { method: "POST", body: JSON.stringify({
+        channel_id: "chan-1", message: text,
+      }) });
+      return {
+        messageId: post!.id, channelId: "chan-1", content: text,
+        receipt: createMessageReceiptFromOutboundResults({
+          results: [{ channel: "mattermost", channelId: "chan-1", messageId: post!.id }],
+          kind: "text",
+        }),
+      };
+    });
+    mockState.runtimeCore = createRuntimeCore(cfg);
+    mockState.dispatchInboundMessage.mockImplementation(async (params) => {
+      const delivery = mockState.deliveryPlanObserver.mock.calls.at(-1)?.[0];
+      for (const text of ["First. ", "Second. ", "First. "]) {
+        const result = await delivery.deliver({ text, textMode: "delta" }, { kind: "block" });
+        chunkResults.push(result);
+      }
+      streamedAnswer = posts.get("post-1")?.message;
+      await params.replyOptions?.onPartialReply?.({ text: "Corrected shorter answer." });
+      finalResult = await delivery.deliver(status
+        ? { text: "Session ids resolved.", isStatusNotice: true }
+        : { text: "The authoritative final." }, { kind: "final" });
+      completed = true;
+      return { counts: { block: 3, final: 1 } };
+    });
+    const socket = new FakeWebSocket();
+    const abortController = new AbortController();
+    const monitor = monitorMattermostProvider({
+      config: cfg, runtime: testRuntime(), abortSignal: abortController.signal,
+      webSocketFactory: () => socket,
+    });
+    try {
+      await vi.waitFor(() => expect(socket.openListenerCount).toBeGreaterThan(0));
+      socket.emitOpen();
+      await emitMattermostChannelPost(socket, { id: "acp-chunks", message: "answer in chunks" });
+      await vi.waitFor(() => expect(completed).toBe(true));
+      expect(chunkResults).toHaveLength(3);
+      for (const result of chunkResults) {
+        expect(result).toMatchObject({ visibleReplySent: true, messageIds: ["post-1"] });
+      }
+      expect(streamedAnswer).toBe("First. Second. First.");
+      expect([...posts.values()].map((post) => post.message)).toEqual(status
+        ? ["Corrected shorter answer.", "Session ids resolved."]
+        : ["The authoritative final."]);
+      expect(finalResult).toMatchObject({ messageIds: [status ? "post-2" : "post-1"] });
+      expect(calls.filter((call) => call === "POST /posts")).toHaveLength(status ? 2 : 1);
+      expect(calls.some((call) => call.startsWith("DELETE"))).toBe(false);
+    } finally {
+      abortController.abort();
+      socket.emitClose(1000);
+      await monitor;
+    }
   });
 
   it("preserves provider previews for observer-only hooks", async () => {

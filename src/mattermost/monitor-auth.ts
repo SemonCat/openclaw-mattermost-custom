@@ -17,6 +17,9 @@ import { isDangerousNameMatchingEnabled, resolveAllowlistMatchSimple } from "./r
 
 export { normalizeMattermostAllowEntry } from "./ingress-identity.js";
 
+export const MATTERMOST_PAIRING_QUEUE_FULL_TEXT =
+  "DM pairing is full, so no pairing request was saved. Ask the bot owner to approve or dismiss pending requests in Settings -> Channels -> DM access requests, then try again.";
+
 export function normalizeMattermostAllowList(entries: Array<string | number>): string[] {
   const normalized = entries
     .map((entry) => normalizeMattermostAllowEntry(String(entry)))

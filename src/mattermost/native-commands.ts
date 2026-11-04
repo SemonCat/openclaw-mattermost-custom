@@ -2,7 +2,7 @@
 import {
   listNativeCommandSpecsForConfig,
   listProviderPluginCommandSpecs,
-  listSkillCommandsForAgents,
+  prepareSkillCommandsForAgents,
   type CommandArgDefinition,
   type OpenClawConfig,
   type RuntimeEnv,
@@ -10,11 +10,11 @@ import {
 import type { MattermostCommandSpec } from "./slash-commands.js";
 
 /** Check invocation, not the globally registered command catalog. No command execution here. */
-export function isMattermostNativeSkillAllowed(params: {
+export async function isMattermostNativeSkillAllowed(params: {
   cfg: OpenClawConfig;
   commandText: string;
   skillFilter?: string[];
-}): boolean {
+}): Promise<boolean> {
   if (params.skillFilter === undefined) return true;
   if (!params.commandText.trimStart().startsWith("/")) return true;
   // 2026.10.1 no longer publishes the command-auth invocation resolver.
@@ -23,7 +23,7 @@ export function isMattermostNativeSkillAllowed(params: {
   const match = params.commandText.trim().match(/^\/([^\s]+)(?:\s+([\s\S]+))?$/);
   if (!match) return true;
   const commandName = match[1]?.trim().toLowerCase();
-  const skillCommands = listSkillCommandsForAgents({ cfg: params.cfg });
+  const skillCommands = await prepareSkillCommandsForAgents({ cfg: params.cfg });
   const normalizeLookup = (value: string) => value.trim().toLowerCase().replace(/[\s_]+/g, "-");
   const skillName = commandName === "skill" ? match[2]?.trim().match(/^([^\s]+)/)?.[1] : undefined;
   const command =
@@ -138,21 +138,19 @@ function toMattermostCommandSpec(params: {
  * name. Root-first naming and the deterministic `oc_` fallback are resolved per spec; per-team,
  * per-foreign-collision fallback selection happens later in `registerSlashCommands`.
  */
-export function buildMattermostNativeCommandSpecs(params: {
+export async function buildMattermostNativeCommandSpecs(params: {
   cfg: OpenClawConfig;
   nativeSkills: boolean;
   runtime: RuntimeEnv;
-}): MattermostCommandSpec[] {
-  const skillCommands = params.nativeSkills
-    ? (() => {
-        try {
-          return listSkillCommandsForAgents({ cfg: params.cfg });
-        } catch (err) {
-          params.runtime.error?.(`mattermost: failed to list skill commands: ${String(err)}`);
-          return undefined;
-        }
-      })()
-    : undefined;
+}): Promise<MattermostCommandSpec[]> {
+  let skillCommands: Awaited<ReturnType<typeof prepareSkillCommandsForAgents>> | undefined;
+  if (params.nativeSkills) {
+    try {
+      skillCommands = await prepareSkillCommandsForAgents({ cfg: params.cfg });
+    } catch (err) {
+      params.runtime.error?.(`mattermost: failed to list skill commands: ${String(err)}`);
+    }
+  }
 
   const coreAndSkillSpecs = listNativeCommandSpecsForConfig(params.cfg, {
     skillCommands,

@@ -2,6 +2,7 @@
 import { resolveHumanDelayConfig } from "openclaw/plugin-sdk/agent-runtime";
 import {
   hasVisibleInboundReplyDispatch,
+  createChannelPartialDeliveryError,
   isChannelPartialDeliveryError,
   readAgentRunTerminalOutcome,
   type ChannelInboundTurnPlan,
@@ -14,6 +15,10 @@ import {
   listMessageReceiptPlatformIds,
 } from "openclaw/plugin-sdk/channel-outbound";
 import { getGlobalHookRunner } from "openclaw/plugin-sdk/plugin-runtime";
+import {
+  isReplyPayloadTerminalContent,
+  stripReplyPayloadResponsePrefix,
+} from "openclaw/plugin-sdk/reply-payload";
 import type { finalizeInboundContext } from "openclaw/plugin-sdk/reply-runtime";
 import { resolveInboundLastRouteSessionKey } from "openclaw/plugin-sdk/routing";
 import {
@@ -26,6 +31,7 @@ import {
 } from "./draft-stream.js";
 import { normalizeMattermostAllowEntry } from "./monitor-auth.js";
 import {
+  canFinalizeMattermostPreviewInPlace,
   formatMattermostFinalDeliveryOutcomeLog,
   resolveMattermostReplyRootId,
   shouldSuppressMattermostDefaultToolProgressMessages,
@@ -106,6 +112,7 @@ function createDisabledMattermostDraftStream(): ReturnType<typeof createMattermo
     updateAssistantText: () => {},
     flush: noopAsync,
     postId: () => undefined,
+    isSilent: () => false,
     clear: noopAsync,
     deleteCurrentMessage: noopAsync,
     discardPending: noopAsync,
@@ -115,6 +122,7 @@ function createDisabledMattermostDraftStream(): ReturnType<typeof createMattermo
     handoffPostIdentity: async () => undefined,
     settleBoundaries: noopAsync,
     resolveFinalText: (text) => ({ kind: "full", text, publishedParts: [] }),
+    findPostAfter: async () => undefined,
   };
 }
 
@@ -221,6 +229,7 @@ export async function dispatchMattermostInboundTurn(
   const draftStream = draftPreviewEnabled
     ? createMattermostDraftStream({
         client,
+        silentProgress: true,
         channelId,
         rootId: effectiveReplyToId,
         postProps: buildMattermostPostIdentityProps("turn_result", {
@@ -253,6 +262,7 @@ export async function dispatchMattermostInboundTurn(
     },
   });
   let lastPartialText = "";
+  let lastAssistantSourceText = "";
   let firstAssistantPreviewPrefix: string | undefined;
   let firstAssistantPreviewPrefixPending = true;
   let currentAssistantPreviewUsesPrefix = false;
@@ -310,6 +320,7 @@ export async function dispatchMattermostInboundTurn(
     blockPreviewAssistantMessagePending = false;
     if (activity === "tool") {
       lastPartialText = "";
+      lastAssistantSourceText = "";
     }
     return boundarySettled;
   };
@@ -383,8 +394,11 @@ export async function dispatchMattermostInboundTurn(
     };
   };
 
-  const updateDraftFromPartial = (text?: string) => {
-    const cleaned = text?.trim();
+  const updateDraftFromPartial = (text?: string, delta = false) => {
+    if (typeof text !== "string") return undefined;
+    const source = delta ? lastAssistantSourceText + text : text;
+    lastAssistantSourceText = source;
+    const cleaned = source.trim();
     if (!cleaned || cleaned === lastPartialText) {
       return undefined;
     }
@@ -554,6 +568,7 @@ export async function dispatchMattermostInboundTurn(
               let releaseRetained: (() => void) | undefined;
               const retained = retainMattermostProgressDraft({
                 client, channelId, rootId: effectiveReplyToId, postId, text, snapshot,
+                silent: confirmed.props?.silent_notification === true,
                 entry: account.config, seed: `${account.accountId}:${channelId}`, maxChars: textLimit,
                 abortSignal: monitor.abortSignal, assertCurrent, log: monitor.logVerboseMessage,
                 onRetired: () => releaseRetained?.(),
@@ -599,6 +614,44 @@ export async function dispatchMattermostInboundTurn(
           );
         }
       };
+      if (
+        draftPreviewEnabled && !previewLifecycle.finalStarted &&
+        info.kind === "block" && payloadEntry.textMode === "delta" &&
+        typeof payloadEntry.text === "string" && isReplyPayloadTerminalContent(payloadEntry) &&
+        !payloadEntry.isError && !payloadEntry.mediaUrl && !payloadEntry.mediaUrls?.length &&
+        !payloadEntry.presentation && !payloadEntry.interactive && !payloadEntry.channelData &&
+        canFinalizeMattermostPreviewInPlace({
+          kind, previewRootId: effectiveReplyToId, threadRootId: effectiveReplyToId,
+          replyToId: payloadEntry.replyToId,
+        })
+      ) {
+        const text = lastAssistantSourceText
+          ? stripReplyPayloadResponsePrefix(payloadEntry, payloadEntry.text)
+          : payloadEntry.text;
+        await updateDraftFromPartial(text, true);
+        await draftStream.flush();
+        const messageId = draftStream.postId();
+        if (messageId) {
+          const result = {
+            outcome: "text" as const,
+            visibleReplySent: true,
+            messageIds: [messageId],
+            receipt: createMessageReceiptFromOutboundResults({
+              results: [{ channel: "mattermost", channelId, messageId }],
+              kind: "preview",
+              ...(effectiveReplyToId ? { replyToId: effectiveReplyToId } : {}),
+            }),
+            content: payloadEntry.text,
+          };
+          try {
+            await markThreadParticipation();
+          } catch (error) {
+            throw createChannelPartialDeliveryError(error, result);
+          }
+          anyReplyDelivered = true;
+          return result;
+        }
+      }
       const result = await deliverMattermostReplyWithDraftPreview({
         payload: payloadEntry,
         info,
@@ -609,9 +662,16 @@ export async function dispatchMattermostInboundTurn(
         resolvePreviewFinalText,
         logVerboseMessage: monitor.logVerboseMessage,
         recordThreadParticipation: markThreadParticipation,
+        findPostAfterPreview: draftStream.findPostAfter,
+        mustSendFinalAsNewPost: () => draftStream.isSilent?.() === true,
+        preservePreview: async () => {
+          await draftStream.forceNewMessage();
+          await draftStream.stop();
+        },
         deliverPayload: async (payloadToDeliver) => {
           const finalTextResolution =
             info.kind === "final" &&
+            !payloadToDeliver.isStatusNotice &&
             !payloadToDeliver.isError &&
             typeof payloadToDeliver.text === "string"
               ? draftStream.resolveFinalText(payloadToDeliver.text)
@@ -919,6 +979,7 @@ export async function dispatchMattermostInboundTurn(
                     : updateDraftFromPartial(payloadResult.text),
                 onAssistantMessageStart: () => {
                   lastPartialText = "";
+                  lastAssistantSourceText = "";
                   progressDraft.beginAssistantMessage();
                   if (account.streamingMode === "block") {
                     blockPreviewAssistantMessagePending = true;
@@ -998,6 +1059,8 @@ export async function dispatchMattermostInboundTurn(
                   }
                 },
                 onQueuedFollowupAdmitted: () => {
+                  lastPartialText = "";
+                  lastAssistantSourceText = "";
                   if (!sourceQueuedLifecycleSupported) {
                     admitQueuedReactions();
                   }

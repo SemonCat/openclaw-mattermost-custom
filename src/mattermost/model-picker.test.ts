@@ -226,7 +226,7 @@ describe("Mattermost model picker", () => {
     });
   });
 
-  it("falls back to the routed agent default model when no override is stored", () => {
+  it("falls back to the routed agent default model when no override is stored", async () => {
     const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "mm-model-picker-"));
     try {
       const cfg: OpenClawConfig = {
@@ -259,7 +259,7 @@ describe("Mattermost model picker", () => {
       };
 
       expect(
-        resolveMattermostModelPickerCurrentModel({
+        await resolveMattermostModelPickerCurrentModel({
           cfg,
           route: {
             agentId: "support",
@@ -330,7 +330,7 @@ describe("Mattermost model picker", () => {
       };
 
       expect(
-        resolveMattermostModelPickerCurrentModel({
+        await resolveMattermostModelPickerCurrentModel({
           cfg,
           route: {
             agentId: "support",
@@ -341,7 +341,7 @@ describe("Mattermost model picker", () => {
         }),
       ).toBe("openai/gpt-5");
       expect(
-        resolveMattermostModelPickerCurrentModel({
+        await resolveMattermostModelPickerCurrentModel({
           cfg,
           route: {
             agentId: "support",

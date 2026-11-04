@@ -41,7 +41,9 @@ describe("host-owned Mattermost continuation draft", () => {
     f.draft.retire();
     await drain();
     expect(f.request.mock.calls.filter(([, init]) => init?.method === "DELETE")).toEqual([
-      ["/posts/retained-preview", { method: "DELETE", discardResponse: true }],
+      ["/posts/retained-preview", expect.objectContaining({
+        method: "DELETE", discardResponse: true, signal: expect.any(AbortSignal),
+      })],
     ]);
     const count = f.request.mock.calls.length;
     f.draft.push({ itemId: "late", kind: "tool", name: "read", status: "running" });

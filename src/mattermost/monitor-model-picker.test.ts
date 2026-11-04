@@ -14,6 +14,11 @@ const mocks = vi.hoisted(() => ({
   currentModel: vi.fn(),
   currentRuntime: vi.fn(),
   renderRuntimePicker: vi.fn(),
+  recordCommand: vi.fn(),
+}));
+
+vi.mock("openclaw/plugin-sdk/session-transcript-runtime", () => ({
+  recordDeliveredCommandExchange: mocks.recordCommand,
 }));
 
 vi.mock("openclaw/plugin-sdk/model-session-runtime", () => ({
@@ -21,7 +26,7 @@ vi.mock("openclaw/plugin-sdk/model-session-runtime", () => ({
 }));
 
 vi.mock("openclaw/plugin-sdk/session-store-runtime", () => ({
-  getSessionEntry: mocks.getSessionEntry,
+  getSessionEntryAsync: mocks.getSessionEntry,
   resolveStorePath: () => "/tmp/mattermost-model-picker-sessions.sqlite",
 }));
 
@@ -43,6 +48,7 @@ vi.mock("./model-session-pin.js", () => ({
 
 vi.mock("./monitor-auth.js", () => ({
   authorizeMattermostCommandInvocation: mocks.authorize,
+  MATTERMOST_PAIRING_QUEUE_FULL_TEXT: "DM pairing is full.",
 }));
 
 vi.mock("./monitor-event-plan.js", () => ({
@@ -81,9 +87,13 @@ function interactionFixture() {
       channel: {
         commands: { shouldHandleTextCommands: () => true },
         text: { hasControlCommand: () => true },
+        pairing: { buildPairingReply: vi.fn(() => "Pairing code") },
       },
     },
-    pairing: { readAllowFromStore: vi.fn(async () => []) },
+    pairing: {
+      readAllowFromStore: vi.fn(async () => []),
+      upsertPairingRequest: vi.fn(async () => ({ code: undefined, created: false })),
+    },
     resources: {
       resolveChannelInfo: vi.fn(async () => ({ id: "channel-1", type: "O" })),
       updateModelPickerPost,
@@ -92,6 +102,7 @@ function interactionFixture() {
   } as unknown as MattermostMonitorContext;
   const handler = createMattermostModelPickerInteractionHandler(monitor);
   return {
+    monitor,
     updateModelPickerPost,
     click: (userId = "user-1") => handler({
       payload: {
@@ -161,6 +172,31 @@ describe("Mattermost model-picker interaction dispatch", () => {
       finalizeContext: (context: Record<string, unknown>) => context,
     });
     mocks.dispatch.mockImplementation(() => new Promise(() => undefined));
+  });
+
+  it("reports a full pairing queue without building a reply with a missing code", async () => {
+    mocks.authorize.mockResolvedValueOnce({ ok: false, denyReason: "dm-pairing" });
+    const { click, monitor } = interactionFixture();
+    await expect(click()).resolves.toEqual({ ephemeral_text: "DM pairing is full." });
+    expect(monitor.pairing.upsertPairingRequest).toHaveBeenCalledOnce();
+    expect(monitor.core.channel.pairing.buildPairingReply).not.toHaveBeenCalled();
+    expect(mocks.recordCommand).not.toHaveBeenCalled();
+  });
+
+  it("records a delivered picker update in the exact routed session", async () => {
+    mocks.parseContext.mockReturnValueOnce({ action: "providers", ownerUserId: "user-1" });
+    const { click, updateModelPickerPost } = interactionFixture();
+    await click();
+    expect(updateModelPickerPost).toHaveBeenCalledWith(expect.objectContaining({
+      postId: "picker-post-1", message: "provider picker",
+    }));
+    expect(mocks.recordCommand).toHaveBeenCalledWith(expect.objectContaining({
+      agentId: "main", sessionKey: "agent:main:mm", expectedSessionId: "session-1",
+      commandText: "/models", replyId: "picker-update", replyText: "provider picker",
+    }));
+    expect(updateModelPickerPost.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.recordCommand.mock.invocationCallOrder[0]!,
+    );
   });
 
   it("keeps selection attached to the durable claim and coalesces concurrent clicks", async () => {

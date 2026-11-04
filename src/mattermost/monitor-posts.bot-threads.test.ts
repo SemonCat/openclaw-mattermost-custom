@@ -22,7 +22,7 @@ vi.mock("openclaw/plugin-sdk/channel-inbound", async (importOriginal) => ({
 }));
 vi.mock("openclaw/plugin-sdk/session-store-runtime", async (importOriginal) => ({
   ...(await importOriginal<typeof import("openclaw/plugin-sdk/session-store-runtime")>()),
-  getSessionEntry: () => undefined,
+  getSessionEntryAsync: async () => undefined,
 }));
 
 describe("Mattermost bot-owned thread mention policy", () => {

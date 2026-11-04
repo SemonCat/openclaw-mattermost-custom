@@ -1,11 +1,14 @@
 // Mattermost tests cover draft stream plugin behavior.
 import { isChannelPartialDeliveryError } from "openclaw/plugin-sdk/channel-inbound";
+import { createLivePreviewLifecycle } from "openclaw/plugin-sdk/channel-outbound";
 import { describe, expect, it, vi } from "vitest";
 import type { MattermostClient } from "./client.js";
 import {
   createMattermostDraftPreviewBoundaryController,
   createMattermostDraftStream,
 } from "./draft-stream.js";
+import { deliverMattermostReplyWithDraftPreview } from "./monitor-draft-delivery.js";
+import type { ReplyPayload } from "./runtime-api.js";
 
 type RequestRecord = {
   path: string;
@@ -76,6 +79,122 @@ function createDeferred(): { promise: Promise<void>; resolve: () => void } {
   });
   return { promise, resolve };
 }
+
+describe("Mattermost preview final placement", () => {
+  type TimelinePost = { id: string; message: string; root_id: string; type?: string };
+
+  it.each([
+    { case: "a message-tool post in its thread", rootId: "root-1", newer: {}, inPlace: false },
+    {
+      case: "a reply in another thread", rootId: "root-1",
+      newer: { root_id: "root-2" }, inPlace: true,
+    },
+    {
+      case: "a system post", rootId: "root-1",
+      newer: { type: "system_add_to_channel" }, inPlace: true,
+    },
+    {
+      case: "a thread reply after a root preview", rootId: undefined,
+      newer: { root_id: "root-2" }, inPlace: false,
+    },
+    { case: "a failed order check", rootId: "root-1", newer: "error", inPlace: true },
+    { case: "no newer post", rootId: "root-1", newer: "none", inPlace: true },
+  ] as const)("places the final correctly after $case", async ({ rootId, newer, inPlace }) => {
+    const timeline: TimelinePost[] = [];
+    const calls: string[] = [];
+    const request: MattermostClient["request"] = async <T>(
+      path: string,
+      init?: RequestInit,
+    ): Promise<T> => {
+      calls.push(`${init?.method ?? "GET"} ${path}`);
+      if (path.startsWith("/channels/channel-1/posts?")) {
+        if (newer === "error") throw new Error("Mattermost API 403 Forbidden");
+        const after = new URLSearchParams(path.split("?")[1]).get("after");
+        const later = timeline.slice(timeline.findIndex((post) => post.id === after) + 1);
+        return {
+          order: later.map((post) => post.id).toReversed(),
+          posts: Object.fromEntries(later.map((post) => [post.id, post])),
+        } as T;
+      }
+      const body = typeof init?.body === "string" ? parseRequestJson(init) : {};
+      if (path === "/posts") {
+        const post = {
+          id: timeline.length === 0 ? "preview-post" : "final-post",
+          message: String(body.message),
+          root_id: typeof body.root_id === "string" ? body.root_id : "",
+        };
+        timeline.push(post);
+        return post as T;
+      }
+      const id = path.slice("/posts/".length).replace(/\/patch$/, "");
+      const post = timeline.find((entry) => entry.id === id);
+      if (!post) throw new Error(`Unexpected Mattermost request: ${init?.method} ${path}`);
+      if (init?.method === "DELETE") {
+        timeline.splice(timeline.indexOf(post), 1);
+        return undefined as T;
+      }
+      if (typeof body.message === "string") post.message = body.message;
+      return post as T;
+    };
+    const { client, stream } = createDraftStreamFixture({ request, rootId });
+    const logVerboseMessage = vi.fn();
+    const deliverPayload = vi.fn(async (payload: ReplyPayload) => {
+      const post = await client.request<TimelinePost>("/posts", {
+        method: "POST",
+        body: JSON.stringify({ message: payload.text, root_id: rootId }),
+      });
+      return {
+        outcome: "text" as const, messageIds: [post.id],
+        visibleReplySent: true, content: post.message,
+      };
+    });
+
+    stream.update("Running tools...");
+    await stream.flush();
+    if (typeof newer === "object") {
+      timeline.push({ id: "newer-post", message: "Progress note", root_id: "root-1", ...newer });
+    }
+    const result = await deliverMattermostReplyWithDraftPreview({
+      payload: { text: "Final answer" },
+      info: { kind: "final" },
+      kind: "channel",
+      client,
+      previewLifecycle: createLivePreviewLifecycle<ReplyPayload, string>({
+        draft: { ...stream, id: stream.postId },
+      }),
+      effectiveReplyToId: rootId,
+      resolvePreviewFinalText: (text) => ({ editText: text, alreadyDelivered: false }),
+      logVerboseMessage,
+      deliverPayload,
+      findPostAfterPreview: stream.findPostAfter,
+    });
+
+    expect(calls[1]).toBe(
+      "GET /channels/channel-1/posts?per_page=200&after=preview-post&skipFetchThreads=true",
+    );
+    if (inPlace) {
+      expect(timeline[0]).toMatchObject({ id: "preview-post", message: "Final answer" });
+      expect(deliverPayload).not.toHaveBeenCalled();
+      expect(result.messageIds).toEqual(["preview-post"]);
+    } else {
+      expect(timeline.map((post) => [post.id, post.message])).toEqual([
+        ["newer-post", "Progress note"], ["final-post", "Final answer"],
+      ]);
+      expect(calls).toEqual([
+        "POST /posts",
+        "GET /channels/channel-1/posts?per_page=200&after=preview-post&skipFetchThreads=true",
+        "POST /posts",
+        "DELETE /posts/preview-post",
+      ]);
+      expect(result.messageIds).toEqual(["final-post"]);
+    }
+    if (newer === "error") {
+      expect(logVerboseMessage).toHaveBeenCalledWith(
+        "mattermost preview order check failed; finalizing in place (Error: Mattermost API 403 Forbidden)",
+      );
+    }
+  });
+});
 
 describe("createMattermostDraftStream", () => {
   it("coalesces updates arriving during a slow REST send into the next throttle window", async () => {

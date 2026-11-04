@@ -1,4 +1,4 @@
-import { getSessionEntry, resolveStorePath } from "openclaw/plugin-sdk/session-store-runtime";
+import { getSessionEntryAsync, resolveStorePath } from "openclaw/plugin-sdk/session-store-runtime";
 import { z } from "zod";
 import { resolveMattermostAccount } from "./accounts.js";
 import { isRetryableError, MattermostPostSchema, type MattermostUser } from "./client.js";
@@ -61,8 +61,8 @@ export function createMattermostThreadBackfill(params: {
   const recoveries = new Map<string, Recovery>();
   const inFlight = new Set<Promise<HistoryEntry[]>>();
 
-  const readIdentity = (turn: ThreadTurn): string | null => {
-    const entry = getSessionEntry({
+  const readIdentity = async (turn: ThreadTurn): Promise<string | null> => {
+    const entry = await getSessionEntryAsync({
       agentId: turn.agentId,
       storePath: resolveStorePath(turn.cfg.session?.store, { agentId: turn.agentId }),
       sessionKey: turn.historyKey,
@@ -72,12 +72,13 @@ export function createMattermostThreadBackfill(params: {
       ? JSON.stringify([entry.sessionId ?? null, entry.lifecycleRevision ?? null])
       : null;
   };
-  const owns = (turn: ThreadTurn, recovery: Recovery): boolean => {
+  const owns = async (turn: ThreadTurn, recovery: Recovery): Promise<boolean> => {
     if (recoveries.get(turn.historyKey) !== recovery) {
       return false;
     }
     try {
-      return readIdentity(turn) === recovery.identity;
+      const identity = await readIdentity(turn);
+      return recoveries.get(turn.historyKey) === recovery && identity === recovery.identity;
     } catch {
       return false;
     }
@@ -243,11 +244,12 @@ export function createMattermostThreadBackfill(params: {
     }
     let identity: string | null;
     try {
-      identity = readIdentity(turn);
+      identity = await readIdentity(turn);
     } catch {
       monitor.logVerboseMessage("mattermost: thread recovery skipped (session store unavailable)");
-      return { current: true };
+      return { current: current() };
     }
+    if (!current()) return { current: false };
     const previous = recoveries.get(turn.historyKey);
     let recovery = previous;
     if (!recovery || recovery.identity !== identity) {
@@ -266,7 +268,7 @@ export function createMattermostThreadBackfill(params: {
     touch(turn.historyKey, recovery);
     if (recovery.completion) {
       const history = await recovery.completion;
-      return { current: current() && owns(turn, recovery), history };
+      return { current: (await owns(turn, recovery)) && current(), history };
     }
     if (recovery.status === "settled") {
       return { current: true };
@@ -309,12 +311,12 @@ export function createMattermostThreadBackfill(params: {
     owner.completion = (async () => {
       try {
         const entries = await Promise.race([operation, deadline]);
+        if (!(await owns(turn, owner))) {
+          return undefined;
+        }
         signal.throwIfAborted();
         if (performance.now() >= deadlineAt) {
           throw new DOMException("Mattermost thread recovery deadline", "TimeoutError");
-        }
-        if (!owns(turn, owner)) {
-          return undefined;
         }
         const live = channelHistories.get(turn.historyKey) ?? [];
         const merged = new Map<string | HistoryEntry, HistoryEntry>();
@@ -339,7 +341,7 @@ export function createMattermostThreadBackfill(params: {
         );
         return snapshot;
       } catch (error) {
-        if (!owns(turn, owner)) {
+        if (!(await owns(turn, owner))) {
           return undefined;
         }
         owner.status =
@@ -356,6 +358,6 @@ export function createMattermostThreadBackfill(params: {
       }
     })();
     const history = await owner.completion;
-    return { current: current() && owns(turn, owner), history };
+    return { current: (await owns(turn, owner)) && current(), history };
   };
 }

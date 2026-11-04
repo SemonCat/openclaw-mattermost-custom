@@ -1776,6 +1776,40 @@ describe("mattermostPlugin", () => {
       expect(sendMessageMattermostMock).not.toHaveBeenCalled();
     });
 
+    it("renders the advertised inline-button example through the message action", async () => {
+      const cfg = createMattermostTestConfig();
+      expect(mattermostPlugin.agentPrompt?.customInlineButtonHint).toBe(true);
+      const hints = mattermostPlugin.agentPrompt?.messageToolHints?.({ cfg, accountId: "default" });
+      const example = hints?.join("\n").match(/`presentation=(\{[^\n]+\})`/);
+      expect(example).toBeTruthy();
+
+      await runMattermostMessageAction(
+        createMattermostActionContext({
+          action: "send",
+          params: {
+            to: "channel:CHAN1",
+            message: "Pick",
+            presentation: JSON.parse(example![1]),
+          },
+          cfg,
+          accountId: "default",
+        }),
+      );
+
+      const options = expectSingleMattermostSend("channel:CHAN1", "Pick\n\n- Yes");
+      expect(options.buttons).toStrictEqual([
+        [
+          {
+            id: "yes",
+            text: "Yes",
+            callback_data: "yes",
+            context: { callback_data: "yes" },
+            style: "primary",
+          },
+        ],
+      ]);
+    });
+
     it("maps legacy presentation buttons without using interactive conversion", async () => {
       const cfg = createMattermostTestConfig();
 

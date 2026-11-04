@@ -6,7 +6,8 @@ import { chunkMarkdownTextWithMode } from "openclaw/plugin-sdk/reply-chunking";
 import { sliceUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
 import {
   createMattermostPost,
-  deleteMattermostPost,
+  deleteMattermostPreview,
+  fetchMattermostChannelPosts,
   updateMattermostPostMessageWithReadback,
   type MattermostClient,
 } from "./client.js";
@@ -41,6 +42,7 @@ type MattermostDraftStream = {
   updateAssistantText: (text: string) => void;
   flush: () => Promise<void>;
   postId: () => string | undefined;
+  isSilent: () => boolean;
   clear: () => Promise<void>;
   deleteCurrentMessage: () => Promise<void>;
   discardPending: () => Promise<void>;
@@ -50,6 +52,7 @@ type MattermostDraftStream = {
   handoffPostIdentity: () => Promise<string | undefined>;
   settleBoundaries: () => Promise<void>;
   resolveFinalText: (text: string) => MattermostFinalTextResolution;
+  findPostAfter: (postId: string) => Promise<string | undefined>;
 };
 
 function normalizeMattermostDraftText(text: string, maxChars: number): string {
@@ -110,7 +113,8 @@ export function createMattermostDraftStream(params: {
   client: MattermostClient;
   channelId: string;
   rootId?: string;
-  initialPost?: { id: string; message?: string | null };
+  initialPost?: { id: string; message?: string | null; silent?: boolean };
+  silentProgress?: boolean;
   postProps?: Record<string, unknown>;
   resolvePostProps?: () => Record<string, unknown> | undefined;
   onPostCreated?: (postId: string) => void;
@@ -146,6 +150,7 @@ export function createMattermostDraftStream(params: {
     // replace the ellipsized preview with lossless chunks instead of retaining truncation.
     latestSourceText: string;
     latestAssistantText?: string;
+    silent?: boolean;
     ready: Promise<void>;
   };
   let currentGeneration: DraftGeneration = {
@@ -153,18 +158,20 @@ export function createMattermostDraftStream(params: {
     lastSentText: params.initialPost?.message ?? "",
     lastProviderText: params.initialPost?.message ?? undefined,
     latestSourceText: params.initialPost?.message ?? "",
+    silent: params.initialPost?.silent,
     ready: Promise.resolve(),
   };
   const sealedAssistantTexts: Array<{ text: string; requiresBlockBoundary: boolean }> = [];
   const publishedAssistantParts = new Map<string, MattermostDraftPublishedPart>();
-  const createStreamPost = async (message: string, successor = false) => {
+  const createStreamPost = async (message: string, successor = false, silent = false) => {
     if (!successor) await params.beforeCreatePost?.();
     const sent = companion
-      ? await companion.createPost(message)
+      ? await companion.createPost(message, silent)
       : await createMattermostPost(params.client, {
           channelId: params.channelId,
           message,
           rootId: params.rootId,
+          silent,
           props: params.resolvePostProps
             ? { ...params.postProps, ...params.resolvePostProps() }
             : params.postProps,
@@ -197,6 +204,24 @@ export function createMattermostDraftStream(params: {
     }
   };
 
+  const promoteSilentAssistantPreview = async (target: DraftGeneration, text: string) => {
+    if (!target.postId || !target.silent || target.latestAssistantText === undefined) return;
+    const progressPostId = target.postId;
+    await finishCompanion(target, false);
+    // The silent marker cannot be removed by editing. Publish the answer normally
+    // before retiring the progress identity, just as in the task-card successor path.
+    const sent = await createStreamPost(text, true);
+    target.postId = sent.id;
+    target.silent = false;
+    target.lastProviderText = sent.message ?? text;
+    target.lastSentText = text;
+    try {
+      await deleteMattermostPreview(params.client, progressPostId);
+    } catch (error) {
+      params.warn?.(`mattermost silent progress cleanup failed: ${String(error)}`);
+    }
+  };
+
   const sendOrEditStreamMessage = async (text: string): Promise<boolean> => {
     if (streamState.stopped && !streamState.final) {
       return false;
@@ -211,10 +236,9 @@ export function createMattermostDraftStream(params: {
     if (streamState.stopped && !streamState.final) {
       return false;
     }
-    if (normalized === target.lastSentText) {
-      return true;
-    }
     try {
+      await promoteSilentAssistantPreview(target, normalized);
+      if (normalized === target.lastSentText) return true;
       if (target.postId) {
         const updated = await updateMattermostPostMessageWithReadback(
           params.client,
@@ -223,7 +247,8 @@ export function createMattermostDraftStream(params: {
         );
         target.lastProviderText = updated.message ?? normalized;
       } else {
-        const sent = await createStreamPost(normalized);
+        target.silent = params.silentProgress === true && target.latestAssistantText === undefined;
+        const sent = await createStreamPost(normalized, false, target.silent);
         target.postId = sent.id;
         target.lastProviderText = sent.message ?? normalized;
       }
@@ -256,7 +281,7 @@ export function createMattermostDraftStream(params: {
   const isValidMessageId = (value: unknown): value is string =>
     typeof value === "string" && value.length > 0;
   const deleteMessage = async (postId: string) => {
-    await deleteMattermostPost(params.client, postId);
+    await deleteMattermostPreview(params.client, postId);
   };
   const {
     loop,
@@ -321,6 +346,7 @@ export function createMattermostDraftStream(params: {
         if (!firstChunk) {
           return;
         }
+        await promoteSilentAssistantPreview(sealed, firstChunk);
         if (sealed.postId) {
           if (assistantText && (sealed.lastProviderText || sealed.lastSentText)) {
             const publishedContent = sealed.lastProviderText ?? sealed.lastSentText;
@@ -338,12 +364,16 @@ export function createMattermostDraftStream(params: {
           }
           recordPublishedAssistantPart(sealed.postId, providerFirstChunk, 0);
         } else {
-          const firstPost = await createStreamPost(firstChunk);
+          const firstPost = await createStreamPost(
+            firstChunk, false, params.silentProgress === true && !assistantText,
+          );
           recordPublishedAssistantPart(firstPost.id, firstPost.message ?? firstChunk, 0);
           await companion?.close(firstPost.id);
         }
         for (const chunk of chunks.slice(1)) {
-          const post = await createStreamPost(chunk);
+          const post = await createStreamPost(
+            chunk, false, params.silentProgress === true && !assistantText,
+          );
           recordPublishedAssistantPart(
             post.id,
             post.message ?? chunk,
@@ -422,7 +452,8 @@ export function createMattermostDraftStream(params: {
         const visibleText = handedOff.lastProviderText ?? handedOff.lastSentText;
         // This post continues an identity that already exists, so it must not re-enter
         // the first-result ordering hook while the task-card publish is awaiting us.
-        const sent = await createStreamPost(visibleText, true);
+        successor.silent = handedOff.silent;
+        const sent = await createStreamPost(visibleText, true, successor.silent);
         successor.postId = sent.id;
         successor.lastSentText = visibleText;
         successor.lastProviderText = sent.message ?? visibleText;
@@ -440,6 +471,7 @@ export function createMattermostDraftStream(params: {
           successor.postId = handedOff.postId;
           successor.lastSentText = handedOff.lastSentText;
           successor.lastProviderText = handedOff.lastProviderText;
+          successor.silent = handedOff.silent;
         }
         params.warn?.(
           `mattermost stream preview identity handoff failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -571,6 +603,19 @@ export function createMattermostDraftStream(params: {
       : { kind: "already-delivered" as const, publishedParts };
   };
 
+  const findPostAfter = async (postId: string): Promise<string | undefined> => {
+    // Root previews share the channel timeline; threaded previews check only their thread.
+    const { messages } = await fetchMattermostChannelPosts(params.client, params.channelId, {
+      after: postId,
+      limit: 200,
+      skipFetchThreads: true,
+    });
+    return messages.find(
+      (post) =>
+        !post.type?.startsWith("system_") && (!params.rootId || post.root_id === params.rootId),
+    )?.id;
+  };
+
   params.log?.(`mattermost stream preview ready (maxChars=${maxChars}, throttleMs=${throttleMs})`);
 
   return {
@@ -578,6 +623,7 @@ export function createMattermostDraftStream(params: {
     updateAssistantText,
     flush,
     postId: () => currentGeneration.postId,
+    isSilent: () => currentGeneration.silent === true,
     clear,
     deleteCurrentMessage,
     discardPending,
@@ -587,5 +633,6 @@ export function createMattermostDraftStream(params: {
     handoffPostIdentity,
     settleBoundaries,
     resolveFinalText,
+    findPostAfter,
   };
 }

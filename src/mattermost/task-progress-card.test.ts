@@ -215,7 +215,7 @@ describe("Mattermost durable task progress card", () => {
     const firstUpdate = deferred<{ id: string }>();
     let updateCount = 0;
     const request = vi.fn<MattermostClient["request"]>(async (path, init) => {
-      if (path === "/posts") {
+      if (path.split("?")[0] === "/posts") {
         return { id: "task-card-1" } as never;
       }
       updateCount += 1;
@@ -274,11 +274,12 @@ describe("Mattermost durable task progress card", () => {
     firstUpdate.resolve({ id: "task-card-1" });
     await Promise.all([slowUpdate, newestUpdate, duplicateUpdate]);
 
-    const createCalls = request.mock.calls.filter(([path]) => path === "/posts");
+    const createCalls = request.mock.calls.filter(([path]) => path.split("?")[0] === "/posts");
     const updateCalls = request.mock.calls.filter(
       ([path]) => path === "/posts/task-card-1/patch",
     );
     expect(createCalls).toHaveLength(1);
+    expect(createCalls[0]?.[0]).toBe("/posts?silent=true");
     expect(readBody(createCalls[0]?.[1])).toMatchObject({
       channel_id: "channel-1",
       root_id: "thread-root-1",
@@ -303,7 +304,7 @@ describe("Mattermost durable task progress card", () => {
   it("creates the card before a concurrently-started result preview", async () => {
     const releaseCardCreate = deferred<void>();
     const request = vi.fn<MattermostClient["request"]>(async (path, init) => {
-      if (path !== "/posts") {
+      if (path.split("?")[0] !== "/posts") {
         return { id: "updated" } as never;
       }
       const body = readBody(init);
@@ -341,7 +342,7 @@ describe("Mattermost durable task progress card", () => {
     releaseCardCreate.resolve();
     await Promise.all([planUpdate, resultFlush]);
 
-    const creates = request.mock.calls.filter(([path]) => path === "/posts");
+    const creates = request.mock.calls.filter(([path]) => path.split("?")[0] === "/posts");
     const createdMessages = creates.map(([, init]) => String(readBody(init).message));
     expect(createdMessages[0]?.startsWith("#### Task progress · In progress")).toBe(true);
     expect(createdMessages[1]).toBe("Running a tool");
@@ -351,7 +352,7 @@ describe("Mattermost durable task progress card", () => {
 
   it("creates a late plan card before a result whose delivery started first", async () => {
     const request = vi.fn<MattermostClient["request"]>(async (path, init) => {
-      if (path !== "/posts") {
+      if (path.split("?")[0] !== "/posts") {
         return { id: "updated" } as never;
       }
       const message = String(readBody(init).message);
@@ -386,7 +387,7 @@ describe("Mattermost durable task progress card", () => {
     await resultFlush;
 
     const createdMessages = request.mock.calls
-      .filter(([path]) => path === "/posts")
+      .filter(([path]) => path.split("?")[0] === "/posts")
       .map(([, init]) => String(readBody(init).message));
     expect(createdMessages[0]?.startsWith("#### Task progress · In progress")).toBe(true);
     expect(createdMessages[1]).toBe("Running a tool");
@@ -394,10 +395,10 @@ describe("Mattermost durable task progress card", () => {
     expect(stream.postId()).toBe("result-post");
   });
 
-  it("turns an already-created commentary post into a late plan card without losing commentary", async () => {
+  it.each([false, true])("hands commentary identity to a late plan (silent progress: %s)", async (silentProgress) => {
     let createCount = 0;
     const request = vi.fn<MattermostClient["request"]>(async (path, init) => {
-      if (path === "/posts") {
+      if (path.split("?")[0] === "/posts") {
         createCount += 1;
         return {
           id: createCount === 1 ? "first-result-post" : "continuing-result-post",
@@ -424,6 +425,7 @@ describe("Mattermost durable task progress card", () => {
     });
     const stream = createMattermostDraftStream({
       client,
+      silentProgress,
       channelId: "channel-1",
       postProps: buildMattermostPostIdentityProps("turn_result", {
         accountId: "default",
@@ -448,14 +450,15 @@ describe("Mattermost durable task progress card", () => {
 
     expect(card.postId()).toBe("first-result-post");
     expect(stream.postId()).toBe("continuing-result-post");
+    expect(stream.isSilent()).toBe(silentProgress);
     const calls = request.mock.calls.map(([path, init]) => ({ path, body: readBody(init) }));
     expect(calls).toEqual([
       expect.objectContaining({
-        path: "/posts",
+        path: silentProgress ? "/posts?silent=true" : "/posts",
         body: expect.objectContaining({ message: "Commentary before the plan" }),
       }),
       expect.objectContaining({
-        path: "/posts",
+        path: silentProgress ? "/posts?silent=true" : "/posts",
         body: expect.objectContaining({
           message: "Commentary before the plan",
           props: expect.objectContaining({
@@ -686,7 +689,7 @@ describe("Mattermost durable task progress card", () => {
       lifecycle?: { phase: "end" | "error"; aborted?: boolean },
     ) => {
       const request = vi.fn<MattermostClient["request"]>(async (path) =>
-        ({ id: path === "/posts" ? "card" : "card" }) as never,
+        ({ id: path.split("?")[0] === "/posts" ? "card" : "card" }) as never,
       );
       const card = createMattermostTaskProgressCard({
         client: createTestClient(request),

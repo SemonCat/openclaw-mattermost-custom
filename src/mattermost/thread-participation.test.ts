@@ -2,6 +2,11 @@ import { resolveGlobalDedupeCache } from "openclaw/plugin-sdk/dedupe-runtime";
 // Mattermost tests cover thread participation cache plugin behavior.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const runtimeState = vi.hoisted(() => ({ current: undefined as unknown }));
+vi.mock("../runtime.js", () => ({
+  getOptionalMattermostRuntime: () => runtimeState.current,
+}));
+
 const threadParticipationMemory = resolveGlobalDedupeCache(
   Symbol.for("openclaw.mattermostThreadParticipation"),
   { ttlMs: 7 * 24 * 60 * 60 * 1000, maxSize: 5000 },
@@ -12,6 +17,7 @@ let recordMattermostThreadParticipation: typeof import("./thread-participation.j
 
 describe("mattermost thread participation", () => {
   beforeEach(async () => {
+    runtimeState.current = undefined;
     threadParticipationMemory.clear();
     vi.resetModules();
     ({ hasMattermostThreadParticipation, recordMattermostThreadParticipation } =
@@ -66,5 +72,30 @@ describe("mattermost thread participation", () => {
         threadRootId: "root-1",
       }),
     ).resolves.toBe(false);
+  });
+
+  it("recovers participation through the asynchronous V2 store after memory is lost", async () => {
+    const records = new Map<string, { repliedAt: number }>();
+    const store = {
+      register: vi.fn(async (key: string, value: { repliedAt: number }) => {
+        records.set(key, value);
+      }),
+      lookup: vi.fn(async (key: string) => records.get(key)),
+    };
+    const openKeyedStoreV2 = vi.fn(() => store);
+    runtimeState.current = { state: { openKeyedStoreV2 } };
+    await recordMattermostThreadParticipation("acct", "chan", "root-1");
+    threadParticipationMemory.clear();
+    vi.resetModules();
+    const reloaded = await import("./thread-participation.js");
+
+    await expect(reloaded.hasMattermostThreadParticipation({
+      accountId: "acct", channelId: "chan", threadRootId: "root-1",
+    })).resolves.toBe(true);
+    expect(openKeyedStoreV2).toHaveBeenCalledWith(expect.objectContaining({
+      namespace: "mattermost.thread-participation",
+      defaultTtlMs: 7 * 24 * 60 * 60 * 1000,
+    }));
+    expect(store.lookup).toHaveBeenCalledWith("acct:chan:root-1");
   });
 });

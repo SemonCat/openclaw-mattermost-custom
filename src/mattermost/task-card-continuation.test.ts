@@ -86,7 +86,7 @@ async function fixture(options: { noPlan?: boolean; missingId?: boolean; yielded
     await card.finish({ outcome: "completed" }); owner.finishInitial();
   };
   const assertCompleted = () => {
-    expect(request.mock.calls.filter(([path]) => path === "/posts")).toHaveLength(1);
+    expect(request.mock.calls.filter(([path]) => path === "/posts?silent=true")).toHaveLength(1);
     expect(request.mock.calls.slice(1).every(([path]) => path === "/posts/original-card/patch")).toBe(true);
     const body = JSON.parse(String(request.mock.calls.at(-1)?.[1]?.body));
     expect(body.message).toContain("Task progress · Completed");
@@ -122,7 +122,7 @@ describe("committed native task-card continuation retention", () => {
         expect(f.message()).toContain("Candidate verified");
         expect(f.message()).toContain("Task progress · Completed");
         expect(f.card.canContinue()).toBe(false);
-        expect(f.request.mock.calls.filter(([path]) => path === "/posts")).toHaveLength(1);
+        expect(f.request.mock.calls.filter(([path]) => path === "/posts?silent=true")).toHaveLength(1);
         expect(f.request.mock.calls.slice(1).every(([path]) => path === "/posts/original-card/patch")).toBe(true);
         expect(f.message()).not.toContain("Result delivered separately");
       } finally { f.bridge.stop(); }
@@ -425,7 +425,7 @@ describe("continuation ownership and terminal fences", () => {
       await drain();
       expect(f.request.mock.calls).toHaveLength(count);
       expect(f.card.postId()).toBeUndefined();
-      expect(f.request.mock.calls.filter(([path]) => path === "/posts")).toHaveLength(cause === "planless" ? 0 : 1);
+      expect(f.request.mock.calls.filter(([path]) => path === "/posts?silent=true")).toHaveLength(cause === "planless" ? 0 : 1);
     } finally { f.bridge.stop(); }
   });
 

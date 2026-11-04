@@ -119,6 +119,54 @@ beforeEach(() => {
 });
 
 describe("deliverMattermostReplyWithDraftPreview", () => {
+  it("preserves the answer before sending a final status notice on a separate post", async () => {
+    const draftStream = createDraftStreamMock();
+    const previewLifecycle = createPreviewLifecycle(draftStream);
+    const order: string[] = [];
+    const preservePreview = vi.fn(async () => { order.push("preserve"); });
+    const deliverFinal = createDeliverFinalMock().mockImplementationOnce(async (payload) => {
+      order.push("send");
+      return createConfirmedPreviewDelivery("status-post", payload.text ?? "");
+    });
+
+    const result = await deliverDraftPreview({
+      payload: { text: "Session ids resolved.", isStatusNotice: true },
+      draftStream,
+      previewLifecycle,
+      preservePreview,
+      deliverPayload: deliverFinal,
+    });
+    await previewLifecycle.cleanup();
+
+    expect(order).toEqual(["preserve", "send"]);
+    expect(result.messageIds).toEqual(["status-post"]);
+    expect(result.content).toBe("Session ids resolved.");
+    expect(updateMattermostPostSpy).not.toHaveBeenCalled();
+    expect(draftStream.clear).not.toHaveBeenCalled();
+    expect(previewLifecycle.finalSucceeded).toBe(true);
+  });
+
+  it("keeps the answer when a separate status notice fails", async () => {
+    const draftStream = createDraftStreamMock();
+    const previewLifecycle = createPreviewLifecycle(draftStream);
+    const failure = new Error("status send rejected");
+    const deliverFinal = createDeliverFinalMock().mockRejectedValueOnce(failure);
+
+    await expect(deliverDraftPreview({
+      payload: { text: "Session ids resolved.", isStatusNotice: true },
+      draftStream,
+      previewLifecycle,
+      preservePreview: draftStream.seal,
+      deliverPayload: deliverFinal,
+    })).rejects.toBe(failure);
+    await previewLifecycle.cleanup({ failed: true });
+
+    expect(draftStream.seal).toHaveBeenCalledOnce();
+    expect(updateMattermostPostSpy).not.toHaveBeenCalled();
+    expect(draftStream.clear).not.toHaveBeenCalled();
+    expect(previewLifecycle.finalFailed).toBe(true);
+  });
+
   it("suppresses reasoning-prefixed finals before preview finalization", async () => {
     const draftStream = createDraftStreamMock();
     const deliverFinal = createDeliverFinalMock();

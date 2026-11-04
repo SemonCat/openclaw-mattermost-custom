@@ -1162,11 +1162,13 @@ export const mattermostPlugin: ChannelPlugin<ResolvedMattermostAccount> = create
       nativeCommands: true,
     },
     agentPrompt: {
+      customInlineButtonHint: true,
       messageToolHints: ({ cfg, accountId }) => {
         const account = inspectMattermostAccount({ cfg, accountId });
         const limit = resolveMattermostTextLimit(account);
         return [
           `Mattermost text replies support up to ${limit} UTF-16 code units per post on this account. Write a cohesive reply normally; delivery handles splitting when needed.`,
+          '- Inline buttons: `send` with `presentation={"blocks":[{"type":"buttons","buttons":[{"label":"Yes","value":"yes","style":"primary"}]}]}`. Typed `callback` actions render as plain text.',
           "Use the message tool's presentation blocks for buttons and single-select menus (1-25 distinct options). Use ask_user for questions so the original pending question is resolved by the user's choice.",
           "Protected credential requests use the host's secret-entry flow and native password dialog. Never request secrets as ordinary messages or generic form values.",
           "On Mattermost 12+, ask_user multiSelect and multiple questions open a dialog via Fill form, preserving Other answers. Use mattermost_form for multiple choices or row/column matrices; its tool result contains structured answers. Fill form uses mobile-compatible multi-select menus and one menu per matrix row; Web form provides native checkbox groups and matrices for the web client. The user must click a button to open the dialog. Forms are for ordinary, non-secret choices.",

@@ -15,7 +15,6 @@ import {
 import { resolvePromptHistoryLimit } from "openclaw/plugin-sdk/number-runtime";
 import { resolveMattermostGroupContext } from "../group-context.js";
 import { isMattermostNativeSkillAllowed } from "./native-commands.js";
-import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
 import { MattermostPostSchema, type MattermostPost } from "./client.js";
 import { waitForMattermostChannelModelTransition } from "./channel-model-transition.js";
 import { resolveMattermostInboundMentionDecision } from "./monitor-activation.js";
@@ -148,7 +147,7 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
     // Normalize before both command detection and command-context construction.
     const commandBody = normalizeMention(rawText, botUsername).trim();
     const groupContext = resolveMattermostGroupContext({ cfg, accountId: account.accountId, channelId, kind });
-    if (!isMattermostNativeSkillAllowed({ cfg, commandText: commandBody, skillFilter: groupContext.skillFilter })) {
+    if (!(await isMattermostNativeSkillAllowed({ cfg, commandText: commandBody, skillFilter: groupContext.skillFilter }))) {
       monitor.logVerboseMessage("mattermost: drop unavailable channel skill invocation");
       return;
     }
@@ -550,9 +549,8 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
             normalizeEntry: normalizeMattermostAllowEntry,
           })
         : null;
-    const previewLine = truncateUtf16Safe(bodyText, 200).replace(/\n/g, "\\n");
     monitor.logVerboseMessage(
-      `mattermost inbound: from=${ctxPayload.From} len=${bodyText.length} preview="${previewLine}"`,
+      `mattermost inbound: from=${ctxPayload.From} id=${post.id} len=${bodyText.length}`,
     );
 
     await dispatchMattermostInboundTurn(eventMonitor, {

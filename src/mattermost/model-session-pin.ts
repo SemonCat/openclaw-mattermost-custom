@@ -8,7 +8,7 @@ import type { ModelsProviderData } from "openclaw/plugin-sdk/command-auth-native
 import { applyModelOverrideWithAuthProfileCompatibility } from "openclaw/plugin-sdk/model-session-runtime";
 import { normalizeProviderId } from "openclaw/plugin-sdk/provider-model-shared";
 import {
-  getSessionEntry,
+  getSessionEntryAsync,
   patchSessionEntry,
   resolveStorePath,
   type SessionEntry,
@@ -17,12 +17,12 @@ import type { OpenClawConfig } from "./runtime-api.js";
 import { buildModelsProviderData } from "./runtime-api.js";
 
 export type MattermostModelSessionPinDependencies = {
-  getSessionEntry: typeof getSessionEntry;
+  getSessionEntryAsync: typeof getSessionEntryAsync;
   patchSessionEntry: typeof patchSessionEntry;
 };
 
 const defaultDependencies: MattermostModelSessionPinDependencies = {
-  getSessionEntry,
+  getSessionEntryAsync,
   patchSessionEntry,
 };
 
@@ -85,9 +85,9 @@ export async function pinMattermostExplicitDefaultModelSelection(
   }
 
   const storePath = resolveStorePath(params.cfg.session?.store, { agentId: params.agentId });
-  const readPersistedSelection = () =>
+  const readPersistedSelection = async () =>
     hasPersistedExplicitModelSelection(
-      dependencies.getSessionEntry({
+      await dependencies.getSessionEntryAsync({
         agentId: params.agentId,
         readConsistency: "latest",
         sessionKey: params.sessionKey,
@@ -125,7 +125,7 @@ export async function pinMattermostExplicitDefaultModelSelection(
     });
   } catch (error) {
     try {
-      persistedAfterAmbiguousWrite = readPersistedSelection();
+      persistedAfterAmbiguousWrite = await readPersistedSelection();
     } catch {
       // Keep the original write error when the verification read is also unavailable.
     }
@@ -133,7 +133,7 @@ export async function pinMattermostExplicitDefaultModelSelection(
       throw error;
     }
   }
-  if (!updated && !persistedAfterAmbiguousWrite && !readPersistedSelection()) {
+  if (!updated && !persistedAfterAmbiguousWrite && !(await readPersistedSelection())) {
     throw new Error(`Mattermost session not found while pinning model: ${params.sessionKey}`);
   }
 

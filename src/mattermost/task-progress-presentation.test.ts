@@ -33,7 +33,7 @@ describe("durable task-card presentation", () => {
         steps: [{ step: "Review PR diff", status: "completed" }],
       });
       await card.finish({ outcome });
-      expect(writes[0].path).toBe("/posts");
+      expect(writes[0].path).toBe("/posts?silent=true");
       expect(writes.slice(1).every(({ path }) => path === "/posts/task-card/patch")).toBe(true);
       for (const { body } of writes) {
         expect(body.props.openclaw_mattermost).toEqual(identity.openclaw_mattermost);

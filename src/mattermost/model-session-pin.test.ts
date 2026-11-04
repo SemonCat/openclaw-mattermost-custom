@@ -162,7 +162,7 @@ describe("Mattermost explicit default-model pin", () => {
           sessionKey: "agent:main:mattermost:channel:chan-1:thread:root-1",
         },
         {
-          getSessionEntry: () => pinnedEntry,
+          getSessionEntryAsync: async () => pinnedEntry,
           patchSessionEntry: async () => {
             throw writeError;
           },
@@ -182,7 +182,7 @@ describe("Mattermost explicit default-model pin", () => {
           sessionKey: "agent:main:mattermost:channel:chan-1:thread:root-1",
         },
         {
-          getSessionEntry: () => pinnedEntry,
+          getSessionEntryAsync: async () => pinnedEntry,
           patchSessionEntry: async () => null,
         },
       ),
@@ -202,7 +202,7 @@ describe("Mattermost explicit default-model pin", () => {
           sessionKey: "agent:main:mattermost:channel:chan-1:thread:root-1",
         },
         {
-          getSessionEntry: () => undefined,
+          getSessionEntryAsync: async () => undefined,
           patchSessionEntry: async () => {
             throw writeError;
           },

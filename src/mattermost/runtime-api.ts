@@ -18,7 +18,7 @@ export { logTypingFailure } from "openclaw/plugin-sdk/channel-feedback";
 export {
   listNativeCommandSpecsForConfig,
   listProviderPluginCommandSpecs,
-  listSkillCommandsForAgents,
+  prepareSkillCommandsForAgents,
 } from "openclaw/plugin-sdk/command-auth-native";
 export type { CommandArgDefinition } from "openclaw/plugin-sdk/command-auth-native";
 export {

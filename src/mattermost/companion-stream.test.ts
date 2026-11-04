@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createMattermostClient } from "./client.js";
+import { createLivePreviewLifecycle } from "openclaw/plugin-sdk/channel-outbound";
+import { createMattermostClient, createMattermostPost } from "./client.js";
 import { createMattermostCompanionStream } from "./companion-stream.js";
 import { createMattermostDraftStream } from "./draft-stream.js";
+import { deliverMattermostReplyWithDraftPreview } from "./monitor-draft-delivery.js";
+import type { ReplyPayload } from "./runtime-api.js";
 import { buildMattermostPostIdentityProps } from "./post-identity.js";
 import { createMattermostTaskProgressCard } from "./task-progress-card.js";
 
@@ -24,12 +27,13 @@ function fixture(options: {
   createResponse?: (payload: Record<string, unknown>, id: string) => unknown;
   rejectCreate?: (ordinal: number) => boolean;
 } = {}) {
-  const calls: Array<{ path: string; body?: Record<string, unknown>; init?: RequestInit }> = [];
+  const calls: Array<{ path: string; search: string; body?: Record<string, unknown>; init?: RequestInit }> = [];
   const posts = new Map<string, Record<string, unknown>>();
   const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-    const path = new URL(String(input)).pathname;
+    const url = new URL(String(input));
+    const path = url.pathname;
     const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
-    calls.push({ path, body, init });
+    calls.push({ path, search: url.search, body, init });
     let response: unknown = {};
     let status = 200;
     if (path.endsWith("/capabilities")) response = options.capability ?? capabilities;
@@ -53,6 +57,10 @@ function fixture(options: {
       posts.set(id, post);
       response = post;
     } else if (path.startsWith("/api/v4/posts/")) {
+      if (init?.method === "DELETE") {
+        posts.delete(path.split("/")[4]!);
+        return Response.json({ status: "OK" });
+      }
       response = posts.get(path.split("/")[4]!);
     }
     return Response.json(response, { status });
@@ -63,8 +71,8 @@ function fixture(options: {
   const createCompanion = () => createMattermostCompanionStream({
     client, channelId: "channel", postProps: props,
   });
-  const createDraft = (companion = true) => createMattermostDraftStream({
-    client, channelId: "channel", postProps: props, companion, throttleMs: 1200,
+  const createDraft = (companion = true, silentProgress = false) => createMattermostDraftStream({
+    client, channelId: "channel", postProps: props, companion, silentProgress, throttleMs: 1200,
   });
   return { calls, posts, client, createCompanion, createDraft };
 }
@@ -72,6 +80,133 @@ function fixture(options: {
 afterEach(() => vi.useRealTimers());
 
 describe("Mattermost companion transport", () => {
+  it.each([false, true])("creates automatic progress silently and a normal final (companion: %s)", async (companion) => {
+    const f = fixture();
+    const draft = f.createDraft(companion, true);
+    const progress = "Checking @alice, @channel and @team: https://host/@owner `@code`";
+    draft.update(progress);
+    await draft.flush();
+    expect(draft.isSilent()).toBe(true);
+    const lifecycle = createLivePreviewLifecycle<ReplyPayload, string>({
+      draft: { ...draft, id: draft.postId },
+    });
+    const final = "Please review @alice.";
+    const result = await deliverMattermostReplyWithDraftPreview({
+      payload: { text: final }, info: { kind: "final" }, kind: "channel",
+      client: f.client, previewLifecycle: lifecycle,
+      mustSendFinalAsNewPost: draft.isSilent,
+      resolvePreviewFinalText: (text) => ({ editText: text, alreadyDelivered: false }),
+      logVerboseMessage: vi.fn(),
+      deliverPayload: async (payload) => {
+        const post = await createMattermostPost(f.client, {
+          channelId: "channel", message: payload.text ?? "",
+        });
+        return { outcome: "text", messageIds: [post.id], content: post.message ?? "",
+          visibleReplySent: true };
+      },
+    });
+    await lifecycle.cleanup();
+    const creates = f.calls.filter((call) => call.path === "/api/v4/posts");
+    expect(creates.map((call) => [call.search, call.body?.message])).toEqual([
+      ["?silent=true", progress], ["", final],
+    ]);
+    expect([...f.posts.values()].map((post) => post.message)).toEqual([final]);
+    expect(result.messageIds).toEqual(["post-2"]);
+    const sendFinal = f.calls.findIndex((call) => call.body?.message === final);
+    const deletePreview = f.calls.findIndex((call) => call.init?.method === "DELETE");
+    expect(deletePreview).toBeGreaterThan(sendFinal);
+  });
+
+  it.each([false, true])("promotes a silent progress identity before assistant preview (companion: %s)", async (companion) => {
+    const f = fixture();
+    const draft = f.createDraft(companion, true);
+    draft.update("Checking @channel.");
+    await draft.flush();
+    draft.updateAssistantText("The answer for @alice.");
+    await draft.flush();
+    expect(draft.isSilent()).toBe(false);
+    const creates = f.calls.filter((call) => call.path === "/api/v4/posts");
+    expect(creates.map((call) => [call.search, call.body?.message])).toEqual([
+      ["?silent=true", "Checking @channel."], ["", "The answer for @alice."],
+    ]);
+    expect(draft.postId()).toBe("post-2");
+    expect([...f.posts.values()].map((post) => post.message)).toEqual(["The answer for @alice."]);
+    expect(f.calls.findIndex((call) => call.init?.method === "DELETE")).toBeGreaterThan(
+      f.calls.findIndex((call) => call.body?.message === "The answer for @alice."),
+    );
+    await draft.stop();
+  });
+
+  it("keeps assistant-created previews on ordinary notification behavior", async () => {
+    const f = fixture();
+    const draft = f.createDraft(true, true);
+    draft.updateAssistantText("An intentional mention for @alice.");
+    await draft.flush();
+    expect(draft.isSilent()).toBe(false);
+    expect(f.calls.find((call) => call.path === "/api/v4/posts")?.search).toBe("");
+    await draft.stop();
+  });
+
+  it.each([false, true])("never retries accepted promotion without an identity (companion: %s)", async (companion) => {
+    const f = fixture({
+      createResponse: (post, id) => id === "post-2" ? { message: post.message } : post,
+    });
+    const draft = f.createDraft(companion, true);
+    draft.update("Automatic progress");
+    await draft.flush();
+    draft.updateAssistantText("The answer");
+    await expect(draft.flush()).rejects.toThrow("post id");
+    await expect(draft.stop()).rejects.toThrow("post id");
+    expect(f.posts.size).toBe(2);
+    expect(f.calls.filter((call) => call.path === "/api/v4/posts")).toHaveLength(2);
+    expect(f.calls.some((call) => call.init?.method === "DELETE")).toBe(false);
+  });
+
+  it.each([false, true])("retains the full answer before a status notice (companion: %s)", async (companion) => {
+    const f = fixture();
+    const draft = f.createDraft(companion);
+    draft.updateAssistantText("First answer snapshot.");
+    await draft.flush();
+    const answer = "The complete answer includes the newest pending snapshot.";
+    draft.updateAssistantText(answer);
+    const lifecycle = createLivePreviewLifecycle<ReplyPayload, string>({
+      draft: { ...draft, id: draft.postId },
+    });
+    const result = await deliverMattermostReplyWithDraftPreview({
+      payload: { text: "Session ids resolved.", isStatusNotice: true },
+      info: { kind: "final" },
+      kind: "channel",
+      client: f.client,
+      previewLifecycle: lifecycle,
+      resolvePreviewFinalText: (text) => ({ editText: text, alreadyDelivered: false }),
+      preservePreview: async () => {
+        await draft.forceNewMessage();
+        await draft.stop();
+      },
+      logVerboseMessage: vi.fn(),
+      deliverPayload: async (payload) => {
+        const post = await createMattermostPost(f.client, {
+          channelId: "channel", message: payload.text ?? "",
+        });
+        return { outcome: "text", messageIds: [post.id], content: post.message ?? "",
+          visibleReplySent: true };
+      },
+    });
+    await lifecycle.cleanup();
+
+    expect([...f.posts.values()].map((post) => post.message)).toEqual([
+      answer, "Session ids resolved.",
+    ]);
+    expect(result.messageIds).toEqual(["post-2"]);
+    expect(f.calls.some((call) => call.init?.method === "DELETE")).toBe(false);
+    const persistAnswer = f.calls.findIndex((call) => call.path.endsWith("/post-1/patch") &&
+      call.body?.message === answer);
+    const sendStatus = f.calls.findIndex((call) => call.body?.message === "Session ids resolved.");
+    expect(persistAnswer).toBeGreaterThanOrEqual(0);
+    expect(sendStatus).toBeGreaterThan(persistAnswer);
+    if (companion) expect(f.calls.some((call) => call.path.endsWith("/close"))).toBe(true);
+  });
+
   it("keeps omitted transport entirely on the original REST path", async () => {
     const f = fixture();
     const draft = f.createDraft(false);

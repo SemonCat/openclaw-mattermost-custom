@@ -310,6 +310,7 @@ function createMattermostRestartRecoveryRunUi(params: {
             initialPost: {
               id: recovered.resultPost.id,
               message: recovered.resultPost.message,
+              silent: recovered.resultPost.props?.silent_notification === true,
             },
           }
         : {}),
@@ -319,6 +320,7 @@ function createMattermostRestartRecoveryRunUi(params: {
         channelId: params.route.channelId,
         ...(params.route.threadId ? { threadId: params.route.threadId } : {}),
       }),
+      silentProgress: true,
       throttleMs: 1200,
       maxChars: textLimit,
       chunkText: (value) =>

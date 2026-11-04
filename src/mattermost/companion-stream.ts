@@ -83,13 +83,14 @@ export function createMattermostCompanionStream(params: {
   };
 
   return {
-    async createPost(message: string) {
+    async createPost(message: string, silent = false) {
       const supported = !disabled && (await available()) && !disabled;
       const generation = supported ? randomUUID() : undefined;
       const post = await createMattermostPost(params.client, {
         channelId: params.channelId,
         rootId: params.rootId,
         message,
+        silent,
         ...(generation ? { type: POST_TYPE } : {}),
         props: generation || params.resolvePostProps
           ? {

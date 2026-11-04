@@ -1,7 +1,7 @@
 // Mattermost plugin module implements model picker behavior.
 import { createHash } from "node:crypto";
 import {
-  resolveStoredModelOverride,
+  resolveStoredModelOverrideAsync,
   type ModelsProviderData,
 } from "openclaw/plugin-sdk/command-auth-native";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/core";
@@ -11,7 +11,7 @@ import {
 } from "openclaw/plugin-sdk/models-provider-runtime";
 import { parseStrictInteger } from "openclaw/plugin-sdk/number-runtime";
 import { normalizeProviderId } from "openclaw/plugin-sdk/provider-model-shared";
-import { getSessionEntry, resolveStorePath } from "openclaw/plugin-sdk/session-store-runtime";
+import { getSessionEntryAsync, resolveStorePath } from "openclaw/plugin-sdk/session-store-runtime";
 import {
   normalizeOptionalString,
   normalizeStringifiedOptionalString,
@@ -253,26 +253,28 @@ export function buildMattermostAllowedModelRefs(data: ModelsProviderData): Set<s
   return refs;
 }
 
-export function resolveMattermostModelPickerCurrentModel(params: {
+export async function resolveMattermostModelPickerCurrentModel(params: {
   cfg: OpenClawConfig;
   route: { agentId: string; sessionKey: string };
   data: ModelsProviderData;
   readConsistency?: "latest";
-}): string {
+}): Promise<string> {
   const fallback = `${params.data.resolvedDefault.provider}/${params.data.resolvedDefault.model}`;
   try {
     const storePath = resolveStorePath(params.cfg.session?.store, {
       agentId: params.route.agentId,
     });
-    const sessionEntry = getSessionEntry({
+    const sessionEntry = await getSessionEntryAsync({
+      agentId: params.route.agentId,
       storePath,
       sessionKey: params.route.sessionKey,
       ...(params.readConsistency === "latest" ? { readConsistency: "latest" as const } : {}),
     });
-    const override = resolveStoredModelOverride({
+    const override = await resolveStoredModelOverrideAsync({
       sessionEntry,
       loadSessionEntry: (sessionKey) =>
-        getSessionEntry({
+        getSessionEntryAsync({
+          agentId: params.route.agentId,
           storePath,
           sessionKey,
           ...(params.readConsistency === "latest" ? { readConsistency: "latest" as const } : {}),
@@ -431,11 +433,12 @@ export function renderMattermostModelsPickerView(params: {
   };
 }
 
-export function resolveMattermostModelPickerCurrentRuntime(params: {
+export async function resolveMattermostModelPickerCurrentRuntime(params: {
   cfg: OpenClawConfig;
   route: { agentId: string; sessionKey: string };
-}): string {
-  const sessionEntry = getSessionEntry({
+}): Promise<string> {
+  const sessionEntry = await getSessionEntryAsync({
+    agentId: params.route.agentId,
     storePath: resolveStorePath(params.cfg.session?.store, { agentId: params.route.agentId }),
     sessionKey: params.route.sessionKey,
     readConsistency: "latest",

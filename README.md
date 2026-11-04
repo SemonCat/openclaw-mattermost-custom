@@ -37,11 +37,11 @@ self-contained plugin artifact, then install that artifact into OpenClaw's
 managed plugin directory:
 
 ```bash
-mkdir -p /tmp/openclaw/mattermost-custom
+mkdir -p .artifacts/releases
 npm run build
-npm pack --omit=dev --pack-destination /tmp/openclaw/mattermost-custom
+npm pack --omit=dev --pack-destination .artifacts/releases
 openclaw plugins install \
-  /tmp/openclaw/mattermost-custom/openclaw-mattermost-custom-2026.10.9.tgz --force
+  ./.artifacts/releases/openclaw-mattermost-custom-2026.10.10.tgz --force
 ```
 
 Do not use `plugins install --link` or add this source checkout to
@@ -112,9 +112,9 @@ Compared with the official plugin, this build preserves:
 - Channel/sender tool policies through the published host's shared policy pipeline.
 - Up to ten ordered attachments on one post, including ordinary inbound replies.
 
-This artifact targets the published OpenClaw `2026.10.9` SDK and requires an
+This artifact targets the published OpenClaw `2026.10.10` SDK and requires an
 OpenClaw host at least that version. Its Node contract follows that release:
-`>=24.22.1 <25 || >=26.12.1`. Development checks use Node `26.12.1`; this does
+`>=24.16.0 <25 || >=26.1.0`. Development checks use Node `26.12.1`; this does
 not establish the runtime version of an installed Gateway.
 
 When `messages.statusReactions.enabled` is true, received posts show the configured
@@ -982,8 +982,8 @@ The package build bundles plugin-owned TypeScript only. OpenClaw Plugin SDK,
 the plugin's declared runtime dependencies. This keeps OpenClaw core code and
 state migrations out of the plugin artifact.
 
-This release targets the published OpenClaw `2026.10.9` SDK and requires host
-and plugin API `>=2026.10.9`. Earlier hosts are not covered by this build's
+This release targets the published OpenClaw `2026.10.10` SDK and requires host
+and plugin API `>=2026.10.10`. Earlier hosts are not covered by this build's
 compatibility checks. The build verifies every emitted SDK subpath and named
 binding against the exact dev dependency in this checkout's `node_modules`;
 linked host checkouts and Gateway host overrides are not used.
@@ -1005,7 +1005,59 @@ changes in this repo's `src/`. Recheck the downstream command, callback,
 reaction, and trigger-cap behavior when upstream touches the corresponding
 files.
 
-### OpenClaw 2026.10.9 adaptation
+### OpenClaw 2026.10.10 adaptation
+
+This build advances the artifact, exact published development SDK, minimum host,
+plugin API and build metadata together to 2026.10.10. The Node engine contract
+follows the published host: `>=24.16.0 <25 || >=26.1.0`.
+
+When a newer non-system post appears after a preview in the same thread, final
+delivery creates a fresh post before deleting the preview. Root-level previews
+check the channel timeline, including thread replies. Other threads do not move
+a threaded final, and an unavailable order check retains in-place finalization.
+The check reads at most 200 posts; it does not prove the absence of later posts
+beyond that page or prevent a post arriving after the read. Existing task-card
+identity handoff and REST preview coalescing remain in place.
+
+Explicit `textMode: "delta"` answer blocks append to the active answer preview,
+including repeated chunks; ordinary partial snapshots still replace it. A final
+status notice preserves the complete answer and sends a separate status post.
+Ordinary final text remains authoritative.
+
+Automatic progress previews and newly created task cards use Mattermost's native
+silent create API. Their text, URLs and code remain intact. Assistant text taking
+over a silent progress preview gets a normal successor before the progress post
+is deleted; a direct final also sends normally before cleanup. REST, companion,
+restart recovery and late-plan handoff preserve the distinction. This requires a
+server and integration identity supporting silent posts, as described in
+[Silent sends](#silent-sends-and-grouped-attachments). Assistant-created previews retain their
+existing notification behavior; mentions added only by editing those ordinary
+previews remain subject to Mattermost's edit notification semantics.
+
+Owned preview cleanup makes at most two DELETE attempts within a ten-second
+budget. After a transient error it reads back the post before retrying; a
+subsequent read 404 confirms invisibility. Initial DELETE 404 and permission
+errors remain failures. General message actions keep their original delete
+policy. Source references and regression coverage for these three ports are in
+[the 10.10 cross-channel notes](docs/cross-channel-2026.10.10.md).
+
+Native slash registration and channel skill filtering await the host's prepared
+skill catalog. History recovery and model/runtime pickers use asynchronous
+session reads; thread participation uses the V2 persistent store. Recovery keeps
+its session-rotation, cancellation and deadline checks. Delivered picker views
+and model-selection notices are recorded through the host command-transcript
+API, preserving routed thread sessions. A full DM pairing queue produces an
+explicit notice instead of a missing pairing code. Inbound diagnostic logs carry
+post identity and length without copying message text.
+
+The custom implicit-default secret contract is retained: replacing it with the
+new generic helper would drop the root token's existing account ownership.
+Native secret dialogs still need the maintained host
+`questionGatewayRuntime.resolveSecret` extension; the published 10.10 SDK alone
+does not provide it. Source comparison, validation and deployment boundaries are recorded in
+[the 10.10 upstream review](docs/upstream-2026.10.10.md).
+
+### Previous OpenClaw 2026.10.9 adaptation
 
 The official Mattermost 10.8-to-10.9 delta changes package declarations only.
 This build advances the artifact version, exact published development SDK,
@@ -1162,7 +1214,7 @@ shared Mattermost contract tests and the downstream behavior tests.
 ### Test status against the published npm SDK
 
 This repo builds and tests against the published `openclaw` npm package
-(`2026.10.9`), not the OpenClaw monorepo checkout. One category of tests
+(`2026.10.10`), not the OpenClaw monorepo checkout. One category of tests
 behaves differently from the monorepo for that reason:
 
 - Ten suites import test-only Plugin SDK subpaths (`channel-test-helpers`,

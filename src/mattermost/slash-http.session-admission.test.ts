@@ -122,7 +122,7 @@ vi.mock("./runtime-api.js", () => ({
   buildModelsProviderData: vi.fn(async () => ({ providers: [], modelNames: new Map() })),
   isRequestBodyLimitError: vi.fn(() => false),
   logTypingFailure: vi.fn(),
-  listSkillCommandsForAgents: vi.fn(() => [{ name: "review_code", skillName: "code-review" }]),
+  prepareSkillCommandsForAgents: vi.fn(() => [{ name: "review_code", skillName: "code-review" }]),
   readRequestBodyWithLimit: vi.fn(async () => "token=valid-token"),
 }));
 

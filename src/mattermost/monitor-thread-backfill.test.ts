@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const getSessionEntry = vi.hoisted(() => vi.fn());
+const getSessionEntryAsync = vi.hoisted(() => vi.fn());
 vi.mock("openclaw/plugin-sdk/session-store-runtime", () => ({
-  getSessionEntry,
+  getSessionEntryAsync,
   resolveStorePath: () => "/tmp/mattermost-sessions.sqlite",
 }));
 
@@ -47,7 +47,8 @@ function turn() {
 describe("Mattermost thread backfill", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    getSessionEntry.mockReturnValue(undefined);
+    getSessionEntryAsync.mockReset();
+    getSessionEntryAsync.mockResolvedValue(undefined);
   });
 
   it("recovers bounded prior thread posts before dispatch", async () => {
@@ -105,7 +106,7 @@ describe("Mattermost thread backfill", () => {
     const { recover } = createFixture(request);
     const pending = recover(turn());
     await vi.waitFor(() => expect(request).toHaveBeenCalledOnce());
-    getSessionEntry.mockReturnValue({ sessionId: "new-session", lifecycleRevision: 1 });
+    getSessionEntryAsync.mockResolvedValue({ sessionId: "new-session", lifecycleRevision: 1 });
     release?.({ order: [], posts: {} });
 
     await expect(pending).resolves.toEqual({ current: false, history: undefined });
@@ -120,6 +121,47 @@ describe("Mattermost thread backfill", () => {
     expect(monitor.logVerboseMessage).toHaveBeenCalledWith(
       expect.stringContaining("thread recovery gave up"),
     );
+  });
+
+  it("waits for the asynchronous session identity and skips cancelled admission", async () => {
+    let release!: () => void;
+    getSessionEntryAsync.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { release = resolve; }),
+    );
+    const { recover, request, channelHistories } = createFixture();
+    const controller = new AbortController();
+    const pending = recover({ ...turn(), abortSignal: controller.signal });
+    expect(request).not.toHaveBeenCalled();
+    controller.abort();
+    release();
+
+    await expect(pending).resolves.toEqual({ current: false });
+    expect(request).not.toHaveBeenCalled();
+    expect(channelHistories.size).toBe(0);
+  });
+
+  it("does not publish history if cancellation arrives during identity revalidation", async () => {
+    let release!: () => void;
+    getSessionEntryAsync
+      .mockResolvedValueOnce(undefined)
+      .mockImplementationOnce(() => new Promise<void>((resolve) => { release = resolve; }));
+    const { recover, channelHistories } = createFixture(vi.fn(async () => ({
+      order: ["root-1"],
+      posts: {
+        "root-1": {
+          id: "root-1", channel_id: "chan-1", user_id: "user-1",
+          message: "prior context", create_at: 100,
+        },
+      },
+    })));
+    const controller = new AbortController();
+    const pending = recover({ ...turn(), abortSignal: controller.signal });
+    await vi.waitFor(() => expect(getSessionEntryAsync).toHaveBeenCalledTimes(2));
+    controller.abort();
+    release();
+
+    await expect(pending).resolves.toEqual({ current: false, history: undefined });
+    expect(channelHistories.size).toBe(0);
   });
 });
 
@@ -150,7 +192,8 @@ function roomPage() {
 describe("Mattermost room history recovery", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    getSessionEntry.mockReturnValue(undefined);
+    getSessionEntryAsync.mockReset();
+    getSessionEntryAsync.mockResolvedValue(undefined);
   });
 
   it("takes one bounded prior channel page and retains only visible root messages", async () => {
@@ -210,11 +253,12 @@ describe("Mattermost room history recovery", () => {
 
   it("does not publish a room snapshot after a turn is cancelled", async () => {
     let release!: (value: unknown) => void;
-    const { recover, channelHistories } = createFixture(
+    const { recover, channelHistories, request } = createFixture(
       vi.fn(() => new Promise((resolve) => { release = resolve; })),
     );
     const controller = new AbortController();
     const pending = recover({ ...roomTurn(), abortSignal: controller.signal });
+    await vi.waitFor(() => expect(request).toHaveBeenCalledOnce());
     controller.abort();
     release(roomPage());
     expect(await pending).toEqual({ current: false, history: undefined });

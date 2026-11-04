@@ -57,7 +57,7 @@ function fixture(mode: "block" | "partial" | "off", transport: "rest" | "compani
     request: async <T>(path: string, init?: RequestInit): Promise<T> => {
       const body = typeof init?.body === "string" ? JSON.parse(init.body) : {};
       calls.push({ path, method: init?.method ?? "GET", body });
-      if (path === "/posts") {
+      if (path.split("?")[0] === "/posts") {
         const post = { ...body, id: `post-${posts.size + 1}`, user_id: "bot" } as MattermostPost;
         posts.set(post.id, post);
         return post as T;
@@ -227,7 +227,7 @@ describe("Mattermost monitor streaming boundaries", () => {
       expect(f.posts.get("post-1")?.message).toContain("Cancelled");
       expect(f.posts.get("post-2")?.message).toBe("Stopped.");
       expect(f.posts.get("post-2")?.props?.attachments).toEqual([]);
-      expect(f.calls.filter((call) => call.path === "/posts")).toHaveLength(2);
+      expect(f.calls.filter((call) => call.path.split("?")[0] === "/posts")).toHaveLength(2);
       const writes = f.calls.filter((call) => call.method === "PUT");
       expect(writes.some((call) => call.path === "/posts/post-2/patch" && call.body.message === "Stopped.")).toBe(true);
     },
@@ -259,7 +259,7 @@ describe("Mattermost monitor streaming boundaries", () => {
       });
       expect(f.posts.get("post-1")!.message).toBe("Stopped.");
       expect(f.posts.get("post-1")!.props!.attachments).toEqual([]);
-      expect(f.calls.filter((call) => call.path === "/posts")).toHaveLength(1);
+      expect(f.calls.filter((call) => call.path.split("?")[0] === "/posts")).toHaveLength(1);
     },
   );
   it.each(["rest", "companion"] as const)(
@@ -282,7 +282,7 @@ describe("Mattermost monitor streaming boundaries", () => {
         "I will check.",
         "Found the answer.",
       ]);
-      const creates = f.calls.filter((call) => call.path === "/posts");
+      const creates = f.calls.filter((call) => call.path.split("?")[0] === "/posts");
       expect(creates).toHaveLength(2);
       expect(creates.every((call) => call.body.root_id === "thread-1")).toBe(true);
       expect(f.calls.filter((call) => call.method === "PUT").at(-1)?.path).toBe(
@@ -305,7 +305,7 @@ describe("Mattermost monitor streaming boundaries", () => {
       });
       expect(normalSend).not.toHaveBeenCalled();
       expect([...f.posts.values()].map((post) => post.message)).toEqual(["Correct answer."]);
-      expect(f.calls.filter((call) => call.path === "/posts")).toHaveLength(1);
+      expect(f.calls.filter((call) => call.path.split("?")[0] === "/posts")).toHaveLength(1);
       expect(f.calls.filter((call) => call.method === "PUT").at(-1)?.path).toBe(
         "/posts/post-1/patch",
       );
@@ -327,7 +327,7 @@ describe("Mattermost monitor streaming boundaries", () => {
         await f.final(params, "Correct answer.");
       });
       expect([...f.posts.values()].map((post) => post.message)).toEqual(["Correct answer."]);
-      expect(f.calls.filter((call) => call.path === "/posts")).toHaveLength(1);
+      expect(f.calls.filter((call) => call.path.split("?")[0] === "/posts")).toHaveLength(1);
     },
   );
 
@@ -350,7 +350,7 @@ describe("Mattermost monitor streaming boundaries", () => {
         "I will check.",
         "Correct answer.",
       ]);
-      expect(f.calls.filter((call) => call.path === "/posts")).toHaveLength(2);
+      expect(f.calls.filter((call) => call.path.split("?")[0] === "/posts")).toHaveLength(2);
       expect(f.calls.filter((call) => call.method === "PUT").at(-1)?.path).toBe(
         "/posts/post-2/patch",
       );

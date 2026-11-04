@@ -147,7 +147,7 @@ export async function registerMattermostMonitorSlashCommands(params: {
     });
 
     const dedupedCommands = dedupeSlashCommands(
-      buildMattermostNativeCommandSpecs({
+      await buildMattermostNativeCommandSpecs({
         cfg: params.cfg,
         runtime: params.runtime,
         nativeSkills: slashConfig.nativeSkills === true,

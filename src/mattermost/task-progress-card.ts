@@ -409,6 +409,7 @@ export function createMattermostTaskProgressCard(params: {
           channelId: params.channelId,
           message,
           rootId: params.rootId,
+          silent: true,
           props,
         });
         taskPostId = post.id;

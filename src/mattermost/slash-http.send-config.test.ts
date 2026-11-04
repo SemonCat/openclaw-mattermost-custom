@@ -71,6 +71,11 @@ const mockState = vi.hoisted(() => ({
   })),
   listMattermostCommands: vi.fn(async () => []),
   dispatchInbound: vi.fn(async () => undefined),
+  recordCommand: vi.fn(),
+}));
+
+vi.mock("openclaw/plugin-sdk/session-transcript-runtime", () => ({
+  recordDeliveredCommandExchange: mockState.recordCommand,
 }));
 
 vi.mock("./runtime-api.js", () => {
@@ -104,7 +109,7 @@ vi.mock("./runtime-api.js", () => {
 
 vi.mock("openclaw/plugin-sdk/session-store-runtime", () => ({
   // This suite verifies config/routing; session persistence belongs to the host.
-  getSessionEntry: vi.fn(() => undefined),
+  getSessionEntryAsync: vi.fn(async () => undefined),
   patchSessionEntry: vi.fn(),
   resolveStorePath: vi.fn(() => "/tmp/mattermost-slash-test/sessions.json"),
 }));
@@ -276,6 +281,7 @@ describe("slash-http cfg threading", () => {
     mockState.getMattermostCommand.mockClear();
     mockState.listMattermostCommands.mockClear();
     mockState.dispatchInbound.mockClear();
+    mockState.recordCommand.mockClear();
     ({ createSlashCommandHttpHandler } = await import("./slash-http.js"));
   });
 
@@ -333,6 +339,16 @@ describe("slash-http cfg threading", () => {
     expect(mockState.readRequestBodyWithLimit).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ destroyOnLimit: false }),
+    );
+    expect(mockState.recordCommand).toHaveBeenCalledWith(expect.objectContaining({
+      config: runtimeCfg,
+      agentId: "agent-1",
+      sessionKey: "mattermost:session:1",
+      commandText: expect.any(String),
+      replyId: "model-picker",
+    }));
+    expect(mockState.sendMessageMattermost.mock.invocationCallOrder[0]).toBeLessThan(
+      mockState.recordCommand.mock.invocationCallOrder[0]!,
     );
   });
 
