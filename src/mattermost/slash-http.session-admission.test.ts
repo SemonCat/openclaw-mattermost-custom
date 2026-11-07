@@ -451,27 +451,35 @@ describe("slash-http session-admission race retry and fallback", () => {
     expect(options.replyToId).toBeUndefined();
   });
 
-  it("keeps a flat DM flat: a stray root_id does not thread the actionable error", async () => {
-    mockState.dispatchFailCount = 2;
-    mockState.authDecision = {
-      ...mockState.authDecision,
-      kind: "direct",
-      chatType: "direct",
-    };
+  it.each([undefined, "root-post-1"])(
+    "preserves the DM invocation root %s for admission retries and the actionable error",
+    async (rootId) => {
+      mockState.dispatchFailCount = 2;
+      mockState.authDecision = {
+        ...mockState.authDecision,
+        kind: "direct",
+        chatType: "direct",
+      };
 
-    await runHandler({ root_id: "root-post-1" });
+      await runHandler({ root_id: rootId });
 
-    expect(mockState.sendMessageMattermost).toHaveBeenCalledTimes(1);
-    const [to, , options] = mockState.sendMessageMattermost.mock.calls[0] as [
-      string,
-      string,
-      { replyToId?: string },
-    ];
-    // Reply through the concrete inbound DM channel; this avoids re-resolving
-    // or recreating the same direct channel by peer id.
-    expect(to).toBe("channel:chan-1");
-    expect(options.replyToId).toBeUndefined();
-  });
+      expect(mockState.dispatchCalls.map((call) => call.ctxPayload.SessionKey)).toEqual(
+        [0, 1].map((version) =>
+          `mattermost:session:v${version}${rootId ? `:thread:${rootId}` : ""}`,
+        ),
+      );
+      expect(mockState.sendMessageMattermost).toHaveBeenCalledTimes(1);
+      const [to, , options] = mockState.sendMessageMattermost.mock.calls[0] as [
+        string,
+        string,
+        { replyToId?: string },
+      ];
+      // Reply through the concrete inbound DM channel; this avoids re-resolving
+      // or recreating the same direct channel by peer id.
+      expect(to).toBe("channel:chan-1");
+      expect(options.replyToId).toBe(rootId);
+    },
+  );
 
   it("falls back to the generic message with root_id preserved for an unrelated dispatch error", async () => {
     mockState.dispatchFailCount = 0;

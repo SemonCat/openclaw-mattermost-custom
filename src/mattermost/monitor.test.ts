@@ -480,7 +480,7 @@ describe("resolveMattermostEffectiveReplyToId", () => {
     ).toBe("post-123");
   });
 
-  it("keeps direct messages flat when their effective mode is off", () => {
+  it("keeps existing direct-message thread roots when their effective mode is off", () => {
     expect(
       resolveMattermostEffectiveReplyToId({
         kind: "direct",
@@ -488,7 +488,7 @@ describe("resolveMattermostEffectiveReplyToId", () => {
         replyToMode: "off",
         threadRootId: "dm-root-456",
       }),
-    ).toBeUndefined();
+    ).toBe("dm-root-456");
   });
 
   it("uses an existing direct-message thread root when threading is enabled", () => {
@@ -596,7 +596,6 @@ describe("resolveMattermostThreadSessionContext", () => {
         kind: "direct",
         postId: "post-123",
         replyToMode: "off",
-        threadRootId: "dm-root-456",
       }),
     ).toEqual({
       effectiveReplyToId: undefined,

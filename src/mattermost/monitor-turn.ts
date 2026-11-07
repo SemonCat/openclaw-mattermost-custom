@@ -580,13 +580,15 @@ export async function dispatchMattermostInboundTurn(
                   agentId: route.agentId, sessionId: continuationSessionId,
                   sessionKey: thread.sessionKey, draft: retained,
                 });
-                // The owner-held capability proves custody after same-run steer input.
-                // Re-register at this boundary; old unprovenanced input grants no authority.
-                continuationOwner = monitor.taskCardContinuation.register({
-                  agentId: route.agentId, sessionId: continuationSessionId,
-                  sessionKey: thread.sessionKey, initialRunId, card: taskProgressCard,
-                  adoptedDraft: retained,
-                });
+                // Preserve buffered native input when attaching host custody.
+                // A fenced owner needs fresh registration, with no old correlation.
+                if (!continuationOwner?.adoptDraft(retained)) {
+                  continuationOwner = monitor.taskCardContinuation.register({
+                    agentId: route.agentId, sessionId: continuationSessionId,
+                    sessionKey: thread.sessionKey, initialRunId, card: taskProgressCard,
+                    adoptedDraft: retained,
+                  });
+                }
                 anyReplyDelivered = true;
                 return { visibleReplySent: true };
               }

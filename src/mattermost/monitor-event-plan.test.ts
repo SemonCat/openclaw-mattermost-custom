@@ -3,8 +3,14 @@ import { buildMattermostEventPlan } from "./monitor-event-plan.js";
 import type { MattermostMonitorContext } from "./monitor-types.js";
 
 it.each([
-  { channelType: "O", config: {}, threaded: true },
+  { channelType: "O", config: {}, threaded: false },
   { channelType: "D", config: {}, threaded: false },
+  { channelType: "D", config: { replyToMode: "first" }, threaded: false },
+  {
+    channelType: "D",
+    config: { replyToModeByChatType: { direct: "off" } },
+    threaded: false,
+  },
   {
     channelType: "D",
     config: { replyToModeByChatType: { direct: "all" } },
@@ -44,6 +50,8 @@ it.each([
       AccountId: "default",
       InboundAccessAuthorized: true,
       MessageSid: "synthetic",
+      ReplyToId: threaded ? params.postId : undefined,
+      MessageThreadId: threaded ? params.postId : undefined,
     });
     const rootId = "b".repeat(26);
     const thread = (await buildMattermostEventPlan(monitor, {
@@ -51,10 +59,14 @@ it.each([
       threadRootId: rootId,
     }))!;
     expect(thread.finalizeContext({})).toMatchObject({
-      ReplyToId: threaded ? rootId : undefined,
-      MessageThreadId: threaded ? rootId : undefined,
-      SessionKey: thread.thread.sessionKey,
+      ReplyToId: rootId,
+      MessageThreadId: rootId,
+      SessionKey: `agent:main:mattermost:channel:x:thread:${rootId}`,
     });
+    expect(thread.thread.effectiveReplyToId).toBe(rootId);
+    expect(thread.thread.parentSessionKey).toBe(
+      channelType === "D" ? undefined : "agent:main:mattermost:channel:x",
+    );
     expect(thread.finalizeContext({})).not.toHaveProperty("ConversationLink");
   },
 );

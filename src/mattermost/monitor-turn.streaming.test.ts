@@ -1,5 +1,6 @@
 import {
   dispatchReplyWithBufferedBlockDispatcher,
+  type ReplyDispatchRuntimeInfo,
 } from "openclaw/plugin-sdk/reply-runtime";
 import type { ChannelInboundTurnPlan } from "openclaw/plugin-sdk/channel-inbound";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -10,6 +11,7 @@ import { dispatchMattermostInboundTurn } from "./monitor-turn.js";
 import { handleMattermostPreviewStop } from "./preview-stop.js";
 import { setInteractionSecret } from "./interactions.js";
 import { createMattermostReactionLifecycleStore } from "./monitor-turn-reactions.js";
+import { createMattermostTaskCardContinuation } from "./task-card-continuation.js";
 import type { MattermostMonitorContext } from "./monitor-types.js";
 import type { OpenClawConfig } from "./runtime-api.js";
 
@@ -34,7 +36,11 @@ afterEach(() => {
 
 // Keep the real turn, draft, reply pipeline and SDK dispatcher. Only the host
 // agent execution and external Mattermost transports are replaced.
-function fixture(mode: "block" | "partial" | "off", transport: "rest" | "companion" = "rest") {
+function fixture(
+  mode: "block" | "partial" | "progress" | "off",
+  transport: "rest" | "companion" = "rest",
+  channelType: "O" | "D" = "O",
+) {
   const cfg: OpenClawConfig = {
     messages: { ackReaction: "" },
     channels: {
@@ -89,6 +95,7 @@ function fixture(mode: "block" | "partial" | "off", transport: "rest" | "compani
     }) as MattermostClient["fetchImpl"],
   };
   let script: Script = async () => {};
+  let progressOffer: ReplyDispatchRuntimeInfo["adoptProgressDraft"];
   const sessionKey = "agent:main:mattermost:channel:channel-1";
   const core = {
     capabilities: ["queued-source-lifecycle-v1"],
@@ -123,12 +130,20 @@ function fixture(mode: "block" | "partial" | "off", transport: "rest" | "compani
           const dispatchResult = await dispatchReplyWithBufferedBlockDispatcher({
             cfg,
             ctx: turn.ctxPayload,
-            dispatcherOptions: { ...turn.dispatcherOptions, deliver: turn.delivery.deliver,
+            // The host attaches its capability at delivery. Private payload
+            // metadata is not a published SDK API; supply that host boundary here.
+            dispatcherOptions: { ...turn.dispatcherOptions,
+              deliver: (payload, info) => turn.delivery.deliver(payload,
+                progressOffer ? { ...info, adoptProgressDraft: progressOffer } : info),
               onError: turn.delivery.onError },
             replyOptions: turn.replyOptions,
             dispatchReplyFromConfig: async (options) => {
               await script(options);
-              return { queuedFinal: false, counts: options.dispatcher.getQueuedCounts() };
+              return {
+                queuedFinal: false,
+                counts: options.dispatcher.getQueuedCounts(),
+                [Symbol.for("openclaw.agentRunTerminalOutcome")]: "completed",
+              };
             },
           });
           return { dispatched: true, dispatchResult };
@@ -150,7 +165,7 @@ function fixture(mode: "block" | "partial" | "off", transport: "rest" | "compani
     resources: {
       resolveChannelInfo: async () => ({
         id: "channel-1",
-        type: "O",
+        type: channelType,
         name: "town-square",
       }),
       sendTypingIndicator: async (channelId: string, parentId?: string) =>
@@ -188,10 +203,205 @@ function fixture(mode: "block" | "partial" | "off", transport: "rest" | "compani
     params.dispatcher.sendFinalReply({ text });
     await params.dispatcher.waitForIdle();
   };
-  return { run, final, calls, posts, monitor };
+  return { run, final, calls, posts, monitor,
+    offerProgressDraft: (offer: NonNullable<typeof progressOffer>) => { progressOffer = offer; } };
 }
 
 describe("Mattermost monitor streaming boundaries", () => {
+  it.each([
+    { child: "hidden", timing: "before", outcome: "completed" },
+    { child: "hidden", timing: "split", outcome: "completed" },
+    { child: "hidden", timing: "after", outcome: "completed" },
+    { child: "known", timing: "before", outcome: "completed" },
+    { child: "hidden", timing: "before", outcome: "partial" },
+    { child: "hidden", timing: "before", outcome: "error" },
+    { child: "hidden", timing: "before", outcome: "aborted" },
+    { child: "foreign", timing: "before", outcome: "fenced" },
+    { child: "hidden", timing: "before", outcome: "human" },
+    { child: "hidden", timing: "before", outcome: "no-plan" },
+  ].flatMap(scenario => [
+    { ...scenario, preview: "partial" as const },
+    { ...scenario, preview: "progress" as const },
+  ]))("projects $child-child settlement around original cleanup ($timing, $outcome, $preview)", async ({ child, timing, outcome, preview }) => {
+    const f = fixture(preview, preview === "progress" ? "companion" : "rest");
+    if (preview === "progress") setInteractionSecret("default", "test-token");
+    f.monitor.account.config.replyToMode = "first";
+    f.monitor.account.config.streaming!.progress!.toolProgress = preview === "progress";
+    type Draft = Parameters<NonNullable<ReplyDispatchRuntimeInfo["adoptProgressDraft"]>>[0];
+    let retained: Draft | undefined;
+    const adopt = vi.fn((draft: Draft) => { retained = draft; return true; });
+    if (preview === "progress") f.offerProgressDraft(adopt);
+    type Events = MattermostMonitorContext["core"]["events"];
+    const transcriptListeners = new Set<Parameters<Events["onSessionTranscriptUpdate"]>[0]>();
+    const agentListeners = new Set<Parameters<Events["onAgentEvent"]>[0]>();
+    const events = {
+      onSessionTranscriptUpdate: (listener: Parameters<Events["onSessionTranscriptUpdate"]>[0]) => {
+        transcriptListeners.add(listener);
+        return () => { transcriptListeners.delete(listener); };
+      },
+      onAgentEvent: (listener: Parameters<Events["onAgentEvent"]>[0]) => {
+        agentListeners.add(listener);
+        return () => { agentListeners.delete(listener); };
+      },
+    } as Events;
+    f.monitor.core.events = events;
+    const bridge = createMattermostTaskCardContinuation({ events, log: vi.fn() });
+    f.monitor.taskCardContinuation = bridge;
+    const parent = "agent:main:mattermost:channel:channel-1:thread:thread-1";
+    f.monitor.core.agent.session.listSessionEntries = () => [{
+      sessionKey: "hidden-child",
+      entry: { spawnedBy: parent, createdAt: Date.now(), status: "done", lastRunId: "child-run" },
+    }] as never;
+    let seq = 262;
+    const emit = (message: unknown, runId?: string) => {
+      for (const listener of transcriptListeners) listener({
+        target: { agentId: "main", sessionId: "test-session", sessionKey: parent },
+        messageSeq: ++seq, message, runId,
+      });
+    };
+    const lifecycle = (runId: string, data: Record<string, unknown>) => {
+      for (const listener of agentListeners) listener({ runId, sessionKey: parent, stream: "lifecycle", data });
+    };
+    const plan = ["Inspect", "Implement", "Verify"];
+    const input = () => emit({ role: "user", provenance: {
+      kind: "inter_session", sourceChannel: "internal", sourceTool: "subagent_settle",
+      sourceSessionKey: child === "foreign" ? "foreign-child" : "hidden-child",
+    }, content: [] });
+    const complete = () => {
+      emit({ role: "custom", customType: "openclaw.nested-tool.v1",
+        display: true, excludeFromContext: true, content: "", timestamp: Date.now(),
+        details: { runId: "successor-run", scopeId: "scope", afterEntryId: null, startOrder: 0,
+          toolCallId: "progress-call", toolName: "progress_card", isError: false,
+          startedAt: Date.now(), timestamp: Date.now(),
+          input: { plan: plan.map((step, i) => ({
+            step, status: outcome === "partial" && i === 2 ? "pending" : "completed",
+          })) },
+          result: { content: [], details: { revision: 4, steps: { completed: 3, total: 3 } } } } });
+      emit({ role: "toolResult", __openclaw: { runId: "successor-run" },
+        toolName: "dispatch_action", isError: false, content: [] });
+      emit({ role: "assistant", __openclaw: { runId: "successor-run" },
+        stopReason: outcome === "error" || outcome === "aborted" ? outcome : "stop",
+        content: [{ type: "text", text: "Delivered separately" }] }, "successor-run");
+      lifecycle("successor-run", { phase: outcome === "error" ? "error" : "end",
+        aborted: outcome === "aborted" });
+    };
+    try {
+      await f.run(async (params) => {
+        params.replyOptions?.onAgentRunStart?.("initial-run");
+        if (outcome !== "no-plan") await params.replyOptions?.onPlanUpdate?.({
+          source: "openclaw",
+          steps: plan.map((step, i) => ({ step, status: i < 2 ? "completed" : "in_progress" })),
+        });
+        if (child === "known") params.replyOptions?.onVisibleWorkSessions?.([{ sessionKey: "hidden-child" }]);
+        lifecycle("initial-run", { phase: "end", yielded: true, livenessState: "paused", stopReason: "end_turn" });
+        if (outcome !== "no-plan") {
+          expect(f.posts.get("post-1")?.message).toContain("Task progress · In progress");
+          expect(f.posts.get("post-1")?.message).toContain("- [ ] **Verify**");
+        }
+        // A hidden child has no onVisibleWorkSessions callback. Core commits
+        // its native settle input before the original inbound owner returns.
+        if (timing !== "after") input();
+        if (outcome === "human") emit({ role: "user", content: [{ type: "text", text: "Correction" }] });
+        if (timing === "before") complete();
+        if (outcome !== "no-plan") {
+          // Candidate rows cannot edit until original cleanup proves the child.
+          expect(f.posts.get("post-1")?.message).toContain("- [ ] **Verify**");
+        }
+        if (preview === "progress" && outcome !== "no-plan") {
+          await params.replyOptions?.onItemEvent?.({
+            itemId: "initial-tool", kind: "tool", name: "read", phase: "start", status: "running",
+          });
+          await f.final(params, "Waiting for delegated work");
+          expect(adopt).toHaveBeenCalledOnce();
+          expect(f.calls.some(call => call.path.endsWith("/capabilities"))).toBe(true);
+          expect(f.posts.get("post-2")?.type).toBe("custom_openclaw_stream");
+          expect(f.posts.get("post-2")?.root_id).toBe("thread-1");
+          expect(f.calls.some(call => call.path.endsWith("/close") && call.body.post_id === "post-2")).toBe(true);
+        }
+      });
+      if (timing !== "before") {
+        expect(f.posts.get("post-1")?.message).toContain("Task progress · In progress");
+        if (preview === "progress") {
+          retained!.push({ itemId: "successor-tool", kind: "tool", name: "exec", phase: "start", status: "running" });
+          await vi.waitFor(() => expect(f.posts.get("post-2")?.message).toContain("Exec"), { timeout: 2000 });
+          expect(f.posts.get("post-1")?.message).not.toContain("Exec");
+        }
+        if (timing === "after") input();
+        complete();
+      }
+      // Let queued continuation writes settle before asserting negative fences.
+      for (let i = 0; i < 100; i++) await Promise.resolve();
+      const status = outcome === "error" ? "Failed" : outcome === "aborted" ? "Cancelled"
+        : outcome === "partial" ? "Incomplete" : ["fenced", "human"].includes(outcome) ? "In progress" : "Completed";
+      if (outcome === "no-plan") expect(f.posts.size).toBe(0);
+      else {
+        await vi.waitFor(() => expect(f.posts.get("post-1")?.message).toContain(`Task progress · ${status}`));
+        if (outcome === "completed") {
+          for (const step of plan) expect(f.posts.get("post-1")?.message).toContain(`- [x] ${step}`);
+        }
+        if (["fenced", "human"].includes(outcome)) {
+          expect(f.posts.get("post-1")?.message).toContain("- [ ] **Verify**");
+        }
+      }
+      expect(f.calls.filter(call => call.path.split("?")[0] === "/posts"))
+        .toHaveLength(outcome === "no-plan" ? 0 : preview === "progress" ? 2 : 1);
+      expect(f.calls.filter(call => call.path.endsWith("/patch"))
+        .every(call => call.path === "/posts/post-1/patch" ||
+          preview === "progress" && call.path === "/posts/post-2/patch")).toBe(true);
+    } finally {
+      retained?.retire();
+      bridge.stop();
+    }
+  });
+
+  it.each(["before-result", "after-commentary"] as const)(
+    "keeps DM task progress and the successor result in the inbound thread (%s plan)",
+    async (boundary) => {
+      vi.useFakeTimers();
+      const f = fixture("partial", "rest", "D");
+      f.monitor.account.config.replyToMode = "first";
+      await f.run(async (params) => {
+        await params.replyOptions?.onPartialReply?.({ text: "Early commentary" });
+        if (boundary === "after-commentary") {
+          await vi.advanceTimersByTimeAsync(1200);
+          expect(f.posts.get("post-1")?.message).toBe("Early commentary");
+        } else {
+          expect(f.posts.size).toBe(0);
+        }
+        await params.replyOptions?.onPlanUpdate?.({
+          steps: [{ step: "Inspect", status: "in_progress" }],
+        });
+        await params.replyOptions?.onToolStart?.({ name: "read", toolCallId: "tool-1" });
+        await params.replyOptions?.onPartialReply?.({ text: "Found the answer." });
+        await vi.advanceTimersByTimeAsync(1200);
+        expect(f.posts.get("post-1")?.props?.openclaw_mattermost).toMatchObject({
+          kind: "task_progress",
+        });
+        expect(f.posts.get("post-2")?.props?.openclaw_mattermost).toMatchObject({
+          kind: "turn_result",
+        });
+        await params.replyOptions?.onPlanUpdate?.({
+          steps: [{ step: "Inspect", status: "completed" }],
+        });
+        await f.final(params, "Found the answer.");
+      });
+      const creates = f.calls.filter((call) => call.path.split("?")[0] === "/posts");
+      expect(creates).toHaveLength(2);
+      expect(creates.map((call) => call.body.root_id)).toEqual(["thread-1", "thread-1"]);
+      if (boundary === "after-commentary") {
+        expect(creates[1]?.body.message).toBe("Early commentary");
+      }
+      expect(f.posts.get("post-1")?.message).toContain("Task progress · Completed");
+      expect(f.posts.get("post-2")?.message).toBe("Found the answer.");
+      const answerWrites = f.calls.filter(
+        (call) => call.method === "PUT" && call.body.message === "Found the answer.",
+      );
+      expect(answerWrites.length).toBeGreaterThan(0);
+      expect(answerWrites.every((call) => call.path === "/posts/post-2/patch")).toBe(true);
+      expect(normalSend).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(["before-result", "after-commentary"] as const)(
     "keeps a late %s plan above the Stop-owning result and finalizes cancellation",
     async (boundary) => {

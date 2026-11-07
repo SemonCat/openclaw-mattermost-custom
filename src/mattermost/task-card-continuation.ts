@@ -283,8 +283,10 @@ export function createMattermostTaskCardContinuation(params: {
         const provenance = record(message.provenance);
         if (provenance?.kind !== "inter_session" || provenance.sourceTool !== "subagent_settle" ||
             provenance.sourceChannel !== "internal" ||
-            typeof provenance.sourceSessionKey !== "string" ||
-            !owner.card.hasWorkSession(provenance.sourceSessionKey)) { fenceInput(owner); return; }
+            typeof provenance.sourceSessionKey !== "string") { fenceInput(owner); return; }
+        // Hidden children are discovered by finishPresentation before finishInitial.
+        // Retain native candidates now; consume revalidates child ownership once
+        // discovery completes, before any continuation can edit the card.
         owner.bufferingContinuation = true;
       } else {
         // Normal tool-heavy initial runs do not consume the continuation buffer.
@@ -343,6 +345,15 @@ export function createMattermostTaskCardContinuation(params: {
       owner.timer.unref?.();
       owners.set(input.sessionKey, owner);
       return {
+        adoptDraft: (draft: Draft): boolean => {
+          const target = drafts.get(draft);
+          if (!owner.active || !target || target.agentId !== owner.agentId ||
+              target.sessionId !== owner.sessionId || target.sessionKey !== owner.sessionKey) return false;
+          // Attaching host custody must not discard a native continuation
+          // already observed while the original presentation was still active.
+          owner.adoptedDraft = draft;
+          return true;
+        },
         finishInitial: () => {
           if (!owner.active) return;
           if (!owner.card.canContinue()) { retire(owner); return; }

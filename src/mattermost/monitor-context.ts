@@ -61,8 +61,7 @@ export function resolveMattermostReplyRootId(params: {
   replyToId?: string;
 }): string | undefined {
   const threadRootId = normalizeOptionalString(params.threadRootId);
-  // Flat DMs (no thread context) get no reply root. A DM carries a threadRootId
-  // only when its effective per-chat-type mode enables threading.
+  // Flat DMs get no reply root. Existing DM threads retain their inbound root.
   if (params.kind === "direct" && !threadRootId) {
     return undefined;
   }
@@ -138,11 +137,8 @@ export function resolveMattermostEffectiveReplyToId(params: {
   replyToMode: "off" | "first" | "all" | "batched";
   threadRootId?: string | null;
 }): string | undefined {
-  // Flat DMs never thread. Opted-in DMs use the same thread-root logic as rooms;
-  // replyToMode already reflects the effective per-chat-type mode.
-  if (params.kind === "direct" && params.replyToMode === "off") {
-    return undefined;
-  }
+  // Preserve an inbound thread before deciding whether to start a new one.
+  // The effective reply mode controls only top-level posts, including flat DMs.
   const threadRootId = normalizeOptionalString(params.threadRootId);
   if (threadRootId) {
     return threadRootId;
