@@ -305,6 +305,11 @@ export function createMattermostDraftStream(params: {
     if (streamState.stopped || streamState.final) {
       return Promise.resolve();
     }
+    // Automatic progress is transient, including a queued preview not yet posted.
+    // Retire its generation instead of sealing it as durable assistant prose.
+    if (params.silentProgress && currentGeneration.latestAssistantText === undefined) {
+      return deleteCurrentMessage();
+    }
     // Agent boundary callbacks are fire-and-forget. Swap generations synchronously; the new
     // generation waits for the old send and seal so posts stay in publication order.
     const pendingText = loop.takePending();

@@ -55,6 +55,7 @@ function fixture(
   };
   const calls: Array<{ path: string; method: string; body: Record<string, unknown> }> = [];
   const posts = new Map<string, MattermostPost>();
+  let nextPostId = 0;
   const client: MattermostClient = {
     baseUrl: "https://mattermost.example.invalid",
     apiBaseUrl: "https://mattermost.example.invalid/api/v4",
@@ -63,7 +64,7 @@ function fixture(
       const body = typeof init?.body === "string" ? JSON.parse(init.body) : {};
       calls.push({ path, method: init?.method ?? "GET", body });
       if (path.split("?")[0] === "/posts") {
-        const post = { ...body, id: `post-${posts.size + 1}`, user_id: "bot" } as MattermostPost;
+        const post = { ...body, id: `post-${++nextPostId}`, user_id: "bot" } as MattermostPost;
         posts.set(post.id, post);
         return post as T;
       }
@@ -343,13 +344,12 @@ describe("Mattermost monitor streaming boundaries", () => {
   );
 
   it.each(["rest", "companion"] as const)(
-    "retains execution preview text and final identity without controls with %s transport",
+    "retires transient execution progress while preserving the card and final with %s transport",
     async (transport) => {
       vi.useFakeTimers();
       const f = fixture("block", transport);
       f.monitor.account.config.streaming!.progress!.toolProgress = true;
       setInteractionSecret("default", "test-token");
-      let previewText: string | null | undefined;
       await f.run(async (params) => {
         params.replyOptions?.onAgentRunStart?.("retained-run");
         await params.replyOptions?.onPlanUpdate?.({
@@ -360,7 +360,7 @@ describe("Mattermost monitor streaming boundaries", () => {
         });
         await vi.advanceTimersByTimeAsync(1200);
         const preview = f.posts.get("post-2")!;
-        previewText = preview.message;
+        expect(preview.message).toContain("Read");
         expect(preview.props).not.toHaveProperty("openclaw_preview_stop");
         await params.replyOptions?.onAssistantMessageStart?.();
         await params.replyOptions?.onPartialReply?.({ text: "All done." });
@@ -371,17 +371,17 @@ describe("Mattermost monitor streaming boundaries", () => {
         await f.final(params, "All done.");
       });
       expect(f.posts.get("post-1")?.message).toContain("Task progress · Completed");
-      expect(f.posts.get("post-2")?.message).toBe(previewText);
-      expect(f.posts.get("post-2")?.props?.openclaw_mattermost).toMatchObject({ kind: "turn_result" });
+      expect(f.posts.has("post-2")).toBe(false);
       expect(f.posts.get("post-3")?.message).toBe("All done.");
-      for (const id of ["post-2", "post-3"]) {
-        expect(f.posts.get(id)?.props).not.toHaveProperty("attachments");
-        expect(f.posts.get(id)?.props).not.toHaveProperty("openclaw_preview_stop");
-      }
+      expect(f.posts.get("post-3")?.props?.openclaw_mattermost).toMatchObject({ kind: "turn_result" });
+      expect(f.posts.get("post-3")?.props).not.toHaveProperty("attachments");
+      expect(f.posts.get("post-3")?.props).not.toHaveProperty("openclaw_preview_stop");
       const settled = f.calls.length;
       await vi.advanceTimersByTimeAsync(2400);
       expect(f.calls).toHaveLength(settled);
-      expect(f.calls.some((call) => call.method === "DELETE")).toBe(false);
+      expect(f.calls.filter((call) => call.method === "DELETE")).toEqual([
+        expect.objectContaining({ path: "/posts/post-2" }),
+      ]);
     },
   );
 
@@ -686,6 +686,68 @@ describe("Mattermost monitor streaming boundaries", () => {
       expect(f.posts.get("post-1")!.message).toBe("Stopped.");
       expect(f.posts.get("post-1")!.props).not.toHaveProperty("attachments");
       expect(f.calls.filter(call => call.path.split("?")[0] === "/posts")).toHaveLength(1);
+    },
+  );
+  it.each((["rest", "companion"] as const).flatMap(transport =>
+    (["silent", "error", "status"] as const).map(terminal => ({ transport, terminal }))))(
+    "removes tool progress after a $terminal terminal turn with $transport previews",
+    async ({ transport, terminal }) => {
+      vi.useFakeTimers();
+      const f = fixture("progress", transport);
+      f.monitor.account.config.streaming!.progress!.toolProgress = true;
+      if (terminal === "status") {
+        normalSend.mockImplementationOnce(async () => ({
+          messageId: "final-post", channelId: "channel-1",
+        }) as never);
+      }
+      const turn = f.run(async (params) => {
+        await params.replyOptions?.onItemEvent?.({
+          itemId: "tool-1", kind: "tool", name: "read", phase: "start", status: "running",
+        });
+        await vi.advanceTimersByTimeAsync(1200);
+        expect(f.posts.size).toBe(1);
+        if (terminal === "error") throw new Error("execution failed");
+        if (terminal === "status") {
+          params.dispatcher.sendFinalReply({ text: "Session resolved.", isStatusNotice: true });
+          await params.dispatcher.waitForIdle();
+        }
+      });
+      if (terminal === "error") await expect(turn).rejects.toThrow("execution failed");
+      else await turn;
+      expect(f.posts.size).toBe(0);
+      expect(f.calls.filter((call) => call.method === "DELETE")).toEqual([
+        expect.objectContaining({ path: "/posts/post-1" }),
+      ]);
+      if (terminal === "status") expect(normalSend).toHaveBeenCalledOnce();
+    },
+  );
+  it.each(["rest", "companion"] as const)(
+    "removes transient tool progress while retaining prose with %s block previews",
+    async (transport) => {
+      vi.useFakeTimers();
+      const f = fixture("block", transport);
+      f.monitor.account.config.streaming!.progress!.toolProgress = true;
+      await f.run(async (params) => {
+        await params.replyOptions?.onAssistantMessageStart?.();
+        await params.replyOptions?.onPartialReply?.({ text: "I will check." });
+        await vi.advanceTimersByTimeAsync(1200);
+        await params.replyOptions?.onItemEvent?.({
+          itemId: "tool-1", kind: "tool", name: "read", phase: "start", status: "running",
+        });
+        await vi.advanceTimersByTimeAsync(1200);
+        expect(f.posts.size).toBe(2);
+        await params.replyOptions?.onAssistantMessageStart?.();
+        await params.replyOptions?.onPartialReply?.({ text: "Found the answer." });
+        await vi.advanceTimersByTimeAsync(1200);
+        await f.final(params, "I will check.\n\nFound the answer.");
+      });
+      expect([...f.posts.values()].map((post) => post.message)).toEqual([
+        "I will check.",
+        "Found the answer.",
+      ]);
+      expect(f.calls.filter((call) => call.method === "DELETE")).toEqual([
+        expect.objectContaining({ path: "/posts/post-2" }),
+      ]);
     },
   );
   it.each(["rest", "companion"] as const)(

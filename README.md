@@ -1056,6 +1056,12 @@ server and integration identity supporting silent posts, as described in
 existing notification behavior; mentions added only by editing those ordinary
 previews remain subject to Mattermost's edit notification semantics.
 
+Automatic tool progress is transient. Block boundaries retire tool previews
+instead of preserving them as assistant text; terminal cleanup also removes
+unadopted progress after silent completion, execution failure or a status notice.
+Assistant prose, durable task cards and host-owned continuation drafts keep
+their existing ownership.
+
 Owned preview cleanup makes at most two DELETE attempts within a ten-second
 budget. After a transient error it reads back the post before retrying; a
 subsequent read 404 confirms invisibility. Initial DELETE 404 and permission

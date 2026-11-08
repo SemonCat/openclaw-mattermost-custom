@@ -298,7 +298,7 @@ export async function dispatchMattermostInboundTurn(
       activity === "reasoning" && blockPreviewActivity === "reasoning";
     const continuesCurrentActivity =
       continuingToolActivity || continuingTextActivity || continuingReasoningActivity;
-    // Reasoning placeholders are transient: a visible successor reuses them, while entering from durable text/tool rotates generations.
+    // A successor reuses reasoning placeholders; other boundaries seal assistant prose or retire tool progress.
     const startsNewGeneration = !continuesCurrentActivity && blockPreviewActivity !== "reasoning";
     if (startsNewGeneration) {
       currentAssistantPreviewUsesPrefix = false;
@@ -765,6 +765,15 @@ export async function dispatchMattermostInboundTurn(
       ? (turnResult.dispatchResult as MattermostReplyDispatchResult)
       : undefined;
     const finalDeliveryFailed = (dispatchResult?.failedCounts?.final ?? 0) > 0;
+    // Silent progress is not an answer. Retire it even when no final was sent or
+    // execution failed; an adopted draft belongs to the host continuation.
+    if (!progressDraftAdopted && draftStream.isSilent?.() === true) {
+      try {
+        await draftStream.clear();
+      } catch (err) {
+        monitor.logVerboseMessage(`mattermost progress preview cleanup failed: ${String(err)}`);
+      }
+    }
     await previewLifecycle.cleanup({
       failed: dispatchError || finalDeliveryFailed || queuedFollowupDeliveryError,
     });
