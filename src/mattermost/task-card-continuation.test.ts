@@ -45,13 +45,13 @@ async function fixture(options: { noPlan?: boolean; missingId?: boolean; yielded
   const emit = (message: unknown, runId?: string, route = target) => {
     for (const listener of listeners) listener({ target: route, message, messageSeq: ++seq, runId });
   };
-  const end = (runId: string, data = { phase: "end" }) => {
+  const end = (runId: string, data: Record<string, unknown> = { phase: "end" }) => {
     for (const listener of agentListeners) listener({ runId, sessionKey: target.sessionKey, stream: "lifecycle", data });
   };
   const complete = (options: { runId?: string; partial?: boolean; outerError?: boolean;
     innerError?: boolean; wrongCall?: boolean; wrongWrapper?: boolean; terminal?: "stop" | "error" | "aborted";
     yielded?: boolean; lifecycleFirst?: boolean; skipLifecycle?: boolean;
-    progress?: Record<string, unknown>; nested?: boolean } = {}) => {
+    progress?: Record<string, unknown>; nested?: boolean; yieldToolOnly?: boolean } = {}) => {
     const runId = options.runId ?? "successor-run";
     emit({ role: "user", provenance: { kind: "inter_session", sourceChannel: "internal",
       sourceTool: "subagent_settle", sourceSessionKey: "child-1" }, content: [] });
@@ -77,8 +77,13 @@ async function fixture(options: { noPlan?: boolean; missingId?: boolean; yielded
         result: { isError: options.innerError ?? false, content: [], details: { revision: 2, steps: { completed: 2, total: 2 } } },
       }) }] });
     }
-    emit({ role: "assistant", __openclaw: { runId },
-      stopReason: options.terminal ?? "stop", content: [{ type: "text", text: "Result delivered separately" }] }, runId);
+    if (options.yieldToolOnly) {
+      emit({ role: "toolResult", __openclaw: { runId }, toolName: "sessions_yield",
+        isError: false, details: { status: "yielded" }, content: [] });
+    } else {
+      emit({ role: "assistant", __openclaw: { runId },
+        stopReason: options.terminal ?? "stop", content: [{ type: "text", text: "Result delivered separately" }] }, runId);
+    }
     if (!options.skipLifecycle && !options.lifecycleFirst) end(runId, terminalData);
   };
   const finish = async () => {
@@ -232,6 +237,57 @@ describe("committed native task-card continuation retention", () => {
 
 
 describe("continuation ownership and terminal fences", () => {
+  it.each([
+    { phase: "end", expected: "Completed" },
+    { phase: "error", expected: "Failed" },
+    { phase: "end", aborted: true, expected: "Cancelled" },
+    { phase: "end", stopReason: "timeout", aborted: true, expected: "Failed" },
+    { ...yieldedEnd, expected: "In progress" },
+  ])("joins only the committed terminal's late native receipt after draft retirement: %j", async ({ expected, ...data }) => {
+    const f = await fixture({ yielded: true, adopted: true });
+    try {
+      await f.finish();
+      f.complete({ skipLifecycle: true });
+      f.releaseDraft?.();
+      await drain();
+      expect(f.message()).toContain("Task progress · In progress");
+      f.end("foreign-run", data);
+      for (const listener of f.agentListeners) listener({
+        runId: "successor-run", sessionKey: "foreign-parent", stream: "lifecycle", data,
+      });
+      await drain();
+      expect(f.message()).toContain("Task progress · In progress");
+      f.end("successor-run", data);
+      await drain();
+      expect(f.message()).toContain(`Task progress · ${expected}`);
+      const count = f.request.mock.calls.length;
+      f.complete({ runId: "after-release" });
+      f.end("successor-run");
+      await drain();
+      expect(f.request.mock.calls).toHaveLength(count);
+    } finally { f.bridge.stop(); }
+  });
+
+  it.each(["human", "replacement", "stop", "expiry"] as const)(
+    "fences a late native terminal receipt after draft retirement and %s", async (cause) => {
+      vi.useFakeTimers();
+      const f = await fixture({ yielded: true, adopted: true, allCompleted: true });
+      try {
+        await f.finish();
+        const count = f.request.mock.calls.length;
+        f.complete({ skipLifecycle: true });
+        f.releaseDraft?.();
+        if (cause === "human") f.emit({ role: "user", content: [] });
+        if (cause === "replacement") f.emit({ role: "user" }, undefined, { ...target, sessionId: "replacement" });
+        if (cause === "stop") f.bridge.stop();
+        if (cause === "expiry") await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1_000 + 1);
+        f.end("successor-run");
+        await drain();
+        expect(f.request.mock.calls).toHaveLength(count);
+      } finally { f.bridge.stop(); }
+    },
+  );
+
   it.each(["completed", "partial", "error", "aborted"] as const)(
     "drains a proven %s terminal when host custody retires in the same tick", async (outcome) => {
       const f = await fixture({ yielded: true, adopted: true });
@@ -411,6 +467,82 @@ describe("continuation ownership and terminal fences", () => {
       expect(f.message()).toContain(`Task progress · ${terminal === "error" ? "Failed" : "Cancelled"}`);
       const count = f.request.mock.calls.length;
       f.complete({ runId: "later-run" });
+      await drain();
+      expect(f.request.mock.calls).toHaveLength(count);
+    } finally { f.bridge.stop(); }
+  });
+
+  it("preserves an early native cancellation reason through committed assistant settlement", async () => {
+    const f = await fixture({ yielded: true });
+    try {
+      await f.finish();
+      f.emit({ role: "user", provenance: { kind: "inter_session", sourceChannel: "internal",
+        sourceTool: "subagent_settle", sourceSessionKey: "child-1" } });
+      f.end("successor-run", { phase: "end", aborted: true, stopReason: "restart" });
+      f.emit({ role: "assistant", __openclaw: { runId: "successor-run" },
+        stopReason: "aborted", content: [] }, "successor-run");
+      await drain();
+      expect(f.message()).toContain("Task progress · Cancelled");
+      expect(f.message()).toContain("Task cancelled: Gateway restart.");
+      expect(f.request.mock.calls.slice(1).every(([path]) => path === "/posts/original-card/patch")).toBe(true);
+      const count = f.request.mock.calls.length;
+      f.complete({ runId: "later-run" });
+      await drain();
+      expect(f.request.mock.calls).toHaveLength(count);
+    } finally { f.bridge.stop(); }
+  });
+
+  it.each([false, true])("retains a tool-only clean yield until genuine successor completion (lifecycle first=%s)", async (lifecycleFirst) => {
+    const f = await fixture({ yielded: true });
+    try {
+      await f.finish();
+      f.complete({ yielded: true, yieldToolOnly: true, lifecycleFirst, partial: true });
+      await drain();
+      expect(f.message()).toContain("Task progress · In progress");
+      expect(f.message()).not.toContain("Task cancelled");
+      f.complete({ runId: "second-yield", yielded: true, yieldToolOnly: true, lifecycleFirst });
+      await drain();
+      expect(f.message()).toContain("Task progress · In progress");
+      f.complete({ runId: "retry-successor", lifecycleFirst });
+      await drain();
+      f.assertCompleted();
+    } finally { f.bridge.stop(); }
+  });
+
+  it.each([
+    { aborted: true, expected: "Cancelled" },
+    { status: "cancelled", expected: "Cancelled" },
+    { stopReason: "timeout", aborted: true, expected: "Failed" },
+    { stopReason: "timeout", expected: "Failed" },
+    { timeoutPhase: "provider", aborted: true, expected: "Failed" },
+    { phase: "error", expected: "Failed" },
+  ])("does not let a successful yield result suppress terminal failure: %j", async ({ expected, ...data }) => {
+    const f = await fixture({ yielded: true });
+    try {
+      await f.finish();
+      f.complete({ yielded: true, yieldToolOnly: true, skipLifecycle: true });
+      f.end("successor-run", { ...yieldedEnd, ...data });
+      await drain();
+      expect(f.message()).toContain(`Task progress · ${expected}`);
+      const count = f.request.mock.calls.length;
+      f.complete({ runId: "later-run" });
+      await drain();
+      expect(f.request.mock.calls).toHaveLength(count);
+    } finally { f.bridge.stop(); }
+  });
+
+  it.each([
+    { yielded: false }, { livenessState: "running" }, { stopReason: "stop" },
+  ])("requires strict native pause facts for a tool-only yield: %j", async (data) => {
+    const f = await fixture({ yielded: true });
+    try {
+      await f.finish();
+      f.complete({ yielded: true, yieldToolOnly: true, skipLifecycle: true, partial: true });
+      f.end("successor-run", { ...yieldedEnd, ...data });
+      await drain();
+      expect(f.message()).toContain("Task progress · In progress");
+      const count = f.request.mock.calls.length;
+      f.complete({ runId: "unproven-successor" });
       await drain();
       expect(f.request.mock.calls).toHaveLength(count);
     } finally { f.bridge.stop(); }

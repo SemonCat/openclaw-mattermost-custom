@@ -1,6 +1,7 @@
 // Account-scoped observation of committed automatic continuation; never adopts posts.
 import type { MattermostMonitorContext } from "./monitor-types.js";
 import type { createMattermostTaskProgressCard, MattermostTaskProgressAgentEvent, MattermostTaskProgressPlan } from "./task-progress-card.js";
+import { isMattermostTaskProgressYieldedWaiting } from "./task-progress-card.js";
 
 type Events = MattermostMonitorContext["core"]["events"];
 type TranscriptUpdate = Parameters<Parameters<Events["onSessionTranscriptUpdate"]>[0]>[0];
@@ -74,6 +75,7 @@ type Owner = {
   pending: TranscriptUpdate[];
   bufferingContinuation: boolean;
   terminalRunId?: string;
+  yieldedRunId?: string;
   lifecycle: Map<string, MattermostTaskProgressAgentEvent>;
   tail: Promise<void>;
   timer: ReturnType<typeof setTimeout>;
@@ -97,10 +99,14 @@ export function createMattermostTaskCardContinuation(params: {
     drafts.delete(draft);
     for (const owner of owners.values()) {
       if (owner.adoptedDraft !== draft) continue;
-      if (drainTerminal && owner.finishingGeneration === owner.generation) {
-        // Close observation now, but let already-proven terminal work join provider writes.
+      if (drainTerminal && (owner.finishingGeneration === owner.generation ||
+          owner.runId && owner.terminalRunId === owner.runId)) {
+        // Draft custody and native lifecycle publication are independent. A
+        // committed terminal keeps only its missing receipt, never a new run.
         owner.releasing = true;
-        void owner.tail.then(() => retire(owner));
+        if (owner.finishingGeneration === owner.generation) {
+          void owner.tail.then(() => retire(owner));
+        }
       } else retire(owner);
     }
   };
@@ -128,6 +134,7 @@ export function createMattermostTaskCardContinuation(params: {
     owner.input = undefined;
     owner.runId = undefined;
     owner.terminalRunId = undefined;
+    owner.yieldedRunId = undefined;
     owner.finishingGeneration = undefined;
     owner.calls.clear();
     owner.lifecycle.clear();
@@ -148,23 +155,27 @@ export function createMattermostTaskCardContinuation(params: {
   const finishCommitted = (owner: Owner) => {
     const runId = owner.runId;
     const event = runId ? owner.lifecycle.get(runId) : undefined;
-    if (!runId || owner.terminalRunId !== runId || !event) return;
+    if (!runId || !event || (owner.terminalRunId !== runId &&
+        !(owner.yieldedRunId === runId && isMattermostTaskProgressYieldedWaiting(event.data)))) return;
     owner.terminalRunId = undefined;
+    owner.yieldedRunId = undefined;
     owner.lifecycle.delete(runId);
     owner.finishingGeneration = owner.generation;
     queue(owner, async (isCurrent) => {
-      // A committed assistant stop alone cannot distinguish yield from task completion.
+      // A clean yield may commit only its tool result. The matching native
+      // lifecycle must prove a successful pause before that run can hand off.
       owner.card.noteAgentEvent(event);
       await owner.card.finish({ outcome: event.data.phase === "error" ? "failed" : "completed", isCurrent });
       if (!isCurrent()) return;
       owner.finishingGeneration = undefined;
       if (owner.runId === runId) owner.input = undefined;
-      if (!owner.card.canContinue()) retire(owner);
+      if (owner.releasing || !owner.card.canContinue()) retire(owner);
     });
   };
   const failedLifecycle = (event: MattermostTaskProgressAgentEvent) =>
     event.data.phase === "error" || event.data.aborted === true ||
     event.data.status === "cancelled" || event.data.status === "timed_out" ||
+    event.data.status === "timeout" || event.data.stopReason === "timeout" ||
     event.data.timeoutPhase != null || event.data.error != null;
   const finishFailure = (owner: Owner, event: MattermostTaskProgressAgentEvent) => {
     owner.finishingGeneration = owner.generation;
@@ -196,6 +207,7 @@ export function createMattermostTaskCardContinuation(params: {
       owner.input = { sourceSessionKey: provenance.sourceSessionKey, seq: update.messageSeq };
       owner.runId = undefined;
       owner.terminalRunId = undefined;
+      owner.yieldedRunId = undefined;
       owner.calls.clear();
       return;
     }
@@ -240,11 +252,17 @@ export function createMattermostTaskCardContinuation(params: {
       owner.calls.delete(message.toolCallId);
       if (message.toolName === "tool_call" && successfulWrappedResult(message)) apply(plan);
     }
+    if (message.role === "toolResult" && message.toolName === "sessions_yield" &&
+        message.isError === false && details?.status === "yielded") {
+      owner.yieldedRunId = rowRunId;
+      finishCommitted(owner);
+    }
     // Public top-level runId is emitted only for a committed terminal assistant.
     if (message.role === "assistant" && update.runId === rowRunId) {
       const cancelled = message.stopReason === "aborted";
       const failed = message.stopReason === "error";
-      if (failed || cancelled) {
+      const receipt = owner.lifecycle.get(rowRunId);
+      if ((failed || cancelled) && (!receipt || !failedLifecycle(receipt))) {
         owner.lifecycle.set(rowRunId, { runId: rowRunId, stream: "lifecycle",
           data: { phase: failed ? "error" : "end", aborted: cancelled } });
       }
@@ -303,7 +321,15 @@ export function createMattermostTaskCardContinuation(params: {
   const unsubscribeAgent = params.events.onAgentEvent((event) => {
     // Lifecycle events can finalize only a run already proven by committed rows.
     for (const owner of owners.values()) {
-      if (owner.releasing) continue;
+      if (owner.releasing) {
+        if (owner.runId && owner.terminalRunId === owner.runId && event.runId === owner.runId &&
+            event.sessionKey === owner.sessionKey && event.stream === "lifecycle" &&
+            (event.data.phase === "end" || event.data.phase === "error")) {
+          owner.lifecycle.set(event.runId, event);
+          finishCommitted(owner);
+        }
+        continue;
+      }
       if (owner.ready && event.sessionKey && owner.card.hasWorkSession(event.sessionKey)) {
         owner.card.noteAgentEvent(event);
       }

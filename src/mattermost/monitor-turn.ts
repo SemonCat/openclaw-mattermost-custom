@@ -241,6 +241,7 @@ export async function dispatchMattermostInboundTurn(
         beforeCreatePost: taskProgressCard.settleBeforeResultPostCreate,
         resolvePostProps: previewStop.props,
         onPostCreated: previewStop.notePost,
+        beforeDeletePost: previewStop.removeFromPost,
         throttleMs: 1200,
         companion: account.config.streaming?.transport === "companion",
         maxChars: textLimit,
@@ -812,6 +813,7 @@ export async function dispatchMattermostInboundTurn(
     }
     await taskProgressCard.finish({
       outcome: previewStop.stopped ? "cancelled" : readAgentRunTerminalOutcome(dispatchResult),
+      stoppedByOwner: previewStop.stopped,
       deliveryFailed: dispatchError || finalDeliveryFailed || queuedFollowupDeliveryError,
     });
     continuationOwner?.finishInitial();

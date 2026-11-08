@@ -22,7 +22,11 @@ function fixture() {
     },
     resources: { resolveChannelInfo: () => channelRead() },
     pairing: { readAllowFromStore: async () => [] },
-    client: { request: async (path: string) => posts.get(path.split("/")[2]!) },
+    client: { request: async (path: string, init?: RequestInit) => {
+      const post = posts.get(path.split("/")[2]!);
+      if (post && path.endsWith("/patch")) Object.assign(post, JSON.parse(String(init?.body)));
+      return post;
+    } },
     logVerboseMessage: vi.fn(),
   } as unknown as MattermostMonitorContext;
   setInteractionSecret(monitor.account.accountId, "test");
@@ -55,6 +59,68 @@ function fixture() {
 }
 
 describe("preview Stop source ownership", () => {
+  it("removes only its Stop and nonce while preserving post and attachment content", async () => {
+    const f = fixture();
+    const owner = f.create();
+    owner.activate("run");
+    f.click(owner);
+    const post = f.posts.get("preview")!;
+    post.message = "Execution preview text";
+    post.root_id = "thread";
+    const stopAttachment = (post.props!.attachments as Array<Record<string, unknown>>)[0]!;
+    const otherAction = { id: "details", name: "Details", type: "button" };
+    const otherAttachment = { title: "Keep this image", image_url: "https://mm.example/image" };
+    post.props = {
+      ...post.props, custom: { keep: true }, openclaw_mattermost: { kind: "turn_result" },
+      attachments: [
+        { ...stopAttachment, title: "Keep this title" },
+        { text: "", actions: [otherAction] },
+        otherAttachment,
+      ],
+    };
+    await owner.finish();
+    expect(post).toMatchObject({ id: "preview", root_id: "thread", message: "Execution preview text" });
+    expect(post.props).toEqual({
+      custom: { keep: true }, openclaw_mattermost: { kind: "turn_result" },
+      attachments: [
+        { ...stopAttachment, title: "Keep this title", actions: [] },
+        { text: "", actions: [otherAction] },
+        otherAttachment,
+      ],
+    });
+  });
+
+  it("does not remove a replacement turn's control from a reused post", async () => {
+    const f = fixture();
+    const owner = f.create();
+    owner.activate("run");
+    f.click(owner);
+    const replacement = f.create();
+    replacement.activate("next-run");
+    f.click(replacement);
+    const props = structuredClone(f.posts.get("preview")!.props);
+    await owner.removeFromPost("preview");
+    await owner.finish();
+    expect(f.posts.get("preview")!.props).toEqual(props);
+    expect(replacement.signal.aborted).toBe(false);
+  });
+
+  it("keeps a failed retirement cleanup eligible for the existing finish cleanup", async () => {
+    const f = fixture();
+    const owner = f.create();
+    owner.activate("run");
+    const callback = f.click(owner);
+    const request = vi.spyOn(f.monitor.client, "request");
+    request.mockRejectedValueOnce(new Error("read unavailable"));
+    await owner.removeFromPost("preview");
+    expect(f.posts.get("preview")!.props).toHaveProperty("openclaw_preview_stop");
+    await owner.finish();
+    expect(f.posts.get("preview")!.props).not.toHaveProperty("openclaw_preview_stop");
+    expect(await handleMattermostPreviewStop(f.monitor, callback)).toEqual({
+      ephemeral_text: "This Stop button has expired.",
+    });
+  });
+
   it("aborts only its own source after current command authorization and consumes replay", async () => {
     const f = fixture();
     const owner = f.create();
@@ -99,6 +165,21 @@ describe("preview Stop source ownership", () => {
       return { id: "room", type: "O" };
     });
     await handleMattermostPreviewStop(f.monitor, click);
+    expect(owner.signal.aborted).toBe(false);
+  });
+
+  it("rejects a callback whose post retires while authorization is pending", async () => {
+    const f = fixture();
+    const owner = f.create();
+    owner.activate("run");
+    const click = f.click(owner);
+    f.onChannelRead(async () => {
+      await owner.removeFromPost("preview");
+      return { id: "room", type: "O" };
+    });
+    expect(await handleMattermostPreviewStop(f.monitor, click)).toEqual({
+      ephemeral_text: "This Stop button has expired.",
+    });
     expect(owner.signal.aborted).toBe(false);
   });
 

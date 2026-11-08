@@ -598,7 +598,9 @@ by session ID.
 Controls expire on completion, replacement, session reset or Gateway restart.
 Durable stale callback replay is consumed without starting another agent turn.
 Cleanup removes only that turn's Stop control, preserving final text and other
-post properties. Task-card handoff keeps the card above the result; a stopped
+post properties. Preview retirement removes the control before deleting the post,
+so a cached deleted preview does not retain Stop after successful cleanup.
+Task-card handoff keeps the card above the result; a stopped
 turn leaves its plan card cancelled. If a provider cleanup request fails, a
 visible button can remain but is already inert.
 
@@ -827,6 +829,14 @@ terminal state. Turns without a plan
 do not create an extra post. Card API failures are isolated from final-answer
 delivery and use bounded create fallback to avoid duplicate posts.
 
+Cancelled cards include a reason when it is evidenced: a validated local Stop
+callback, or the host's stable `restart` or `superseded` stop reason. A generic
+abort says `Task cancelled; reason unavailable.` It does not imply that a person
+pressed Stop. Raw exceptions and arbitrary reason text are never copied to the
+card. Explicit timeout facts take precedence over a mechanical abort and render
+Failed with a timeout note. These notes use the existing Markdown/explanation
+payload, so web, desktop, mobile and Markdown fallback show the same information.
+
 A native automatic parent continuation can update that same card when committed
 transcript provenance identifies `subagent_settle` from a child recorded by the
 original task, with the exact parent session incarnation and a committed successor
@@ -836,7 +846,9 @@ calls are applied, including explanation-only or Markdown-only updates and
 revised checklists. A successful terminal with all parent steps completed leaves
 that card Completed; a partial plan remains Incomplete. Continuation finalization
 requires both a committed terminal assistant and its native lifecycle receipt,
-so repeated yields remain In progress. Receipts arriving before committed rows
+or, for a clean yield without a terminal assistant, a committed successful
+`sessions_yield` result and the strict successful-pause lifecycle above. Repeated
+yields remain In progress. Receipts arriving before committed rows
 are buffered within the existing bounded continuation ownership.
 Without host-adopted custody, new inbound or Web UI input retires continuation
 ownership. Session reset, failure/cancellation, or account stop also retires it.
@@ -863,7 +875,9 @@ Current host-adopted custody preserves the original card's observation across
 same-session input. Each input clears previous run/tool correlation; only a fresh
 trusted settle from an already-known child can authorize subsequent committed
 progress and terminal receipts. Host retirement closes observation and drains an
-already-proven terminal update; new human input, session replacement, account stop,
+already-proven terminal update. If its committed terminal assistant arrived first,
+only that exact run's missing native lifecycle receipt may still finalize the card;
+draft retirement itself never proves completion. New human input, session replacement, account stop,
 and expiry still fence queued writes. Neither activity adoption nor card observation forwards
 assistant transcript prose. Continuation commentary remains subject to the
 host's source-reply policy, and final answers keep their own delivery path.

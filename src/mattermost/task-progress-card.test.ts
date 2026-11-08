@@ -745,6 +745,46 @@ describe("Mattermost durable task progress card", () => {
     );
   });
 
+  it.each([
+    { data: { aborted: true, error: "SECRET_DIAGNOSTIC" }, status: "Cancelled", note: "Task cancelled; reason unavailable." },
+    { data: { status: "cancelled", stopReason: "stop" }, status: "Cancelled", note: "Task cancelled; reason unavailable." },
+    { data: { aborted: true, stopReason: "restart" }, status: "Cancelled", note: "Task cancelled: Gateway restart." },
+    { data: { aborted: true, stopReason: "superseded" }, status: "Cancelled", note: "Task cancelled: replaced by a newer session writer." },
+    { data: { aborted: true, stopReason: "shutdown" }, status: "Cancelled", note: "Task cancelled; reason unavailable." },
+    { data: { aborted: true, stopReason: "timeout", status: "timed_out", timeoutPhase: "provider" }, status: "Failed", note: "Task failed: the run timed out." },
+    { data: { aborted: true, timeoutPhase: "tool_execution" }, status: "Failed", note: "Task failed: the run timed out." },
+  ])("explains only evidenced parent termination: $note ($data)", async ({ data, status, note }) => {
+    const request = vi.fn<MattermostClient["request"]>(async () => ({ id: "card" }) as never);
+    const card = createMattermostTaskProgressCard({
+      client: createTestClient(request), channelId: "channel-1", log: vi.fn(),
+    });
+    card.noteRunStart("parent");
+    await card.updatePlan({
+      explanation: "Waiting for publication confirmation.",
+      steps: [{ step: "Publish", status: "pending" }],
+    });
+    await card.noteVisibleWorkSessions([{ sessionKey: "child", status: "done" }]);
+    // Neither a foreign run nor raw diagnostic text may supply a visible cause.
+    card.noteAgentEvent({ runId: "foreign", stream: "lifecycle",
+      data: { phase: "end", aborted: true, stopReason: "restart" } });
+    card.noteAgentEvent({ runId: "parent", stream: "lifecycle", data: {
+      phase: "end", reason: "SECRET_REASON", message: "SECRET_MESSAGE", ...data,
+    } });
+    await card.finish({ outcome: "failed" });
+    const terminal = readBody(request.mock.calls.at(-1)?.[1]);
+    expect(terminal.message).toContain(`Task progress · ${status}`);
+    expect(terminal.message).toContain(note);
+    expect(terminal.message).toContain("Waiting for publication confirmation.");
+    expect(terminal.message).not.toContain("SECRET");
+    expect((terminal.props as any).openclaw_task_progress).toMatchObject({
+      source_message: terminal.message,
+      explanation: `Waiting for publication confirmation.\n\n${note}`,
+    });
+    expect(card.canContinue()).toBe(false);
+    expect(request.mock.calls.filter(([path]) => path === "/posts?silent=true")).toHaveLength(1);
+    expect(request.mock.calls.slice(1).every(([path]) => path === "/posts/card/patch")).toBe(true);
+  });
+
   it("contains create/update failures with bounded retry and diagnostics", async () => {
     const log = vi.fn();
     const request = vi.fn<MattermostClient["request"]>(async () => {

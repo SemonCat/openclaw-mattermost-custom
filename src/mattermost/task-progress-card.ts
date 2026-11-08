@@ -54,6 +54,7 @@ type MattermostTaskProgressSnapshot = {
   steps: AgentPlanStep[];
   workSessions?: MattermostTaskProgressWorkSession[];
   status: MattermostTaskProgressStatus;
+  terminalNote?: string;
 };
 
 type MattermostTaskProgressWorkSessionStatus =
@@ -78,11 +79,39 @@ type PendingNativeProgressCard = {
 };
 
 // Mirrors core's strict parent-waiting classification; not exported by this SDK.
-function isYieldedWaiting(data: Record<string, unknown>): boolean {
+export function isMattermostTaskProgressYieldedWaiting(data: Record<string, unknown>): boolean {
   return data.phase === "end" && data.yielded === true &&
     data.livenessState === "paused" && data.stopReason === "end_turn" &&
     data.aborted !== true && data.status !== "cancelled" && data.status !== "timed_out" &&
+    data.status !== "timeout" &&
     data.timeoutPhase == null && data.error == null;
+}
+
+function isLifecycleTimeout(data: Record<string, unknown>): boolean {
+  return data.stopReason === "timeout" || data.status === "timed_out" ||
+    data.status === "timeout" || data.timeoutPhase != null;
+}
+
+function readLifecycleTerminal(data: Record<string, unknown>) {
+  // A watchdog can abort execution mechanically. Its explicit timeout fact
+  // must survive that flag rather than being presented as a cancellation.
+  return isLifecycleTimeout(data) ? "failed" as const
+    : data.aborted === true ? "cancelled" as const
+      : data.phase === "error" || data.error != null ? "failed" as const
+        : data.status === "cancelled" ? "cancelled" as const
+          : isMattermostTaskProgressYieldedWaiting(data) ? "yielded" as const : "completed" as const;
+}
+
+function cancellationNote(stopReason: unknown): string {
+  // Only host-owned stable codes cross into the card, never exception text,
+  // signal.reason, arbitrary reason strings, or a guessed user intention.
+  if (stopReason === "restart") return "Task cancelled: Gateway restart.";
+  if (stopReason === "superseded") return "Task cancelled: replaced by a newer session writer.";
+  return "Task cancelled; reason unavailable.";
+}
+
+function renderExplanation(snapshot: Pick<MattermostTaskProgressSnapshot, "explanation" | "terminalNote">) {
+  return [normalizeExplanation(snapshot.explanation), snapshot.terminalNote].filter(Boolean).join("\n\n") || undefined;
 }
 
 function normalizeSingleLine(value?: string): string | undefined {
@@ -299,7 +328,7 @@ export function renderMattermostTaskProgressCard(
   if (snapshot.title) {
     lines.push(snapshot.title);
   }
-  const explanation = normalizeExplanation(snapshot.explanation);
+  const explanation = renderExplanation(snapshot);
   if (explanation) {
     lines.push(explanation);
   }
@@ -338,6 +367,7 @@ export function createMattermostTaskProgressCard(params: {
   let latestSnapshot: MattermostTaskProgressSnapshot | undefined;
   let lastNativeProgressMarkdown: string | undefined;
   let lifecycleTerminal: Exclude<MattermostTaskProgressStatus, "in_progress"> | "yielded" | undefined;
+  let lifecycleTerminalNote: string | undefined;
   let nextRevision = 0;
   const pendingNativeProgressCards: PendingNativeProgressCard[] = [];
   let publishedMessage: string | undefined;
@@ -367,7 +397,7 @@ export function createMattermostTaskProgressCard(params: {
         version: 1,
         source_message: message,
         title: snapshot.title,
-        explanation: normalizeExplanation(snapshot.explanation),
+        explanation: renderExplanation(snapshot),
         status: snapshot.status,
         steps: snapshot.steps,
         work_sessions: (snapshot.workSessions ?? [])
@@ -555,6 +585,7 @@ export function createMattermostTaskProgressCard(params: {
           !latestSnapshot.steps.some((step) => step.status !== "completed")) return false;
       activeRunId = runId;
       lifecycleTerminal = undefined;
+      lifecycleTerminalNote = undefined;
       parentFinished = false;
       parentTerminalStatus = undefined;
       settled = false;
@@ -603,6 +634,7 @@ export function createMattermostTaskProgressCard(params: {
     noteRunStart: (runId: string) => {
       activeRunId = runId;
       lifecycleTerminal = undefined;
+      lifecycleTerminalNote = undefined;
     },
     noteAgentEvent: (event: MattermostTaskProgressAgentEvent) => {
       if (
@@ -612,19 +644,11 @@ export function createMattermostTaskProgressCard(params: {
       ) {
         const phase = event.data.phase;
         if (phase === "end" || phase === "error") {
-          const terminal =
-            event.data.aborted === true
-              ? "cancelled"
-              : phase === "error" || event.data.error != null ||
-                  event.data.status === "timed_out" || event.data.timeoutPhase != null
-                ? "failed"
-                : event.data.status === "cancelled"
-                  ? "cancelled"
-                  : isYieldedWaiting(event.data)
-                    ? "yielded"
-                    : "completed";
+          const terminal = readLifecycleTerminal(event.data);
           if (lifecycleTerminal !== "failed" && lifecycleTerminal !== "cancelled") {
             lifecycleTerminal = terminal;
+            lifecycleTerminalNote = terminal === "cancelled" ? cancellationNote(event.data.stopReason)
+              : isLifecycleTimeout(event.data) ? "Task failed: the run timed out." : undefined;
           }
         }
       }
@@ -652,17 +676,8 @@ export function createMattermostTaskProgressCard(params: {
           workSession.status = "running";
           workSession.progress = undefined;
         } else if (phase === "end" || phase === "error") {
-          workSession.status =
-            event.data.aborted === true
-              ? "cancelled"
-              : phase === "error" || event.data.error != null ||
-                  event.data.status === "timed_out" || event.data.timeoutPhase != null
-                ? "failed"
-                : event.data.status === "cancelled"
-                  ? "cancelled"
-                  : isYieldedWaiting(event.data)
-                    ? "running"
-                    : "completed";
+          const terminal = readLifecycleTerminal(event.data);
+          workSession.status = terminal === "yielded" ? "running" : terminal;
           workSession.progress = undefined;
         } else {
           return;
@@ -763,6 +778,7 @@ export function createMattermostTaskProgressCard(params: {
       settleBeforeResultPost(true),
     finish: async (result: {
       outcome?: "completed" | "failed" | "cancelled";
+      stoppedByOwner?: boolean;
       deliveryFailed?: boolean;
       isCurrent?: () => boolean;
     }): Promise<void> => {
@@ -792,6 +808,10 @@ export function createMattermostTaskProgressCard(params: {
         ...latestSnapshot,
         revision: ++nextRevision,
         status: status ?? "in_progress",
+        terminalNote: status === "cancelled"
+          ? result.stoppedByOwner ? "Task cancelled: you pressed Stop."
+            : lifecycleTerminalNote ?? cancellationNote(undefined)
+          : status === "failed" ? lifecycleTerminalNote : undefined,
         workSessions: listWorkSessions(),
       };
       await schedulePublish(result.isCurrent);

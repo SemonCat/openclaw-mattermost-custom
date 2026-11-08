@@ -208,6 +208,251 @@ function fixture(
 }
 
 describe("Mattermost monitor streaming boundaries", () => {
+  it.each((["rest", "companion"] as const).flatMap(transport =>
+    (["before", "after"] as const).map(retirement => ({ transport, retirement }))))(
+    "completes the original card when a native terminal-only settle retires its $transport progress draft $retirement lifecycle publication",
+    async ({ transport, retirement }) => {
+      const f = fixture("progress", transport);
+      f.monitor.account.config.replyToMode = "first";
+      f.monitor.account.config.streaming!.progress!.toolProgress = true;
+      setInteractionSecret("default", "test-token");
+      type Events = MattermostMonitorContext["core"]["events"];
+      const transcripts = new Set<Parameters<Events["onSessionTranscriptUpdate"]>[0]>();
+      const agents = new Set<Parameters<Events["onAgentEvent"]>[0]>();
+      const events = {
+        onSessionTranscriptUpdate: (listener: Parameters<Events["onSessionTranscriptUpdate"]>[0]) => {
+          transcripts.add(listener); return () => { transcripts.delete(listener); };
+        },
+        onAgentEvent: (listener: Parameters<Events["onAgentEvent"]>[0]) => {
+          agents.add(listener); return () => { agents.delete(listener); };
+        },
+      } as Events;
+      f.monitor.core.events = events;
+      const bridge = createMattermostTaskCardContinuation({ events, log: vi.fn() });
+      f.monitor.taskCardContinuation = bridge;
+      const parent = "agent:main:mattermost:channel:channel-1:thread:thread-1";
+      const child = "agent:main:subagent:known-child";
+      const successor = "announce:requester-settle:main:parent:cohort:yield-1";
+      let retained: Parameters<NonNullable<ReplyDispatchRuntimeInfo["adoptProgressDraft"]>>[0] | undefined;
+      f.offerProgressDraft(draft => { retained = draft; return true; });
+      f.monitor.core.agent.session.listSessionEntries = () => [{
+        sessionKey: child, entry: { spawnedBy: parent, createdAt: Date.now(), status: "done" },
+      }] as never;
+      const lifecycle = (runId: string, data: Record<string, unknown>) => {
+        for (const listener of agents) listener({ runId, sessionKey: parent, stream: "lifecycle", data });
+      };
+      const emit = (messageSeq: number, message: unknown, runId?: string) => {
+        for (const listener of transcripts) listener({
+          target: { agentId: "main", sessionId: "test-session", sessionKey: parent },
+          messageSeq, message, runId,
+        });
+      };
+      try {
+        await f.run(async (params) => {
+          params.replyOptions?.onAgentRunStart?.("initial-run");
+          await params.replyOptions?.onPlanUpdate?.({
+            source: "openclaw", steps: [{ step: "Verify candidate", status: "completed" }],
+          });
+          await params.replyOptions?.onItemEvent?.({
+            itemId: "work", kind: "tool", name: "exec", phase: "start", status: "running",
+          });
+          lifecycle("initial-run", {
+            phase: "end", yielded: true, livenessState: "paused", stopReason: "end_turn",
+          });
+          await f.final(params, "Waiting for child settlement");
+        });
+        expect(retained).toBeDefined();
+        expect(f.posts.get("post-1")?.message).toContain("Task progress · In progress");
+        emit(860, { role: "user", display: false, provenance: {
+          kind: "inter_session", sourceSessionKey: child,
+          sourceChannel: "internal", sourceTool: "subagent_settle",
+        }, content: [] });
+        emit(861, { role: "assistant", __openclaw: { runId: successor },
+          stopReason: "stop", content: [{ type: "text", text: "Final delivered separately" }] }, successor);
+        if (retirement === "before") retained!.retire();
+        lifecycle(successor, { phase: "end", stopReason: "stop", executionSettled: true });
+        if (retirement === "after") retained!.retire();
+        await vi.waitFor(() => expect(f.posts.get("post-1")?.message).toContain("Task progress · Completed"));
+        expect(f.posts.get("post-1")?.message).toContain("- [x] Verify candidate");
+        expect(f.posts.get("post-1")?.message).not.toContain("Final delivered separately");
+        expect(f.posts.get("post-1")?.props?.openclaw_mattermost).toMatchObject({ kind: "task_progress" });
+        const writes = f.calls.filter(call => call.path === "/posts/post-1/patch").length;
+        emit(862, { role: "user", provenance: { kind: "internal_system", sourceTool: "exec" }, content: [] });
+        emit(863, { role: "assistant", __openclaw: { runId: "internal-exec" },
+          stopReason: "stop", content: [{ type: "text", text: "NO_REPLY" }] }, "internal-exec");
+        lifecycle("internal-exec", { phase: "end", stopReason: "stop" });
+        for (let i = 0; i < 60; i++) await Promise.resolve();
+        expect(f.calls.filter(call => call.path === "/posts/post-1/patch")).toHaveLength(writes);
+      } finally { retained?.retire(); bridge.stop(); }
+    },
+  );
+
+  it.each(["rest", "companion"] as const)(
+    "removes completed retained execution preview Stop with %s transport",
+    async (transport) => {
+      vi.useFakeTimers();
+      const f = fixture("block", transport);
+      f.monitor.account.config.streaming!.progress!.toolProgress = true;
+      setInteractionSecret("default", "test-token");
+      let previewText: string | null | undefined;
+      await f.run(async (params) => {
+        params.replyOptions?.onAgentRunStart?.("retained-run");
+        await params.replyOptions?.onPlanUpdate?.({
+          steps: [{ step: "Inspect", status: "in_progress" }],
+        });
+        await params.replyOptions?.onItemEvent?.({
+          itemId: "read-1", kind: "tool", name: "read", phase: "start", status: "running",
+        });
+        await vi.advanceTimersByTimeAsync(1200);
+        const preview = f.posts.get("post-2")!;
+        previewText = preview.message;
+        expect(preview.props?.openclaw_preview_stop).toEqual(expect.any(String));
+        await params.replyOptions?.onAssistantMessageStart?.();
+        await params.replyOptions?.onPartialReply?.({ text: "All done." });
+        await vi.advanceTimersByTimeAsync(1200);
+        await params.replyOptions?.onPlanUpdate?.({
+          steps: [{ step: "Inspect", status: "completed" }],
+        });
+        await f.final(params, "All done.");
+      });
+      expect(f.posts.get("post-1")?.message).toContain("Task progress · Completed");
+      expect(f.posts.get("post-2")?.message).toBe(previewText);
+      expect(f.posts.get("post-2")?.props?.openclaw_mattermost).toMatchObject({ kind: "turn_result" });
+      expect(f.posts.get("post-3")?.message).toBe("All done.");
+      for (const id of ["post-2", "post-3"]) {
+        expect(f.posts.get(id)?.props?.attachments).toEqual([]);
+        expect(f.posts.get(id)?.props).not.toHaveProperty("openclaw_preview_stop");
+      }
+      const settled = f.calls.length;
+      await vi.advanceTimersByTimeAsync(2400);
+      expect(f.calls).toHaveLength(settled);
+      expect(f.calls.some((call) => call.method === "DELETE")).toBe(false);
+    },
+  );
+
+  it.each(["rest", "companion"] as const)(
+    "removes completed preview Stop before deletion with %s transport",
+    async (transport) => {
+      vi.useFakeTimers();
+      const f = fixture("progress", transport);
+      f.monitor.account.config.streaming!.progress!.toolProgress = true;
+      setInteractionSecret("default", "test-token");
+      const deleted = new Map<string, MattermostPost>();
+      const request = f.monitor.client.request;
+      f.monitor.client.request = async (path, init) => {
+        const id = path.split("/")[2]!;
+        if (init?.method === "DELETE") {
+          deleted.set(id, structuredClone({ ...f.posts.get(id)!, delete_at: Date.now() }));
+        }
+        // Mattermost soft deletion retains the stored post, but ordinary reads
+        // can omit it. Keep its props at DELETE as the durable cleanup assertion.
+        return await request(path, init);
+      };
+      normalSend.mockImplementationOnce(async () => ({
+        messageId: "final-post", channelId: "channel-1",
+      }) as never);
+      let callback!: Parameters<typeof handleMattermostPreviewStop>[1];
+      await f.run(async (params) => {
+        params.replyOptions?.onAgentRunStart?.("completed-run");
+        await params.replyOptions?.onPlanUpdate?.({
+          steps: [{ step: "Inspect", status: "in_progress" }],
+        });
+        await params.replyOptions?.onItemEvent?.({
+          itemId: "read-1", kind: "tool", name: "read", phase: "start", status: "running",
+        });
+        await vi.advanceTimersByTimeAsync(1200);
+        const preview = f.posts.get("post-2")!;
+        const attachments = preview.props!.attachments as Array<{
+          actions: Array<{ integration: { context: Record<string, unknown> } }>;
+        }>;
+        callback = {
+          context: attachments[0]!.actions[0]!.integration.context,
+          payload: { user_id: "user-1", channel_id: "channel-1", post_id: preview.id },
+          userName: "user-1",
+        };
+        expect(callback.context._token).toEqual(expect.any(String));
+        expect(preview.props?.openclaw_preview_stop).toEqual(expect.any(String));
+        await params.replyOptions?.onPlanUpdate?.({
+          steps: [{ step: "Inspect", status: "completed" }],
+        });
+        await f.final(params, "All done.");
+      });
+      expect(f.posts.get("post-1")?.message).toContain("Task progress · Completed");
+      expect(deleted.get("post-2")?.props?.attachments).toEqual([]);
+      expect(deleted.get("post-2")?.props).not.toHaveProperty("openclaw_preview_stop");
+      const cleanup = f.calls.findIndex((call) =>
+        call.path === "/posts/post-2/patch" && call.body.props !== undefined);
+      const deletion = f.calls.findIndex((call) =>
+        call.path === "/posts/post-2" && call.method === "DELETE");
+      expect(cleanup).toBeGreaterThan(-1);
+      expect(deletion).toBeGreaterThan(cleanup);
+      expect(f.calls.slice(deletion + 1).some((call) => call.path === "/posts/post-2")).toBe(false);
+      expect(await handleMattermostPreviewStop(f.monitor, callback)).toEqual({
+        ephemeral_text: "This Stop button has expired.",
+      });
+      await f.run(async (params) => {
+        params.replyOptions?.onAgentRunStart?.("next-run");
+        expect(await handleMattermostPreviewStop(f.monitor, callback)).toEqual({
+          ephemeral_text: "This Stop button has expired.",
+        });
+        expect(params.replyOptions?.abortSignal?.aborted).toBe(false);
+      });
+    },
+  );
+
+  it.each(["rest", "companion"] as const)(
+    "keeps completion and deletion working when %s Stop cleanup fails",
+    async (transport) => {
+      vi.useFakeTimers();
+      const f = fixture("progress", transport);
+      f.monitor.account.config.streaming!.progress!.toolProgress = true;
+      setInteractionSecret("default", "test-token");
+      const request = f.monitor.client.request;
+      let cleanupAttempts = 0;
+      f.monitor.client.request = async (path, init) => {
+        if (path === "/posts/post-2/patch" && JSON.parse(String(init?.body)).props) {
+          cleanupAttempts++;
+          throw new Error("cleanup rejected");
+        }
+        return await request(path, init);
+      };
+      normalSend.mockImplementationOnce(async () => ({
+        messageId: "final-post", channelId: "channel-1",
+      }) as never);
+      let callback!: Parameters<typeof handleMattermostPreviewStop>[1];
+      await f.run(async (params) => {
+        params.replyOptions?.onAgentRunStart?.("failed-cleanup-run");
+        await params.replyOptions?.onPlanUpdate?.({
+          steps: [{ step: "Inspect", status: "completed" }],
+        });
+        await params.replyOptions?.onItemEvent?.({
+          itemId: "read-1", kind: "tool", name: "read", phase: "start", status: "running",
+        });
+        await vi.advanceTimersByTimeAsync(1200);
+        const preview = f.posts.get("post-2")!;
+        const attachments = preview.props!.attachments as Array<{
+          actions: Array<{ integration: { context: Record<string, unknown> } }>;
+        }>;
+        callback = {
+          context: attachments[0]!.actions[0]!.integration.context,
+          payload: { user_id: "user-1", channel_id: "channel-1", post_id: preview.id },
+          userName: "user-1",
+        };
+        await f.final(params, "All done.");
+      });
+      expect(cleanupAttempts).toBe(1);
+      expect(f.posts.has("post-2")).toBe(false);
+      expect(f.posts.get("post-1")?.message).toContain("Task progress · Completed");
+      expect(normalSend).toHaveBeenCalledOnce();
+      expect(f.monitor.logVerboseMessage).toHaveBeenCalledWith(
+        "mattermost Stop cleanup failed: Error: cleanup rejected",
+      );
+      expect(await handleMattermostPreviewStop(f.monitor, callback)).toEqual({
+        ephemeral_text: "This Stop button has expired.",
+      });
+    },
+  );
+
   it.each([
     { child: "hidden", timing: "before", outcome: "completed" },
     { child: "hidden", timing: "split", outcome: "completed" },
@@ -435,6 +680,7 @@ describe("Mattermost monitor streaming boundaries", () => {
         await f.final(params, "Stopped.");
       });
       expect(f.posts.get("post-1")?.message).toContain("Cancelled");
+      expect(f.posts.get("post-1")?.message).toContain("Task cancelled: you pressed Stop.");
       expect(f.posts.get("post-2")?.message).toBe("Stopped.");
       expect(f.posts.get("post-2")?.props?.attachments).toEqual([]);
       expect(f.calls.filter((call) => call.path.split("?")[0] === "/posts")).toHaveLength(2);

@@ -52,6 +52,31 @@ export function createMattermostPreviewStop(params: {
     if (entry && entries.get(params.sessionKey) === entry) entries.delete(params.sessionKey);
     entry = undefined;
   };
+  const removeFromPost = async (postId: string) => {
+    try {
+      const post = await fetchMattermostPost(monitor.client, postId);
+      if (post.id !== postId || post.channel_id !== params.channelId ||
+          post.user_id !== monitor.botUserId || post.delete_at) return;
+      const attachments = post.props?.attachments;
+      const token = post.props?.[CONTROL];
+      if (!Array.isArray(attachments) || typeof token !== "string" || !tokens.has(token)) return;
+      const next = attachments.flatMap((attachment) => {
+        if (!attachment || typeof attachment !== "object" || !Array.isArray(attachment.actions)) {
+          return [attachment];
+        }
+        const actions = attachment.actions.filter((action: { id?: string }) => action?.id !== ACTION_ID);
+        if (actions.length === attachment.actions.length) return [attachment];
+        const { actions: _actions, text, ...other } = attachment;
+        return actions.length || text || Object.keys(other).length ? [{ ...attachment, actions }] : [];
+      });
+      const props: Record<string, unknown> = { ...post.props, attachments: next };
+      delete props[CONTROL];
+      await updateMattermostPost(monitor.client, postId, { props });
+      posts.delete(postId);
+    } catch (error) {
+      monitor.logVerboseMessage(`mattermost Stop cleanup failed: ${String(error)}`);
+    }
+  };
   return {
     signal: controller.signal,
     get stopped() { return stopped; },
@@ -108,32 +133,12 @@ export function createMattermostPreviewStop(params: {
       };
     },
     notePost(postId: string) { posts.add(postId); },
+    removeFromPost,
     async finish() {
       finished = true;
       retire();
       for (const postId of posts) {
-        try {
-          const post = await fetchMattermostPost(monitor.client, postId);
-          if (post.id !== postId || post.channel_id !== params.channelId ||
-              post.user_id !== monitor.botUserId || post.delete_at) continue;
-          const attachments = post.props?.attachments;
-          const token = post.props?.[CONTROL];
-          if (!Array.isArray(attachments) || typeof token !== "string" || !tokens.has(token)) continue;
-          const next = attachments.flatMap((attachment) => {
-            if (!attachment || typeof attachment !== "object" || !Array.isArray(attachment.actions)) {
-              return [attachment];
-            }
-            const actions = attachment.actions.filter((action: { id?: string }) => action?.id !== ACTION_ID);
-            return actions.length || attachment.text ? [{ ...attachment, actions }] : [];
-          });
-          const props: Record<string, unknown> = { ...post.props, attachments: next };
-          delete props[CONTROL];
-          await updateMattermostPost(monitor.client, postId, {
-            props,
-          });
-        } catch (error) {
-          monitor.logVerboseMessage(`mattermost Stop cleanup failed: ${String(error)}`);
-        }
+        await removeFromPost(postId);
       }
     },
   };
@@ -176,8 +181,8 @@ export async function handleMattermostPreviewStop(
   if (!allowTextCommands || !decision.ok || !decision.commandAuthorized) {
     return { ephemeral_text: "You are not authorized to stop this turn." };
   }
-  // Authorization awaits may outlive replacement, reset, completion or restart.
-  if (!entry.current()) return stale;
+  // Authorization awaits may outlive post retirement, replacement or completion.
+  if (!entry.current() || !entry.ownsPost(interaction.payload.post_id)) return stale;
   entry.abort();
   return { ephemeral_text: "Stop requested." };
 }
