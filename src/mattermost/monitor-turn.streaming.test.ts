@@ -8,7 +8,6 @@ import { resolveMattermostAccount } from "./accounts.js";
 import { sendMattermostTyping, type MattermostClient, type MattermostPost } from "./client.js";
 import { buildMattermostEventPlan } from "./monitor-event-plan.js";
 import { dispatchMattermostInboundTurn } from "./monitor-turn.js";
-import { handleMattermostPreviewStop } from "./preview-stop.js";
 import { setInteractionSecret } from "./interactions.js";
 import { createMattermostReactionLifecycleStore } from "./monitor-turn-reactions.js";
 import { createMattermostTaskCardContinuation } from "./task-card-continuation.js";
@@ -172,7 +171,10 @@ function fixture(
         sendMattermostTyping(client, { channelId, parentId }),
     },
   } as unknown as MattermostMonitorContext;
-  const run = async (next: Script) => {
+  const run = async (
+    next: Script,
+    turnAdoptionLifecycle?: Parameters<typeof dispatchMattermostInboundTurn>[1]["turnAdoptionLifecycle"],
+  ) => {
     script = next;
     const eventPlan = await buildMattermostEventPlan(monitor, {
       channelId: "channel-1",
@@ -191,6 +193,7 @@ function fixture(
       historyKey: null,
       historyLimit: 0,
       pinnedMainDmOwner: null,
+      turnAdoptionLifecycle,
       reactionLifecycleStore: createMattermostReactionLifecycleStore(),
       ackGate: {
         canDetectMention: true,
@@ -208,6 +211,58 @@ function fixture(
 }
 
 describe("Mattermost monitor streaming boundaries", () => {
+  it.each((["rest", "companion"] as const).flatMap(transport =>
+    (["partial", "block", "progress"] as const).map(mode => ({ transport, mode }))))(
+    "keeps $transport $mode previews and task cards free of standalone Stop controls",
+    async ({ transport, mode }) => {
+      vi.useFakeTimers();
+      const f = fixture(mode, transport);
+      f.monitor.account.config.streaming!.progress!.toolProgress = true;
+      setInteractionSecret("default", "test-token");
+      if (mode === "progress") {
+        normalSend.mockImplementationOnce(async () => ({
+          messageId: "final-post", channelId: "channel-1",
+        }) as never);
+      }
+      const expectNoStop = () => {
+        expect(f.posts.size).toBeGreaterThan(0);
+        for (const post of f.posts.values()) {
+          expect(post.props).not.toHaveProperty("openclaw_preview_stop");
+          expect(JSON.stringify(post.props)).not.toContain("openclawstop");
+        }
+        expect(JSON.stringify(f.calls)).not.toContain("openclaw_preview_stop");
+        expect(JSON.stringify(f.calls)).not.toContain("openclawstop");
+      };
+      await f.run(async (params) => {
+        params.replyOptions?.onAgentRunStart?.("run-without-stop");
+        await params.replyOptions?.onPlanUpdate?.({
+          steps: [{ step: "Inspect", status: "in_progress" }],
+        });
+        await params.replyOptions?.onItemEvent?.({
+          itemId: "read-1", kind: "tool", name: "read", phase: "start", status: "running",
+        });
+        await params.replyOptions?.onPartialReply?.({ text: "Working" });
+        await vi.advanceTimersByTimeAsync(1200);
+        expect([...f.posts.values()].some(post =>
+          (post.props?.openclaw_mattermost as { kind?: string })?.kind === "turn_result",
+        )).toBe(true);
+        expectNoStop();
+        await params.replyOptions?.onPlanUpdate?.({
+          steps: [{ step: "Inspect", status: "completed" }],
+        });
+        await f.final(params, "All done.");
+      });
+      expectNoStop();
+      expect(f.posts.get("post-1")?.message).toContain("Task progress · Completed");
+      if (mode === "progress") {
+        expect(normalSend).toHaveBeenCalledOnce();
+        expect(normalSend.mock.calls[0]).toContain("All done.");
+      } else {
+        expect([...f.posts.values()].some(post => post.message === "All done.")).toBe(true);
+      }
+    },
+  );
+
   it.each((["rest", "companion"] as const).flatMap(transport =>
     (["before", "after"] as const).map(retirement => ({ transport, retirement }))))(
     "completes the original card when a native terminal-only settle retires its $transport progress draft $retirement lifecycle publication",
@@ -288,7 +343,7 @@ describe("Mattermost monitor streaming boundaries", () => {
   );
 
   it.each(["rest", "companion"] as const)(
-    "removes completed retained execution preview Stop with %s transport",
+    "retains execution preview text and final identity without controls with %s transport",
     async (transport) => {
       vi.useFakeTimers();
       const f = fixture("block", transport);
@@ -306,7 +361,7 @@ describe("Mattermost monitor streaming boundaries", () => {
         await vi.advanceTimersByTimeAsync(1200);
         const preview = f.posts.get("post-2")!;
         previewText = preview.message;
-        expect(preview.props?.openclaw_preview_stop).toEqual(expect.any(String));
+        expect(preview.props).not.toHaveProperty("openclaw_preview_stop");
         await params.replyOptions?.onAssistantMessageStart?.();
         await params.replyOptions?.onPartialReply?.({ text: "All done." });
         await vi.advanceTimersByTimeAsync(1200);
@@ -320,7 +375,7 @@ describe("Mattermost monitor streaming boundaries", () => {
       expect(f.posts.get("post-2")?.props?.openclaw_mattermost).toMatchObject({ kind: "turn_result" });
       expect(f.posts.get("post-3")?.message).toBe("All done.");
       for (const id of ["post-2", "post-3"]) {
-        expect(f.posts.get(id)?.props?.attachments).toEqual([]);
+        expect(f.posts.get(id)?.props).not.toHaveProperty("attachments");
         expect(f.posts.get(id)?.props).not.toHaveProperty("openclaw_preview_stop");
       }
       const settled = f.calls.length;
@@ -331,27 +386,14 @@ describe("Mattermost monitor streaming boundaries", () => {
   );
 
   it.each(["rest", "companion"] as const)(
-    "removes completed preview Stop before deletion with %s transport",
+    "retires a completed %s execution preview without control cleanup requests",
     async (transport) => {
       vi.useFakeTimers();
       const f = fixture("progress", transport);
       f.monitor.account.config.streaming!.progress!.toolProgress = true;
-      setInteractionSecret("default", "test-token");
-      const deleted = new Map<string, MattermostPost>();
-      const request = f.monitor.client.request;
-      f.monitor.client.request = async (path, init) => {
-        const id = path.split("/")[2]!;
-        if (init?.method === "DELETE") {
-          deleted.set(id, structuredClone({ ...f.posts.get(id)!, delete_at: Date.now() }));
-        }
-        // Mattermost soft deletion retains the stored post, but ordinary reads
-        // can omit it. Keep its props at DELETE as the durable cleanup assertion.
-        return await request(path, init);
-      };
       normalSend.mockImplementationOnce(async () => ({
         messageId: "final-post", channelId: "channel-1",
       }) as never);
-      let callback!: Parameters<typeof handleMattermostPreviewStop>[1];
       await f.run(async (params) => {
         params.replyOptions?.onAgentRunStart?.("completed-run");
         await params.replyOptions?.onPlanUpdate?.({
@@ -361,95 +403,18 @@ describe("Mattermost monitor streaming boundaries", () => {
           itemId: "read-1", kind: "tool", name: "read", phase: "start", status: "running",
         });
         await vi.advanceTimersByTimeAsync(1200);
-        const preview = f.posts.get("post-2")!;
-        const attachments = preview.props!.attachments as Array<{
-          actions: Array<{ integration: { context: Record<string, unknown> } }>;
-        }>;
-        callback = {
-          context: attachments[0]!.actions[0]!.integration.context,
-          payload: { user_id: "user-1", channel_id: "channel-1", post_id: preview.id },
-          userName: "user-1",
-        };
-        expect(callback.context._token).toEqual(expect.any(String));
-        expect(preview.props?.openclaw_preview_stop).toEqual(expect.any(String));
+        expect(f.posts.get("post-2")?.props).not.toHaveProperty("attachments");
         await params.replyOptions?.onPlanUpdate?.({
           steps: [{ step: "Inspect", status: "completed" }],
         });
         await f.final(params, "All done.");
       });
       expect(f.posts.get("post-1")?.message).toContain("Task progress · Completed");
-      expect(deleted.get("post-2")?.props?.attachments).toEqual([]);
-      expect(deleted.get("post-2")?.props).not.toHaveProperty("openclaw_preview_stop");
-      const cleanup = f.calls.findIndex((call) =>
-        call.path === "/posts/post-2/patch" && call.body.props !== undefined);
-      const deletion = f.calls.findIndex((call) =>
-        call.path === "/posts/post-2" && call.method === "DELETE");
-      expect(cleanup).toBeGreaterThan(-1);
-      expect(deletion).toBeGreaterThan(cleanup);
-      expect(f.calls.slice(deletion + 1).some((call) => call.path === "/posts/post-2")).toBe(false);
-      expect(await handleMattermostPreviewStop(f.monitor, callback)).toEqual({
-        ephemeral_text: "This Stop button has expired.",
-      });
-      await f.run(async (params) => {
-        params.replyOptions?.onAgentRunStart?.("next-run");
-        expect(await handleMattermostPreviewStop(f.monitor, callback)).toEqual({
-          ephemeral_text: "This Stop button has expired.",
-        });
-        expect(params.replyOptions?.abortSignal?.aborted).toBe(false);
-      });
-    },
-  );
-
-  it.each(["rest", "companion"] as const)(
-    "keeps completion and deletion working when %s Stop cleanup fails",
-    async (transport) => {
-      vi.useFakeTimers();
-      const f = fixture("progress", transport);
-      f.monitor.account.config.streaming!.progress!.toolProgress = true;
-      setInteractionSecret("default", "test-token");
-      const request = f.monitor.client.request;
-      let cleanupAttempts = 0;
-      f.monitor.client.request = async (path, init) => {
-        if (path === "/posts/post-2/patch" && JSON.parse(String(init?.body)).props) {
-          cleanupAttempts++;
-          throw new Error("cleanup rejected");
-        }
-        return await request(path, init);
-      };
-      normalSend.mockImplementationOnce(async () => ({
-        messageId: "final-post", channelId: "channel-1",
-      }) as never);
-      let callback!: Parameters<typeof handleMattermostPreviewStop>[1];
-      await f.run(async (params) => {
-        params.replyOptions?.onAgentRunStart?.("failed-cleanup-run");
-        await params.replyOptions?.onPlanUpdate?.({
-          steps: [{ step: "Inspect", status: "completed" }],
-        });
-        await params.replyOptions?.onItemEvent?.({
-          itemId: "read-1", kind: "tool", name: "read", phase: "start", status: "running",
-        });
-        await vi.advanceTimersByTimeAsync(1200);
-        const preview = f.posts.get("post-2")!;
-        const attachments = preview.props!.attachments as Array<{
-          actions: Array<{ integration: { context: Record<string, unknown> } }>;
-        }>;
-        callback = {
-          context: attachments[0]!.actions[0]!.integration.context,
-          payload: { user_id: "user-1", channel_id: "channel-1", post_id: preview.id },
-          userName: "user-1",
-        };
-        await f.final(params, "All done.");
-      });
-      expect(cleanupAttempts).toBe(1);
       expect(f.posts.has("post-2")).toBe(false);
-      expect(f.posts.get("post-1")?.message).toContain("Task progress · Completed");
       expect(normalSend).toHaveBeenCalledOnce();
-      expect(f.monitor.logVerboseMessage).toHaveBeenCalledWith(
-        "mattermost Stop cleanup failed: Error: cleanup rejected",
-      );
-      expect(await handleMattermostPreviewStop(f.monitor, callback)).toEqual({
-        ephemeral_text: "This Stop button has expired.",
-      });
+      expect(f.calls.filter(call => call.path === "/posts/post-2" && call.method === "DELETE")).toHaveLength(1);
+      expect(f.calls.some(call => call.path === "/posts/post-2" && call.method === "GET")).toBe(false);
+      expect(f.calls.some(call => call.path === "/posts/post-2/patch" && call.body.props !== undefined)).toBe(false);
     },
   );
 
@@ -648,14 +613,20 @@ describe("Mattermost monitor streaming boundaries", () => {
   );
 
   it.each(["before-result", "after-commentary"] as const)(
-    "keeps a late %s plan above the Stop-owning result and finalizes cancellation",
+    "keeps a late %s plan above the result and finalizes host cancellation",
     async (boundary) => {
       vi.useFakeTimers();
       const f = fixture("partial");
-      f.monitor.cfg.channels!.mattermost!.allowFrom = ["user-1"];
-      setInteractionSecret("default", "test-token");
+      type AgentListener = Parameters<MattermostMonitorContext["core"]["events"]["onAgentEvent"]>[0];
+      let onAgentEvent: AgentListener | undefined;
+      f.monitor.core.events = {
+        onAgentEvent: (listener: AgentListener) => {
+          onAgentEvent = listener;
+          return () => { onAgentEvent = undefined; };
+        },
+      } as never;
       await f.run(async (params) => {
-        params.replyOptions?.onAgentRunStart?.("run-plan-stop");
+        params.replyOptions?.onAgentRunStart?.("run-plan-cancel");
         if (boundary === "after-commentary") {
           await params.replyOptions?.onPartialReply?.({ text: "Early commentary" });
           await vi.advanceTimersByTimeAsync(1200);
@@ -669,20 +640,16 @@ describe("Mattermost monitor streaming boundaries", () => {
         expect(f.posts.get("post-1")?.props?.openclaw_mattermost).toMatchObject({ kind: "task_progress" });
         const result = f.posts.get("post-2")!;
         expect(result.props?.openclaw_mattermost).toMatchObject({ kind: "turn_result" });
-        const attachments = result.props!.attachments as Array<{
-          actions: Array<{ integration: { context: Record<string, unknown> } }>;
-        }>;
-        expect(await handleMattermostPreviewStop(f.monitor, {
-          context: attachments[0]!.actions[0]!.integration.context,
-          payload: { user_id: "user-1", channel_id: "channel-1", post_id: result.id },
-          userName: "user-1",
-        })).toEqual({ ephemeral_text: "Stop requested." });
+        expect(result.props).not.toHaveProperty("attachments");
+        onAgentEvent?.({
+          runId: "run-plan-cancel", stream: "lifecycle", data: { phase: "end", aborted: true },
+        });
         await f.final(params, "Stopped.");
       });
       expect(f.posts.get("post-1")?.message).toContain("Cancelled");
-      expect(f.posts.get("post-1")?.message).toContain("Task cancelled: you pressed Stop.");
+      expect(f.posts.get("post-1")?.message).toContain("Task cancelled; reason unavailable.");
       expect(f.posts.get("post-2")?.message).toBe("Stopped.");
-      expect(f.posts.get("post-2")?.props?.attachments).toEqual([]);
+      expect(f.posts.get("post-2")?.props).not.toHaveProperty("attachments");
       expect(f.calls.filter((call) => call.path.split("?")[0] === "/posts")).toHaveLength(2);
       const writes = f.calls.filter((call) => call.method === "PUT");
       expect(writes.some((call) => call.path === "/posts/post-2/patch" && call.body.message === "Stopped.")).toBe(true);
@@ -690,32 +657,35 @@ describe("Mattermost monitor streaming boundaries", () => {
   );
 
   it.each(["rest", "companion"] as const)(
-    "emits a signed Stop for the owned run and removes it after %s delivery",
+    "preserves ingress cancellation without adding controls to a planless %s reply",
     async (transport) => {
       vi.useFakeTimers();
       const f = fixture("partial", transport);
-      f.monitor.cfg.channels!.mattermost!.allowFrom = ["user-1"];
-      setInteractionSecret("default", "test-token");
+      const controller = new AbortController();
+      const lifecycle = {
+        abortSignal: controller.signal,
+        onAdopted: vi.fn(), onDeferred: vi.fn(),
+        onAdoptionFinalizing: vi.fn(), onAbandoned: vi.fn(),
+      };
       await f.run(async (params) => {
-        params.replyOptions?.onAgentRunStart?.("run-stop");
+        params.replyOptions?.onAgentRunStart?.("planless-run");
         await params.replyOptions?.onPartialReply?.({ text: "Working" });
         await vi.advanceTimersByTimeAsync(1200);
         const post = f.posts.get("post-1")!;
-        const attachments = post.props!.attachments as Array<{
-          actions: Array<{ integration: { context: Record<string, unknown> } }>;
-        }>;
-        const result = await handleMattermostPreviewStop(f.monitor, {
-          context: attachments[0]!.actions[0]!.integration.context,
-          payload: { user_id: "user-1", channel_id: "channel-1", post_id: post.id },
-          userName: "user-1",
-        });
-        expect(result).toEqual({ ephemeral_text: "Stop requested." });
-        expect(params.replyOptions?.abortSignal?.aborted).toBe(true);
+        expect(post.props).not.toHaveProperty("attachments");
+        expect(post.props).not.toHaveProperty("openclaw_preview_stop");
+        const adoption = params.replyOptions?.turnAdoptionLifecycle;
+        expect(adoption?.abortSignal).toBe(controller.signal);
+        await adoption?.onAbandoned?.();
+        expect(lifecycle.onAbandoned).toHaveBeenCalledOnce();
+        expect(adoption?.onSettled).toEqual(expect.any(Function));
+        controller.abort();
+        expect(adoption?.abortSignal?.aborted).toBe(true);
         await f.final(params, "Stopped.");
-      });
+      }, lifecycle);
       expect(f.posts.get("post-1")!.message).toBe("Stopped.");
-      expect(f.posts.get("post-1")!.props!.attachments).toEqual([]);
-      expect(f.calls.filter((call) => call.path.split("?")[0] === "/posts")).toHaveLength(1);
+      expect(f.posts.get("post-1")!.props).not.toHaveProperty("attachments");
+      expect(f.calls.filter(call => call.path.split("?")[0] === "/posts")).toHaveLength(1);
     },
   );
   it.each(["rest", "companion"] as const)(

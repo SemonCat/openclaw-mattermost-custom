@@ -778,7 +778,6 @@ export function createMattermostTaskProgressCard(params: {
       settleBeforeResultPost(true),
     finish: async (result: {
       outcome?: "completed" | "failed" | "cancelled";
-      stoppedByOwner?: boolean;
       deliveryFailed?: boolean;
       isCurrent?: () => boolean;
     }): Promise<void> => {
@@ -809,8 +808,7 @@ export function createMattermostTaskProgressCard(params: {
         revision: ++nextRevision,
         status: status ?? "in_progress",
         terminalNote: status === "cancelled"
-          ? result.stoppedByOwner ? "Task cancelled: you pressed Stop."
-            : lifecycleTerminalNote ?? cancellationNote(undefined)
+          ? lifecycleTerminalNote ?? cancellationNote(undefined)
           : status === "failed" ? lifecycleTerminalNote : undefined,
         workSessions: listWorkSessions(),
       };

@@ -174,7 +174,7 @@ export function registerMattermostInteractions(params: {
         ? questionDialog.handleSubmission(payload)
         : secretDialog.handleSubmission(payload),
     handleInteraction: async (interaction) =>
-      (await handleMattermostPreviewStop(monitor, interaction)) ??
+      handleMattermostPreviewStop(interaction) ??
       (await handleApprovalInteraction(interaction)) ??
       (await handleQuestionInteraction(interaction)) ??
       (await params.handleModelPickerInteraction(interaction)),

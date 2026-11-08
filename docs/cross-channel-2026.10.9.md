@@ -67,6 +67,10 @@ Slack、Discord、Telegram、Feishu、Google Chat、Synology Chat 與 Tlon 在�
 
 ## 已選定的實作
 
+2026-11-08 更新：下列 Preview Stop 是 10.9 當時的實作紀錄。現已移除獨立
+Stop 按鈕與其取消控制，改用原生 `/stop`；舊 callback 僅回覆已失效，
+不會取消工作或觸發新 turn。其餘功能維持原有行為。
+
 四項候選均已實作於這次 10.9 candidate；它們參考其他 channel 的既有模式，
 並非宣稱上游 10.9 新增這些功能。
 

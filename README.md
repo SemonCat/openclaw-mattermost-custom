@@ -99,7 +99,6 @@ Compared with the official plugin, this build preserves:
   `mattermost_form` tool for checkbox groups and row/column matrices.
 - Durable interactive callback admission and replay across Gateway restarts.
 - Bounded Mattermost thread and top-level room history recovery after Gateway restart or session reset.
-- Signed preview Stop controls bound to the source user and current turn.
 - Durable edit/delete notices for existing channel and thread sessions.
 - The Mattermost slash-trigger length cap fix.
 - Mention-prefixed text commands such as `@bot /new`, without debounce or prose misrouting.
@@ -587,22 +586,11 @@ or an oversized save rejects the result and removes any unclaimed temporary
 file. Images return host image content; other files return a local media result
 for analysis. Metadata reads do not automatically download files.
 
-### Preview Stop
+### Stopping a turn
 
-REST and companion previews offer a signed Stop button after the source turn
-starts executing. Only the original sender can use it, subject to current
-Mattermost command authorization. It cancels the source-owned SDK abort signal,
-including its deferred lifecycle, and never looks up a replacement run to abort
-by session ID.
-
-Controls expire on completion, replacement, session reset or Gateway restart.
-Durable stale callback replay is consumed without starting another agent turn.
-Cleanup removes only that turn's Stop control, preserving final text and other
-post properties. Preview retirement removes the control before deleting the post,
-so a cached deleted preview does not retain Stop after successful cleanup.
-Task-card handoff keeps the card above the result; a stopped
-turn leaves its plan card cancelled. If a provider cleanup request fails, a
-visible button can remain but is already inert.
+Use the native `/stop` command to stop work. REST and companion previews do not
+add a standalone Stop button. Legacy buttons on older posts return an expired
+response without cancelling a run or starting another agent turn.
 
 ### Referenced attachment content
 
@@ -829,10 +817,10 @@ terminal state. Turns without a plan
 do not create an extra post. Card API failures are isolated from final-answer
 delivery and use bounded create fallback to avoid duplicate posts.
 
-Cancelled cards include a reason when it is evidenced: a validated local Stop
-callback, or the host's stable `restart` or `superseded` stop reason. A generic
-abort says `Task cancelled; reason unavailable.` It does not imply that a person
-pressed Stop. Raw exceptions and arbitrary reason text are never copied to the
+Cancelled cards include a reason when evidenced by the host's stable `restart`
+or `superseded` stop reason. A generic abort says
+`Task cancelled; reason unavailable.` It does not attribute cancellation to a
+person. Raw exceptions and arbitrary reason text are never copied to the
 card. Explicit timeout facts take precedence over a mechanical abort and render
 Failed with a timeout note. These notes use the existing Markdown/explanation
 payload, so web, desktop, mobile and Markdown fallback show the same information.

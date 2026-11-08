@@ -116,9 +116,6 @@ export function createMattermostDraftStream(params: {
   initialPost?: { id: string; message?: string | null; silent?: boolean };
   silentProgress?: boolean;
   postProps?: Record<string, unknown>;
-  resolvePostProps?: () => Record<string, unknown> | undefined;
-  onPostCreated?: (postId: string) => void;
-  beforeDeletePost?: (postId: string) => void | Promise<void>;
   maxChars?: number;
   throttleMs?: number;
   companion?: boolean;
@@ -173,11 +170,8 @@ export function createMattermostDraftStream(params: {
           message,
           rootId: params.rootId,
           silent,
-          props: params.resolvePostProps
-            ? { ...params.postProps, ...params.resolvePostProps() }
-            : params.postProps,
+          props: params.postProps,
         });
-    params.onPostCreated?.(sent.id);
     return sent;
   };
   const updateCompanion = (target: DraftGeneration) => {
@@ -282,9 +276,6 @@ export function createMattermostDraftStream(params: {
   const isValidMessageId = (value: unknown): value is string =>
     typeof value === "string" && value.length > 0;
   const deleteMessage = async (postId: string) => {
-    // A deleted preview can remain in client caches. Retire its controls while
-    // it is still readable/editable, after the producer has stopped writing.
-    await params.beforeDeletePost?.(postId);
     await deleteMattermostPreview(params.client, postId);
   };
   const {
