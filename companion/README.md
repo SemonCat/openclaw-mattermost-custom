@@ -21,6 +21,9 @@ the root OpenClaw npm artifact does not include it.
 - Mattermost's persisted `post.message` remains the fallback and authority.
   Mobile clients and clients without this web plugin continue to see REST
   checkpoints and the final persisted message.
+- On mount or reconnect, a persisted-post 404 removes the obsolete custom stream
+  row from the web client's store. A missing snapshot alone, temporary read
+  failures, and newer cached edits retain their existing fallback.
 
 ## Task progress cards
 

@@ -15,21 +15,24 @@
         return `${siteURL()}/plugins/${pluginID}/v1${path}`;
     }
 
-    async function getJSON(url) {
+    async function getJSON(url, onNotFound) {
         const response = await window.fetch(url, {
             credentials: 'same-origin',
             headers: {Accept: 'application/json'},
             cache: 'no-store',
         });
         if (!response.ok) {
+            if (response.status === 404) {
+                onNotFound?.();
+            }
             return null;
         }
         return response.json();
     }
 
-    async function readPersistedPost(postID, onRead) {
+    async function readPersistedPost(postID, onRead, onMissing) {
         try {
-            const persisted = await getJSON(`${siteURL()}/api/v4/posts/${encodeURIComponent(postID)}`);
+            const persisted = await getJSON(`${siteURL()}/api/v4/posts/${encodeURIComponent(postID)}`, onMissing);
             if (persisted && persisted.id === postID && typeof persisted.message === 'string') {
                 onRead(persisted);
             }
@@ -46,11 +49,26 @@
 
         React.useEffect(() => {
             let active = true;
-            const refreshPersisted = () => readPersistedPost(post.id, (latest) => {
-                if (active) {
-                    setPersistedPost(latest);
-                }
-            });
+            let readSequence = 0;
+            const refreshPersisted = () => {
+                const sequence = ++readSequence;
+                const cachedPost = mattermostStore?.getState?.()?.entities?.posts?.posts?.[post.id];
+                const isCurrent = () => active && sequence === readSequence;
+                return readPersistedPost(post.id, (latest) => {
+                    if (isCurrent()) {
+                        setPersistedPost(latest);
+                    }
+                }, () => {
+                    // Snapshot absence only ends the overlay. A persisted-post 404
+                    // also retires its cached row using Mattermost's postRemoved contract.
+                    // Do not evict a newer edit, identity handoff, or refresh result.
+                    if (isCurrent() && cachedPost?.type === postType &&
+                        mattermostStore?.getState?.()?.entities?.posts?.posts?.[post.id] === cachedPost) {
+                        streamStore.forget(post.id);
+                        mattermostStore.dispatch({type: 'POST_REMOVED', data: cachedPost});
+                    }
+                });
+            };
             const refresh = async () => {
                 try {
                     const current = await getJSON(pluginURL(`/posts/${encodeURIComponent(post.id)}`));
