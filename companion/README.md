@@ -27,6 +27,40 @@ the root OpenClaw npm artifact does not include it.
 
 ## Task progress cards
 
+Version 0.4.0 starts task details and bounded subagent summaries collapsed.
+The visible header retains the task status and completion summary. The web
+renderer uses an uncontrolled native HTML disclosure, so each reader's toggle
+survives progress and terminal updates while that row remains mounted. Reloading
+or remounting starts closed again; toggles never edit a shared Mattermost post.
+
+Already publishable non-final commentary, tool summaries and streamed drafts
+also use collapsed **Work details**, with either REST or companion transport.
+Final delivery removes the work presentation and shows the answer directly,
+including when the answer text has not changed. Neither the channel nor companion
+reads child transcripts or enables additional progress disclosure.
+
+Native reads project a `collapsible` Block plus a complete legacy attachment
+fallback; clients rendering Blocks select it ahead of the attachment. The
+stored Markdown stays complete. Work snapshots above 15,000 UTF-8 bytes use
+plain Markdown; larger task cards retain their existing attachment fallback.
+The native projection uses three blocks, below the 100-block limit, with room
+for the header below the combined 16,000-character text limit. Official mobile
+collapse and production client compatibility remain unverified. See
+[the compatibility and acceptance notes](../docs/collapsible-progress.md).
+
+Version 0.4.1 makes the web **Work details** control visibly actionable with a
+persistent chevron, an Expand/Collapse hint, and theme-aware background, border,
+hover and keyboard focus styling. It keeps the native per-reader disclosure
+state and streaming DOM identity. This companion-only patch needs no channel
+package reinstall.
+
+Version 0.4.2 separates the native mobile post status/title from its disclosure
+label: task cards use **Plan details**, and work posts use **Activity**. Expanded
+task Blocks omit only the generated leading status heading and its separating
+newline; authored details, canonical stored Markdown, attachment fallbacks and
+edit metadata stay intact. Web rendering and the 0.4.1 affordance are unchanged.
+Heading-only task snapshots keep the attachment fallback without an empty disclosure.
+
 Version 0.2.0 renders plan-backed cards with blue completion checks, an animated
 current step, terminal status, subtask links, and the server's last update time.
 Colors follow the Mattermost theme; narrow web layouts and reduced motion are
@@ -96,7 +130,7 @@ GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org go test ./server
 GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org node scripts/package.mjs
 ```
 
-The package script writes `companion/build/openclaw-stream-0.3.0.tar.gz`
+The package script writes `companion/build/openclaw-stream-0.4.2.tar.gz`
 relative to the Git repository root. It includes
 Linux amd64/arm64 and macOS amd64/arm64 server binaries plus the web bundle.
 Install the archive through Mattermost's normal plugin administration flow.

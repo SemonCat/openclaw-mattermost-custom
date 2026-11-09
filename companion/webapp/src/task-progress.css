@@ -13,6 +13,62 @@
     gap: 8px 16px;
     margin-bottom: 14px;
 }
+.oc-task-card > summary, .oc-work-details > summary {
+    cursor: pointer;
+    overflow-wrap: anywhere;
+}
+.oc-task-card > summary::before { content: '▸'; }
+.oc-task-card[open] > summary::before { content: '▾'; }
+.oc-task-card > summary:focus-visible, .oc-work-details > summary:focus-visible {
+    outline: 2px solid var(--link-color, #168fbd);
+    outline-offset: 3px;
+}
+.oc-work-details {
+    color: var(--center-channel-color, #3f4350);
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+.oc-work-details > summary {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 100%;
+    padding: 5px 9px;
+    border: 1px solid rgba(var(--center-channel-color-rgb, 63, 67, 80), 0.16);
+    border-radius: 6px;
+    background: rgba(var(--center-channel-color-rgb, 63, 67, 80), 0.04);
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1.5;
+    list-style: none;
+}
+.oc-work-details > summary::-webkit-details-marker { display: none; }
+.oc-work-details > summary::marker { content: ''; }
+.oc-work-details > summary::before {
+    content: '';
+    flex: 0 0 6px;
+    width: 6px;
+    height: 6px;
+    margin-right: 2px;
+    border: solid currentColor;
+    border-width: 0 1.5px 1.5px 0;
+    transform: rotate(-45deg);
+}
+.oc-work-details[open] > summary::before { transform: rotate(45deg); }
+.oc-work-details > summary::after {
+    content: 'Expand';
+    margin-left: 4px;
+    color: rgba(var(--center-channel-color-rgb, 63, 67, 80), 0.8);
+    font-size: 12px;
+    font-weight: 400;
+}
+.oc-work-details[open] > summary::after { content: 'Collapse'; }
+.oc-work-details > summary:hover, .oc-work-details > summary:focus-visible {
+    border-color: rgba(var(--center-channel-color-rgb, 63, 67, 80), 0.28);
+    background: rgba(var(--center-channel-color-rgb, 63, 67, 80), 0.08);
+}
+.oc-work-details[open] > summary { margin-bottom: 8px; }
+.oc-task-heading .oc-task-summary { margin: 0; }
 .oc-task-card .oc-task-title {
     margin: 0;
     font-size: 18px;

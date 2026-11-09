@@ -34,7 +34,7 @@ function text(tree) {
 
 test('renders checklist status, safe session link, summary and server update time', () => {
     const tree = renderCard(React, makePost(), (text) => text);
-    assert.match(text(tree), /Review PRWorkingRead diffRun tests/);
+    assert.match(text(tree), /Review PRWorking1 of 2 steps completedRead diffRun tests/);
     assert.match(text(tree), /1 of 2 steps completed/);
     assert.equal(nodes(tree, (n) => n.props?.className?.includes('oc-task-icon--spin')).length, 2);
     assert.equal(nodes(tree, (n) => n.tag === 'a')[0].props.href, 'https://dev.example/session');
@@ -141,7 +141,7 @@ test('plugin registers a dedicated task renderer and includes its CSS in the shi
         registerPostTypeComponent: (type) => types.push(type),
         registerWebSocketEventHandler: () => {}, registerReconnectHandler: () => {},
     }, {getState: () => ({})});
-    assert.deepEqual(types, ['custom_openclaw_stream', 'custom_openclaw_task']);
+    assert.deepEqual(types, ['custom_openclaw_stream', 'custom_openclaw_task', 'custom_openclaw_work']);
     assert.match(browser.OpenClawTaskProgressCSS, /prefers-reduced-motion/);
     assert.match(browser.OpenClawTaskProgressCSS, /center-channel-color/);
 });

@@ -42,6 +42,11 @@ func TestNativeTaskProjectionAndWriteback(t *testing.T) {
 		t.Fatal("consumption must project only the visible body, without mutating storage")
 	}
 	attachment := projected.Props["attachments"].([]any)[0].(map[string]any)
+	block := projected.Props["mm_blocks"].([]any)[0].(map[string]any)
+	if block["type"] != "collapsible" || block["collapsed"] != true ||
+		block["content"].([]any)[0].(map[string]any)["text"] != strings.TrimPrefix(input.Message, "#### Task progress · In progress\n") {
+		t.Fatal("native task details must start closed and contain the canonical checklist once")
+	}
 	raw, _ := json.Marshal(attachment)
 	if !strings.Contains(string(raw), "✓ Read diff") || !strings.Contains(string(raw), "▶ Run tests") ||
 		!strings.Contains(string(raw), "https://example.test/a%28b%29") {
@@ -52,7 +57,8 @@ func TestNativeTaskProjectionAndWriteback(t *testing.T) {
 		incoming.Message = "#### Task progress · " + status
 		updated, reason := p.MessageWillBeUpdated(nil, incoming, stored)
 		if reason != "" || updated.Message != strings.Replace(input.Message, "In progress", status, 1) ||
-			!emptyTaskAttachments(updated.Props["attachments"]) || updated.Props[taskMobileProp] != nil {
+			!emptyTaskAttachments(updated.Props["attachments"]) || updated.Props[taskMobileProp] != nil ||
+			updated.Props["mm_blocks"] != nil {
 			t.Fatalf("projection roundtrip %s lost canonical content: %s", status, reason)
 		}
 		visible := p.MessagesWillBeConsumed([]*model.Post{updated})[0]

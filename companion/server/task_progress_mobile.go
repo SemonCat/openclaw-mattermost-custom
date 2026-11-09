@@ -172,6 +172,10 @@ func (p *Plugin) MessagesWillBeConsumed(posts []*model.Post) []*model.Post {
 		if post == nil {
 			continue
 		}
+		if projected := p.projectWorkDetails(post); projected != post {
+			out[i] = projected
+			continue
+		}
 		if _, exists := post.Props["attachments"]; !exists || !emptyTaskAttachments(post.Props["attachments"]) {
 			continue
 		}
@@ -183,6 +187,13 @@ func (p *Plugin) MessagesWillBeConsumed(posts []*model.Post) []*model.Post {
 		copy.Message = taskMobileHeading(post.Message)
 		copy.AddProp(taskMobileProp, map[string]any{"version": float64(1), "source_message": post.Message})
 		copy.AddProp("attachments", []any{nativeTaskAttachment(card)})
+		// Longer cards and heading-only tasks retain the attachment fallback. Native
+		// Blocks permit 16,000 combined text characters, including the header.
+		// Strip only the validated generated heading and its single newline.
+		content := strings.TrimPrefix(post.Message, taskHeading.FindString(post.Message))
+		if len(post.Message) <= 15000 && content != "" {
+			copy.AddProp("mm_blocks", collapsedWorkBlocks("Plan details", content))
+		}
 		out[i] = copy
 	}
 	return out
@@ -222,6 +233,7 @@ func (p *Plugin) restoreTaskProjection(post, old *model.Post) (*model.Post, stri
 	copy := post.Clone()
 	copy.Message = canonical
 	copy.DelProp(taskMobileProp)
+	copy.DelProp("mm_blocks")
 	copy.AddProp("attachments", []any{})
 	return copy, ""
 }

@@ -39,6 +39,7 @@ export function retainMattermostProgressDraft(params: {
     rootId: params.rootId,
     initialPost: { id: params.postId, message: params.text, silent: params.silent },
     silentProgress: true,
+    workDetails: true,
     maxChars: params.maxChars,
     throttleMs: 1200,
     warn: params.log,

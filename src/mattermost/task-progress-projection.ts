@@ -10,6 +10,19 @@ export function restoreMattermostTaskMessage<T extends {
   user_id?: string | null;
   props?: Record<string, unknown> | null;
 }>(post: T, botUserId: string): T {
+  const work = post.props?.openclaw_work_details as Record<string, unknown> | undefined;
+  const projection = post.props?.openclaw_work_projection as Record<string, unknown> | undefined;
+  const workIdentity = post.props?.openclaw_mattermost as Record<string, unknown> | undefined;
+  if (botUserId && post.user_id === botUserId &&
+      ["custom_openclaw_work", "custom_openclaw_stream"].includes(post.type ?? "") &&
+      workIdentity?.version === 1 && workIdentity.kind === "turn_result" &&
+      workIdentity.channelId === post.channel_id &&
+      (workIdentity.threadId ?? "") === (post.root_id ?? "") &&
+      work?.version === 1 && projection?.version === 1 &&
+      typeof work.source_message === "string" && work.source_message.length <= 15_000 &&
+      projection.source_message === work.source_message && post.message === "Work details") {
+    return { ...post, message: work.source_message };
+  }
   const marker = post.props?.openclaw_task_mobile as Record<string, unknown> | undefined;
   const card = post.props?.openclaw_task_progress as Record<string, unknown> | undefined;
   const identity = post.props?.openclaw_mattermost as Record<string, unknown> | undefined;

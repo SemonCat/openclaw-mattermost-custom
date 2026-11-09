@@ -208,6 +208,7 @@ describe("deliverMattermostReplyWithDraftPreview", () => {
       expect.anything(),
       "preview-post-1",
       "All good",
+      "final",
     );
     expect(deliverFinal).not.toHaveBeenCalled();
     expect(recordThreadParticipation).toHaveBeenCalledTimes(1);
@@ -491,6 +492,7 @@ describe("deliverMattermostReplyWithDraftPreview", () => {
       expect.anything(),
       "preview-post-1",
       "Spoken answer",
+      "final",
     );
     expect(draftStream.discardPending).not.toHaveBeenCalled();
     expect(draftStream.clear).not.toHaveBeenCalled();

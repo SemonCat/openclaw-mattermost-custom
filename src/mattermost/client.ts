@@ -1,4 +1,5 @@
 // Mattermost plugin module implements client behavior.
+import { isDeepStrictEqual } from "node:util";
 import { bufferToBlobPart } from "openclaw/plugin-sdk/blob-runtime";
 import { createChannelPartialDeliveryError } from "openclaw/plugin-sdk/channel-inbound";
 import {
@@ -31,6 +32,7 @@ import {
 } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { z } from "zod";
 import { observeMattermostServerVersion } from "./text-limits.js";
+import { mattermostWorkDetailsProps } from "./work-details.js";
 
 const MATTERMOST_ERROR_BODY_LIMIT_BYTES = 8 * 1024;
 const MATTERMOST_REQUEST_TIMEOUT_MS = 30_000;
@@ -1004,7 +1006,10 @@ export async function createMattermostPost(
       { messageIds: [], visibleReplySent: true },
     );
   }
-  return postId === post.id ? post : { ...post, id: postId };
+  const projection = post.props?.openclaw_work_projection as Record<string, unknown> | undefined;
+  const canonical = projection?.version === 1 && post.message === "Work details" &&
+    projection.source_message === params.message ? { ...post, message: params.message } : post;
+  return postId === canonical.id ? canonical : { ...canonical, id: postId };
 }
 
 type MattermostTeam = {
@@ -1050,21 +1055,56 @@ export async function updateMattermostPost(
 }
 
 /**
- * Confirm a message-only edit after an ambiguous provider error. A matching read-back
- * proves that the requested edit committed and prevents a duplicate fallback post.
+ * Reconcile an ambiguous edit only when both text and requested presentation
+ * match. Same-text promotion still has to remove the old work presentation.
  */
 export async function updateMattermostPostMessageWithReadback(
   client: MattermostClient,
   postId: string,
   message: string,
+  presentation?: "work" | "final",
 ): Promise<MattermostPost> {
+  let props: Record<string, unknown> | undefined;
+  let removedProjection = false;
+  if (presentation) {
+    const current = await fetchMattermostPost(client, postId);
+    props = { ...current.props };
+    // Only these props belong to the work-details projection. Keep stream generation,
+    // identity and other provider props intact when promoting an answer.
+    if (props.openclaw_work_projection) {
+      removedProjection = true;
+      delete props.attachments;
+      delete props.mm_blocks;
+    }
+    delete props.openclaw_work_projection;
+    delete props.openclaw_work_details;
+    if (presentation === "work") {
+      const details = mattermostWorkDetailsProps(message);
+      if (details) props.openclaw_work_details = details;
+    }
+  }
   try {
-    return await updateMattermostPost(client, postId, { message });
+    const post = await updateMattermostPost(client, postId, { message, ...(props ? { props } : {}) });
+    const projection = post.props?.openclaw_work_projection as Record<string, unknown> | undefined;
+    return presentation === "work" && post.message === "Work details" &&
+      projection?.version === 1 && projection.source_message === message
+      ? { ...post, message } : post;
   } catch (error: unknown) {
     try {
       const post = await fetchMattermostPost(client, postId);
-      if (post.message === message) {
-        return post;
+      const projection = post.props?.openclaw_work_projection as Record<string, unknown> | undefined;
+      const work = post.props?.openclaw_work_details as Record<string, unknown> | undefined;
+      const projectedWork = presentation === "work" && post.message === "Work details" &&
+          projection?.version === 1 && work?.version === 1 &&
+          projection.source_message === message && work.source_message === message;
+      const matchesPresentation = !presentation || (
+        isDeepStrictEqual(work, props?.openclaw_work_details) &&
+        (projectedWork || post.props?.openclaw_work_projection === undefined) &&
+        (!removedProjection || presentation === "work" ||
+          (post.props?.mm_blocks === undefined && post.props?.attachments === undefined))
+      );
+      if ((post.message === message || projectedWork) && matchesPresentation) {
+        return projectedWork ? { ...post, message } : post;
       }
     } catch {
       // Preserve the original edit error; read-back is only reconciliation evidence.

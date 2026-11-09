@@ -1130,6 +1130,53 @@ describe("updateMattermostPost", () => {
 });
 
 describe("updateMattermostPostMessageWithReadback", () => {
+  it.each(["canonical", "projected", "orphaned-projection", "orphaned-blocks"])(
+    "rejects same-text unaccepted final promotion with %s old presentation",
+    async (kind) => {
+      const message = "Final answer";
+      const work = {version: 1, source_message: message};
+      const current = {
+        id: "post1", message: "Work details",
+        props: {
+          openclaw_work_details: work,
+          openclaw_work_projection: work,
+          mm_blocks: [{type: "collapsible"}],
+          attachments: [{text: message}],
+          openclaw_stream: {version: 1, generation: "keep"},
+        },
+      };
+      const old = kind === "projected" ? current : {
+        ...current, message, props: kind === "canonical" ? {openclaw_work_details: work} :
+          kind === "orphaned-projection" ? {openclaw_work_projection: work} : {mm_blocks: [{}]},
+      };
+      const editError = new Error("PATCH rejected before acceptance");
+      const fetchImpl = vi.fn<typeof fetch>()
+        .mockResolvedValueOnce(Response.json(current))
+        .mockRejectedValueOnce(editError)
+        .mockResolvedValueOnce(Response.json(old));
+      const client = createMattermostClient({baseUrl: "http://localhost:8065", botToken: "tok", fetchImpl});
+      await expect(updateMattermostPostMessageWithReadback(client, "post1", message, "final"))
+        .rejects.toBe(editError);
+      const patch = JSON.parse(fetchImpl.mock.calls[1]?.[1]?.body as string);
+      expect(patch.props).toEqual({openclaw_stream: {version: 1, generation: "keep"}});
+      expect(fetchImpl.mock.calls.map(([, init]) => init?.method ?? "GET")).toEqual(["GET", "PUT", "GET"]);
+    },
+  );
+
+  it.each(["final", "work"] as const)("accepts confirmed same-text %s presentation after a lost PATCH response", async (presentation) => {
+    const message = "Same text";
+    const work = {version: 1, source_message: message};
+    const before = {id: "post1", message, props: {openclaw_work_details: work}};
+    const after = presentation === "final" ? {id: "post1", message, props: {}} :
+      {id: "post1", message: "Work details", props: {openclaw_work_details: work, openclaw_work_projection: work}};
+    const fetchImpl = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(before))
+      .mockRejectedValueOnce(new Error("lost PATCH response"))
+      .mockResolvedValueOnce(Response.json(after));
+    const client = createMattermostClient({baseUrl: "http://localhost:8065", botToken: "tok", fetchImpl});
+    await expect(updateMattermostPostMessageWithReadback(client, "post1", message, presentation))
+      .resolves.toMatchObject({message});
+  });
   it("accepts an ambiguous edit error when provider read-back already matches", async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()

@@ -25,6 +25,7 @@ import {
 } from "./client.js";
 import { buildMattermostSecretPromptButton } from "./secret-dialog.js";
 import type { MattermostSendResult } from "./send.js";
+import { buildMattermostPostIdentityProps } from "./post-identity.js";
 
 type MarkdownTableMode = Parameters<PluginRuntime["channel"]["text"]["convertMarkdownTables"]>[1];
 
@@ -41,6 +42,8 @@ type SendMattermostMessage = (
     replyToId?: string;
     buttons?: Array<unknown>;
     questionId?: string;
+    props?: Record<string, unknown>;
+    workDetails?: boolean;
     onDmChannelResolution?: (resolution: PromiseLike<unknown>) => void;
   },
 ) => Promise<MattermostSendResult>;
@@ -128,6 +131,7 @@ export async function deliverMattermostReplyPayload(params: {
   tableMode: MarkdownTableMode;
   sendMessage: SendMattermostMessage;
   onDmChannelResolution?: (resolution: PromiseLike<unknown>) => void;
+  workDetails?: boolean;
 }): Promise<MattermostReplyDeliveryResult> {
   if (isReasoningReplyPayload(params.payload)) {
     return {
@@ -168,6 +172,15 @@ export async function deliverMattermostReplyPayload(params: {
         : {}),
       ...(results.length === 0 && questionId ? { questionId } : {}),
       replyToId: params.replyToId,
+      ...((params.workDetails || params.payload.isCommentary) && !mediaUrl && !mediaUrls?.length &&
+        !buttons.length && !params.payload.presentation && !params.payload.interactive ? {
+          workDetails: true,
+          props: buildMattermostPostIdentityProps("turn_result", {
+            accountId: params.accountId, agentId: params.agentId ?? "main",
+            channelId: params.channelId,
+            ...(params.replyToId ? {threadId: params.replyToId} : {}),
+          }),
+        } : {}),
       ...(params.onDmChannelResolution
         ? { onDmChannelResolution: params.onDmChannelResolution }
         : {}),

@@ -108,10 +108,11 @@
 
         const updatedAt = post.update_at || post.create_at;
         const updated = Number.isFinite(updatedAt) && updatedAt > 0 ? new Date(updatedAt) : null;
-        return h('section', {className: 'oc-task-card', 'aria-label': card.title || 'Task progress'},
-            h('div', {className: 'oc-task-heading'},
+        return h('details', {className: 'oc-task-card', key: post.id, 'aria-label': card.title || 'Task progress'},
+            h('summary', {className: 'oc-task-heading'},
                 h('h3', {className: 'oc-task-title'}, card.title || 'Task progress'),
-                h('span', {className: `oc-task-status oc-task-status--${card.status}`}, labels[card.status])),
+                h('span', {className: `oc-task-status oc-task-status--${card.status}`}, labels[card.status]),
+                h('span', {className: 'oc-task-summary', role: 'status'}, summary)),
             card.explanation ? h('div', {className: 'oc-task-explanation'}, markdown(card.explanation)) : null,
             card.steps.length ? h('ol', {className: 'oc-task-list'},
                 ...card.steps.map((step, index) => h('li', {
@@ -123,11 +124,31 @@
                 h('ul', {className: 'oc-task-list'}, ...card.work_sessions.map(workRow)),
                 card.hidden_work_sessions ? h('p', {className: 'oc-task-overflow'},
                     `${card.hidden_work_sessions} additional subtasks tracked`) : null) : null,
-            h('div', {className: 'oc-task-summary', role: 'status'}, summary),
             updated ? h('footer', {className: 'oc-task-footer'},
                 'Updated ', h('time', {dateTime: updated.toISOString(), title: updated.toLocaleString()},
                     updated.toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'}))) : null);
     }
 
-    window.OpenClawTaskProgress = {readCard, renderCard};
+    function workSource(post) {
+        const identity = post.props?.openclaw_mattermost;
+        const details = post.props?.openclaw_work_details;
+        const projection = post.props?.openclaw_work_projection;
+        const message = projection?.version === 1 && post.message === 'Work details'
+            ? projection.source_message : post.message;
+        return identity?.version === 1 && identity.kind === 'turn_result' &&
+            identity.channelId === post.channel_id &&
+            (identity.threadId || '') === (post.root_id || '') &&
+            details?.version === 1 && typeof message === 'string' &&
+            message === details.source_message ? message : null;
+    }
+
+    function renderWork(React, post, message, markdown) {
+        if (workSource(post) === null) return markdown(message);
+        // No open prop: the browser owns this reader's disclosure state across
+        // React updates. Neither toggling nor progress updates write to the post.
+        return React.createElement('details', {className: 'oc-work-details', key: post.id},
+            React.createElement('summary', null, 'Work details'), markdown(message));
+    }
+
+    window.OpenClawTaskProgress = {readCard, renderCard, workSource, renderWork};
 }());

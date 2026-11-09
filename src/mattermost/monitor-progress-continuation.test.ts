@@ -34,8 +34,14 @@ describe("host-owned Mattermost continuation draft", () => {
     });
     await vi.advanceTimersByTimeAsync(1500);
     for (const [path, init] of f.request.mock.calls) {
+      if (init?.method !== "PUT") {
+        expect(path).toBe("/posts/retained-preview");
+        continue;
+      }
       expect(path).toBe("/posts/retained-preview/patch");
       expect(JSON.parse(String(init?.body)).message.length).toBeLessThanOrEqual(300);
+      expect(JSON.parse(String(init?.body)).props.openclaw_work_details.source_message)
+        .toBe(JSON.parse(String(init?.body)).message);
     }
     f.draft.retire();
     f.draft.retire();
@@ -82,6 +88,7 @@ describe("host-owned Mattermost continuation draft", () => {
     release();
     await drain();
     expect(f.request.mock.calls.map(([path, init]) => [path, init?.method])).toEqual([
+      ["/posts/retained-preview", undefined],
       ["/posts/retained-preview/patch", "PUT"], ["/posts/retained-preview", "DELETE"],
     ]);
   });

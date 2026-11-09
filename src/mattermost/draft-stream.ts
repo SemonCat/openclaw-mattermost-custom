@@ -13,6 +13,7 @@ import {
 } from "./client.js";
 import { resolveMattermostTextLimit } from "./text-limits.js";
 import { createMattermostCompanionStream } from "./companion-stream.js";
+import { mattermostWorkDetailsProps } from "./work-details.js";
 
 const DEFAULT_THROTTLE_MS = 1000;
 
@@ -52,6 +53,7 @@ type MattermostDraftStream = {
   handoffPostIdentity: () => Promise<string | undefined>;
   settleBoundaries: () => Promise<void>;
   resolveFinalText: (text: string) => MattermostFinalTextResolution;
+  promoteFinalParts: (text: string) => Promise<void>;
   findPostAfter: (postId: string) => Promise<string | undefined>;
 };
 
@@ -119,6 +121,7 @@ export function createMattermostDraftStream(params: {
   maxChars?: number;
   throttleMs?: number;
   companion?: boolean;
+  workDetails?: boolean;
   renderText?: (text: string) => string;
   chunkText?: (text: string) => string[];
   beforeCreatePost?: () => void | Promise<void>;
@@ -161,16 +164,19 @@ export function createMattermostDraftStream(params: {
   };
   const sealedAssistantTexts: Array<{ text: string; requiresBlockBoundary: boolean }> = [];
   const publishedAssistantParts = new Map<string, MattermostDraftPublishedPart>();
+  let finalPartsPromotionFailed = false;
   const createStreamPost = async (message: string, successor = false, silent = false) => {
     if (!successor) await params.beforeCreatePost?.();
+    const details = params.workDetails ? mattermostWorkDetailsProps(message) : undefined;
+    const props = details ? { ...params.postProps, openclaw_work_details: details } : params.postProps;
     const sent = companion
-      ? await companion.createPost(message, silent)
+      ? await companion.createPost(message, silent, props)
       : await createMattermostPost(params.client, {
           channelId: params.channelId,
           message,
           rootId: params.rootId,
           silent,
-          props: params.postProps,
+          props,
         });
     return sent;
   };
@@ -188,7 +194,7 @@ export function createMattermostDraftStream(params: {
         const text = normalizeMattermostDraftText(rendered, maxChars);
         if (text && text !== target.lastProviderText) {
           const updated = await updateMattermostPostMessageWithReadback(
-            params.client, target.postId, text,
+            params.client, target.postId, text, ...(params.workDetails ? ["work" as const] : []),
           );
           target.lastProviderText = updated.message ?? text;
           target.lastSentText = text;
@@ -239,6 +245,7 @@ export function createMattermostDraftStream(params: {
           params.client,
           target.postId,
           normalized,
+          ...(params.workDetails ? ["work" as const] : []),
         );
         target.lastProviderText = updated.message ?? normalized;
       } else {
@@ -359,6 +366,7 @@ export function createMattermostDraftStream(params: {
               params.client,
               sealed.postId,
               firstChunk,
+              ...(params.workDetails ? ["work" as const] : []),
             );
             providerFirstChunk = updated.message ?? firstChunk;
           }
@@ -570,7 +578,7 @@ export function createMattermostDraftStream(params: {
   };
   const resolveFinalText = (text: string) => {
     const publishedParts = [...publishedAssistantParts.values()];
-    if (sealedAssistantTexts.length === 0) {
+    if (sealedAssistantTexts.length === 0 || finalPartsPromotionFailed) {
       return { kind: "full" as const, text, publishedParts };
     }
 
@@ -633,6 +641,24 @@ export function createMattermostDraftStream(params: {
     handoffPostIdentity,
     settleBoundaries,
     resolveFinalText,
+    async promoteFinalParts(text) {
+      if (!params.workDetails) return;
+      const resolution = resolveFinalText(text);
+      // A full replacement does not confirm earlier commentary as part of the answer.
+      if (resolution.kind === "full") return;
+      try {
+        for (const part of resolution.publishedParts) {
+          await updateMattermostPostMessageWithReadback(
+            params.client, part.messageId, part.content, "final",
+          );
+        }
+      } catch {
+        // A collapsed sealed prefix cannot stand in for a directly visible
+        // answer. Let normal delivery publish the complete final instead.
+        finalPartsPromotionFailed = true;
+        params.warn?.("mattermost work details promotion failed; delivering the complete final");
+      }
+    },
     findPostAfter,
   };
 }

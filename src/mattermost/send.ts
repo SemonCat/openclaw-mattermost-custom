@@ -69,6 +69,7 @@ import { MATTERMOST_V12_TEXT_LIMIT, resolveMattermostTextLimit } from "./text-li
 import { createMattermostQuestionRpc } from "./question-rpc.js";
 import { buildMattermostQuestionFormButtons, readMattermostQuestion } from "./question-dialog.js";
 import { renderQuestionElements } from "./form-schema.js";
+import { mattermostWorkDetailsProps } from "./work-details.js";
 
 type MattermostSendOpts = Pick<
   ChannelOutboundContext,
@@ -87,6 +88,7 @@ type MattermostSendOpts = Pick<
   requireMediaUpload?: boolean;
   replyToId?: string;
   props?: Record<string, unknown>;
+  workDetails?: boolean;
   buttons?: Array<unknown>;
   /** Gateway question bound to this prompt; used only to retire its visible controls. */
   questionId?: string;
@@ -720,7 +722,11 @@ export async function sendMessageMattermost(
         deliveryPartIndex: chunks.length > 1 ? index : opts.deliveryPartIndex,
         deliveryPartCount: chunks.length > 1 ? chunks.length : opts.deliveryPartCount,
       };
-      const partProps = withMattermostDeliveryMarker(index === 0 ? props : undefined, marker);
+      const details = opts.workDetails ? mattermostWorkDetailsProps(chunk) : undefined;
+      const partProps = withMattermostDeliveryMarker(
+        details ? {...props, openclaw_work_details: details} : index === 0 ? props : undefined,
+        marker,
+      );
       const created = await createMattermostPostWithButtonFallback({
         client,
         post: {

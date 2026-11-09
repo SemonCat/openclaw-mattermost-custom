@@ -575,6 +575,9 @@ describe("Mattermost monitor streaming boundaries", () => {
         if (boundary === "after-commentary") {
           await vi.advanceTimersByTimeAsync(1200);
           expect(f.posts.get("post-1")?.message).toBe("Early commentary");
+          expect(f.posts.get("post-1")?.props?.openclaw_work_details).toMatchObject({
+            source_message: "Early commentary",
+          });
         } else {
           expect(f.posts.size).toBe(0);
         }
@@ -603,6 +606,18 @@ describe("Mattermost monitor streaming boundaries", () => {
       }
       expect(f.posts.get("post-1")?.message).toContain("Task progress · Completed");
       expect(f.posts.get("post-2")?.message).toBe("Found the answer.");
+      expect(f.posts.get("post-1")?.props?.openclaw_work_details).toBeUndefined();
+      expect(f.posts.get("post-2")?.props?.openclaw_work_details).toBeUndefined();
+      if (boundary === "after-commentary") {
+        const successor = f.calls.indexOf(creates[1]!);
+        const claim = f.calls.findIndex((call) => call.path === "/posts/post-1/patch" &&
+          String(call.body.message).startsWith("#### Task progress"));
+        expect(successor).toBeGreaterThan(0);
+        expect(claim).toBeGreaterThan(successor);
+      } else {
+        expect(creates[0]?.body.props).toMatchObject({openclaw_mattermost: {kind: "task_progress"}});
+        expect(creates[1]?.body.props).toMatchObject({openclaw_mattermost: {kind: "turn_result"}});
+      }
       const answerWrites = f.calls.filter(
         (call) => call.method === "PUT" && call.body.message === "Found the answer.",
       );
@@ -828,6 +843,9 @@ describe("Mattermost monitor streaming boundaries", () => {
         await params.replyOptions?.onAssistantMessageStart?.();
         await params.replyOptions?.onPartialReply?.({ text: "I will check." });
         await vi.advanceTimersByTimeAsync(1200);
+        expect(f.posts.get("post-1")?.props?.openclaw_work_details).toMatchObject({
+          source_message: "I will check.",
+        });
         await params.replyOptions?.onAssistantMessageStart?.();
         await params.replyOptions?.onPartialReply?.({ text: "Correct answer. Old draft tail." });
         await vi.advanceTimersByTimeAsync(1200);
@@ -839,6 +857,7 @@ describe("Mattermost monitor streaming boundaries", () => {
         "Correct answer.",
       ]);
       expect(f.calls.filter((call) => call.path.split("?")[0] === "/posts")).toHaveLength(2);
+      expect([...f.posts.values()].every((post) => post.props?.openclaw_work_details === undefined)).toBe(true);
       expect(f.calls.filter((call) => call.method === "PUT").at(-1)?.path).toBe(
         "/posts/post-2/patch",
       );

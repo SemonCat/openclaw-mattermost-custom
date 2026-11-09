@@ -229,7 +229,8 @@ export async function fetchMattermostThreadContext(params: {
   ];
   const boundedFileIds = fileIds.slice(0, MAX_THREAD_FILES);
   const hasTaskProjection = messages.some(
-    (post) => post.type === "custom_openclaw_task" && post.props?.openclaw_task_mobile !== undefined,
+    (post) => (post.type === "custom_openclaw_task" && post.props?.openclaw_task_mobile !== undefined) ||
+      post.props?.openclaw_work_projection !== undefined,
   );
   const [users, fileInfos, botUserId] = await Promise.all([
     fetchMattermostUsersByIds(params.client, userIds).catch(() => []),

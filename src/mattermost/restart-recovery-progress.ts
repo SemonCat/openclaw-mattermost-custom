@@ -321,6 +321,7 @@ function createMattermostRestartRecoveryRunUi(params: {
         ...(params.route.threadId ? { threadId: params.route.threadId } : {}),
       }),
       silentProgress: true,
+      workDetails: true,
       throttleMs: 1200,
       maxChars: textLimit,
       chunkText: (value) =>

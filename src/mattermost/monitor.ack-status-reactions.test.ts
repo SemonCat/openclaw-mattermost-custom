@@ -473,6 +473,7 @@ beforeEach(() => {
     stop: vi.fn(async () => {}),
     forceNewMessage: vi.fn(async () => {}),
     settleBoundaries: vi.fn(async () => {}),
+    promoteFinalParts: vi.fn(async () => {}),
     resolveFinalText: (text: string) => ({ kind: "full" as const, text, publishedParts: [] }),
   });
   mockState.fetchMattermostMe.mockResolvedValue({

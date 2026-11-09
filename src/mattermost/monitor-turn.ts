@@ -16,6 +16,7 @@ import {
 } from "openclaw/plugin-sdk/channel-outbound";
 import { getGlobalHookRunner } from "openclaw/plugin-sdk/plugin-runtime";
 import {
+  getReplyPayloadTtsSupplement,
   isReplyPayloadTerminalContent,
   stripReplyPayloadResponsePrefix,
 } from "openclaw/plugin-sdk/reply-payload";
@@ -53,6 +54,7 @@ import {
 } from "./monitor-turn-reactions.js";
 import type { MattermostMonitorContext } from "./monitor-types.js";
 import { buildMattermostPostIdentityProps } from "./post-identity.js";
+import { restoreMattermostTaskMessage } from "./task-progress-projection.js";
 import { deliverMattermostReplyPayload, joinMattermostVisibleContent } from "./reply-delivery.js";
 import type { HistoryEntry, ReplyPayload } from "./runtime-api.js";
 import { createChannelMessageReplyPipeline } from "./runtime-api.js";
@@ -109,6 +111,7 @@ function createDisabledMattermostDraftStream(): ReturnType<typeof createMattermo
   return {
     update: () => {},
     updateAssistantText: () => {},
+    promoteFinalParts: async () => {},
     flush: noopAsync,
     postId: () => undefined,
     isSilent: () => false,
@@ -226,6 +229,7 @@ export async function dispatchMattermostInboundTurn(
     ? createMattermostDraftStream({
         client,
         silentProgress: true,
+        workDetails: true,
         channelId,
         rootId: effectiveReplyToId,
         postProps: buildMattermostPostIdentityProps("turn_result", {
@@ -546,7 +550,8 @@ export async function dispatchMattermostInboundTurn(
           await draftStream.stop();
           const postId = draftStream.postId();
           if (postId) {
-            const confirmed = await fetchMattermostPost(client, postId).catch((error: unknown) => {
+            const confirmed = await fetchMattermostPost(client, postId)
+              .then((post) => restoreMattermostTaskMessage(post, botUserId)).catch((error: unknown) => {
               assertCurrent();
               monitor.logVerboseMessage(`mattermost progress adoption confirmation failed: ${String(error)}`);
               return undefined;
@@ -592,6 +597,11 @@ export async function dispatchMattermostInboundTurn(
         await enterBlockPreviewActivity("text");
         // Final text uses only confirmed-visible generations, so join prior boundary work before deciding whether to edit in place.
         await draftStream.settleBoundaries();
+        if (!payloadEntry.isCommentary && !payloadEntry.isReasoning && !payloadEntry.isError &&
+            !payloadEntry.isStatusNotice) {
+          const finalText = payloadEntry.text ?? getReplyPayloadTtsSupplement(payloadEntry)?.spokenText;
+          if (typeof finalText === "string") await draftStream.promoteFinalParts(finalText);
+        }
       }
       // A visible same-thread final can be a send or an in-place draft edit; either path records participation.
       let threadParticipationRecorded = false;
@@ -689,6 +699,7 @@ export async function dispatchMattermostInboundTurn(
             }),
             textLimit,
             tableMode,
+            workDetails: info.kind === "tool",
             sendMessage: sendMessageMattermost,
             onDmChannelResolution: deliveryBarrier.trackDmChannelResolution,
           }).catch(async (error: unknown) => {

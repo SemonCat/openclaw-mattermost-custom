@@ -725,6 +725,7 @@ describe("mattermost inbound user posts", () => {
       stop: vi.fn(async () => {}),
       forceNewMessage: vi.fn(async () => {}),
       settleBoundaries: vi.fn(async () => {}),
+      promoteFinalParts: vi.fn(async () => {}),
       resolveFinalText: (text: string) => ({ kind: "full" as const, text, publishedParts: [] }),
     });
     mockState.fetchMattermostMe.mockResolvedValue({
@@ -1724,6 +1725,7 @@ describe("mattermost inbound user posts", () => {
       stop: vi.fn(async () => {}),
       forceNewMessage: vi.fn(async () => {}),
       settleBoundaries: vi.fn(async () => {}),
+      promoteFinalParts: vi.fn(async () => {}),
       resolveFinalText: (text: string) => ({ kind: "full" as const, text, publishedParts: [] }),
     };
     mockState.createMattermostDraftStream.mockReturnValue(draftStream);
@@ -2501,6 +2503,7 @@ describe("mattermost inbound user posts", () => {
       }),
       forceNewMessage: vi.fn(async () => {}),
       settleBoundaries: vi.fn(async () => {}),
+      promoteFinalParts: vi.fn(async () => {}),
       resolveFinalText: (text: string) => ({ kind: "full" as const, text, publishedParts: [] }),
     };
     mockState.createMattermostDraftStream.mockReturnValue(draftStream);
@@ -3793,6 +3796,7 @@ describe("mattermost inbound user posts", () => {
       seal: vi.fn(async () => {}),
       stop: vi.fn(async () => {}),
       settleBoundaries: vi.fn(async () => {}),
+      promoteFinalParts: vi.fn(async () => {}),
       resolveFinalText: (text: string) => ({ kind: "full" as const, text, publishedParts: [] }),
     });
 
@@ -4033,6 +4037,7 @@ describe("mattermost inbound user posts", () => {
       seal: vi.fn(async () => {}),
       stop: vi.fn(async () => {}),
       settleBoundaries: vi.fn(async () => {}),
+      promoteFinalParts: vi.fn(async () => {}),
       resolveFinalText,
     });
 
@@ -4080,6 +4085,7 @@ describe("mattermost inbound user posts", () => {
       {},
       "preview-current",
       "Second block",
+      "final",
     );
     expect(mockState.sendMessageMattermost).toHaveBeenCalledWith(
       "channel:chan-1",
@@ -4115,6 +4121,7 @@ describe("mattermost inbound user posts", () => {
       seal: vi.fn(async () => {}),
       stop: vi.fn(async () => {}),
       settleBoundaries: vi.fn(async () => {}),
+      promoteFinalParts: vi.fn(async () => {}),
       resolveFinalText: vi.fn(() => ({
         kind: "already-delivered" as const,
         publishedParts: [{ messageId: "preview-sealed", content: "Only block" }],
@@ -4190,6 +4197,7 @@ describe("mattermost inbound user posts", () => {
       seal: vi.fn(async () => {}),
       stop: vi.fn(async () => {}),
       settleBoundaries: vi.fn(async () => {}),
+      promoteFinalParts: vi.fn(async () => {}),
       resolveFinalText: vi.fn(() => ({
         kind: "already-delivered" as const,
         publishedParts: [{ messageId: "preview-sealed", content: "Only block" }],
@@ -4280,6 +4288,7 @@ describe("mattermost inbound user posts", () => {
       seal: vi.fn(async () => {}),
       stop: vi.fn(async () => {}),
       settleBoundaries: vi.fn(async () => {}),
+      promoteFinalParts: vi.fn(async () => {}),
       resolveFinalText: (text: string) => ({ kind: "full" as const, text, publishedParts: [] }),
     });
     const socket = new FakeWebSocket();

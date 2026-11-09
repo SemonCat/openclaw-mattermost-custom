@@ -82,7 +82,7 @@ export function createMattermostCompanionStream(params: {
   };
 
   return {
-    async createPost(message: string, silent = false) {
+    async createPost(message: string, silent = false, postProps = params.postProps) {
       const supported = !disabled && (await available()) && !disabled;
       const generation = supported ? randomUUID() : undefined;
       const post = await createMattermostPost(params.client, {
@@ -93,10 +93,10 @@ export function createMattermostCompanionStream(params: {
         ...(generation ? { type: POST_TYPE } : {}),
         props: generation
           ? {
-              ...params.postProps,
+              ...postProps,
               openclaw_stream: { version: 1, generation },
             }
-          : params.postProps,
+          : postProps,
       });
       if (generation) {
         const entry: Entry = {

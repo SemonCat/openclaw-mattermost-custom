@@ -123,7 +123,12 @@
         }, [post.id, snapshot?.expires_at]);
 
         const message = window.OpenClawStreamState.messageForPost(post, snapshot, persistedPost);
-        return renderMarkdown(props, message);
+        const effective = persistedPost?.id === post.id &&
+            (persistedPost.update_at || 0) >= (post.update_at || 0) ? persistedPost : post;
+        const source = window.OpenClawTaskProgress.workSource(effective);
+        return window.OpenClawTaskProgress.renderWork(React, effective,
+            source !== null && message === effective.message ? source : message,
+            (text) => renderMarkdown(props, text));
     }
 
     function renderMarkdown(props, message) {
@@ -191,6 +196,10 @@
                     ...props,
                     getState: () => mattermostStore?.getState?.(),
                 }));
+            registry.registerPostTypeComponent('custom_openclaw_work',
+                (props) => window.OpenClawTaskProgress.renderWork(window.React, props.post,
+                    window.OpenClawTaskProgress.workSource(props.post) ?? props.post.message,
+                    (text) => renderMarkdown({...props, getState: () => mattermostStore?.getState?.()}, text)));
             registry.registerWebSocketEventHandler(updateEvent, (message) => {
                 streamStore.publish(message?.data);
             });

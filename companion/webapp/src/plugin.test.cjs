@@ -20,6 +20,7 @@ const text = (tree) => typeof tree === 'string' ? tree : (tree?.children || []).
 function fixture(post = makePost()) {
     let plugin;
     let reconnect;
+    let update;
     let component;
     let cursor = 0;
     let dirty = false;
@@ -73,12 +74,13 @@ function fixture(post = makePost()) {
     vm.createContext(sandbox);
     vm.runInContext(fs.readFileSync(path.join(__dirname, '../dist/stream-state.js'), 'utf8'), sandbox);
     browser.OpenClawStreamState = sandbox.OpenClawStreamState;
+    vm.runInContext(fs.readFileSync(path.join(__dirname, 'task-progress.js'), 'utf8'), sandbox);
     vm.runInContext(fs.readFileSync(path.join(__dirname, 'plugin.js'), 'utf8'), sandbox);
     plugin.initialize({
         registerPostTypeComponent: (type, render) => {
             if (type === 'custom_openclaw_stream') component = render;
         },
-        registerWebSocketEventHandler: () => {},
+        registerWebSocketEventHandler: (_name, handler) => { update = handler; },
         registerReconnectHandler: (handler) => { reconnect = handler; },
     }, {
         getState: () => ({entities: {posts: {posts: Object.fromEntries(posts)}}}),
@@ -100,6 +102,8 @@ function fixture(post = makePost()) {
         response: (next) => { response = next; },
         reconnect: () => reconnect(),
         renderedText: () => text(tree),
+        renderedTree: () => tree,
+        publish: (data) => update({data}),
         unmount() {
             for (const hook of hooks) hook?.cleanup?.();
         },
@@ -111,6 +115,47 @@ function fixture(post = makePost()) {
         },
     };
 }
+
+test('registered stream renderer keeps public snapshots collapsed and promotes an identical persisted final', async () => {
+    const post = makePost();
+    post.props.openclaw_work_details = {version: 1, source_message: post.message};
+    const f = fixture(post);
+    await f.settle();
+    assert.equal(f.renderedTree().tag, 'details');
+    const now = Date.now();
+    f.publish({
+        post_id: post.id, channel_id: post.channel_id, root_id: post.root_id,
+        generation: 'generation', seq: 1, message: 'New enabled work summary',
+        updated_at: now, expires_at: now + 15000, closed: false,
+    });
+    await f.settle();
+    assert.equal(f.renderedTree().tag, 'details');
+    assert.match(f.renderedText(), /New enabled work summary/);
+    f.response({status: 200, body: {...post, update_at: now + 1,
+        props: {openclaw_mattermost: post.props.openclaw_mattermost,
+            openclaw_stream: post.props.openclaw_stream}}});
+    f.reconnect();
+    await f.settle();
+    assert.notEqual(f.renderedTree().tag, 'details');
+    assert.equal(f.renderedText(), post.message);
+    f.unmount();
+});
+
+test('registered renderer restores projected work exactly once and falls back for stale work props', async () => {
+    const post = makePost('Work details');
+    post.props.openclaw_work_details = {version: 1, source_message: toolText};
+    post.props.openclaw_work_projection = {version: 1, source_message: toolText};
+    const f = fixture(post);
+    await f.settle();
+    assert.equal(f.renderedTree().tag, 'details');
+    assert.equal(f.renderedText().split(toolText).length - 1, 1);
+    f.response({status: 200, body: {...post, update_at: 200, message: 'Authoritative edited answer'}});
+    f.reconnect();
+    await f.settle();
+    assert.notEqual(f.renderedTree().tag, 'details');
+    assert.equal(f.renderedText(), 'Authoritative edited answer');
+    f.unmount();
+});
 
 test('reconnect reconciles a missing persisted preview row while preserving card and final', async () => {
     const f = fixture();

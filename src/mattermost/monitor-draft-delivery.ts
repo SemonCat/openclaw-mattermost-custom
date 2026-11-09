@@ -165,6 +165,7 @@ export async function deliverMattermostReplyWithDraftPreview(
             params.client,
             previewPostId,
             edit.message,
+            params.payload.isCommentary ? "work" : "final",
           );
           const receipt = createPreviewMessageReceipt({ id: post.id ?? previewPostId });
           return {
