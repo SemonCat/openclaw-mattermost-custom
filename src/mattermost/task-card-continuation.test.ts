@@ -12,7 +12,7 @@ const drain = async () => { for (let i = 0; i < 60; i++) await Promise.resolve()
 
 const yieldedEnd = { phase: "end", yielded: true, livenessState: "paused", stopReason: "end_turn" };
 
-async function fixture(options: { noPlan?: boolean; missingId?: boolean; yielded?: boolean; allCompleted?: boolean; childRunning?: boolean;
+async function fixture(options: { noPlan?: boolean; noChildren?: boolean; missingId?: boolean; yielded?: boolean; allCompleted?: boolean; childRunning?: boolean;
   progress?: { explanation?: string; markdown?: string }; adopted?: boolean } = {}) {
   const request = vi.fn<MattermostClient["request"]>(async () => (options.missingId ? { message: "accepted" } : { id: "original-card" }) as never);
   const client: MattermostClient = {
@@ -36,7 +36,7 @@ async function fixture(options: { noPlan?: boolean; missingId?: boolean; yielded
     toolCallId: "initial-card", args: options.progress });
   if (!options.noPlan) await card.updatePlan({ source: "openclaw", ...(options.progress ??
     { steps: steps.map(step => ({ step, status: options.allCompleted ? "completed" : "pending" })) }) });
-  await card.noteVisibleWorkSessions([{ sessionKey: "child-1", status: options.childRunning ? "running" : "done" }]);
+  if (!options.noChildren) await card.noteVisibleWorkSessions([{ sessionKey: "child-1", status: options.childRunning ? "running" : "done" }]);
   const draft = { retire: vi.fn() };
   const releaseDraft = options.adopted ? bridge.retainProgressDraft({ ...target, draft }) : undefined;
   const owner = bridge.register({ ...target, initialRunId: "original-run", card,
@@ -105,6 +105,16 @@ async function fixture(options: { noPlan?: boolean; missingId?: boolean; yielded
 afterEach(() => vi.useRealTimers());
 
 describe("committed native task-card continuation retention", () => {
+  it("continues an admitted child-only card and upgrades it through proven native progress", async () => {
+    const f = await fixture({ noPlan: true, yielded: true });
+    try {
+      await f.finish();
+      expect(f.card.canContinue()).toBe(true);
+      f.complete({ lifecycleFirst: true });
+      await drain();
+      f.assertCompleted();
+    } finally { f.bridge.stop(); }
+  });
   it.each(["explanation", "markdown"] as const)(
     "continues a native %s-only card through repeated yields on the original identity", async (field) => {
       const f = await fixture({ yielded: true, progress: { [field]: "Initial structured progress" } });
@@ -549,7 +559,8 @@ describe("continuation ownership and terminal fences", () => {
   });
 
   it.each(["planless", "accepted-without-id"])("does not create or adopt a card for %s", async (cause) => {
-    const f = await fixture({ noPlan: cause === "planless", missingId: cause === "accepted-without-id" });
+    const f = await fixture({ noPlan: cause === "planless", noChildren: cause === "planless",
+      missingId: cause === "accepted-without-id" });
     try {
       await f.finish();
       const count = f.request.mock.calls.length;

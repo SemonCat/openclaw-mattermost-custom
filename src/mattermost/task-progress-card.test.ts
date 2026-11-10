@@ -50,8 +50,8 @@ describe("Mattermost durable task progress card", () => {
     expect(card.postId()).toBeUndefined();
   });
 
-  it("does not create a card for visible work sessions when the turn has no plan", async () => {
-    const request = vi.fn<MattermostClient["request"]>();
+  it("creates a child-only card without inventing a plan and waits for child settlement", async () => {
+    const request = vi.fn<MattermostClient["request"]>(async () => ({ id: "child-card" }) as never);
     const onSettled = vi.fn();
     const card = createMattermostTaskProgressCard({
       client: createTestClient(request),
@@ -70,9 +70,14 @@ describe("Mattermost durable task progress card", () => {
     ]);
     await card.finish({ outcome: "completed" });
 
-    expect(request).not.toHaveBeenCalled();
-    expect(card.postId()).toBeUndefined();
-    expect(onSettled).toHaveBeenCalledOnce();
+    expect(card.postId()).toBe("child-card");
+    expect(String(readBody(request.mock.calls.at(-1)?.[1]).message)).toContain("· In progress");
+    expect(String(readBody(request.mock.calls.at(-1)?.[1]).message)).not.toContain("##### Plan");
+    expect(onSettled).not.toHaveBeenCalled();
+    card.noteAgentEvent({ sessionKey: "agent:main:subagent:one", runId: "child-run",
+      stream: "lifecycle", data: { phase: "end" } });
+    await vi.waitFor(() => expect(onSettled).toHaveBeenCalledOnce());
+    expect(String(readBody(request.mock.calls.at(-1)?.[1]).message)).toContain("· Completed");
   });
 
   it("keeps the parent card live and continuously projects child-session progress", async () => {
@@ -95,6 +100,7 @@ describe("Mattermost durable task progress card", () => {
         url: "https://control.example.com/sessions/one",
         label: "Inspect API",
         runId: "child-run-1",
+        publicRead: true,
         status: "running",
       },
     ]);
@@ -511,6 +517,7 @@ describe("Mattermost durable task progress card", () => {
         `#### Task progress · ${label}`,
         "Deploy",
         "",
+        "##### Plan",
         "- [x] Inspect",
         "- [ ] **Patch**",
         "- [ ] Test",

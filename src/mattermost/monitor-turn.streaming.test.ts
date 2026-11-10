@@ -212,6 +212,130 @@ function fixture(
 }
 
 describe("Mattermost monitor streaming boundaries", () => {
+  it("resolves cross-agent creation in the child key's owning store", async () => {
+    const f = fixture("off");
+    const parent = "agent:main:mattermost:channel:channel-1:thread:thread-1";
+    const child = "agent:reviewer:subagent:cross-agent-child";
+    const reads: Array<{ agentId?: string; sessionKey: string }> = [];
+    f.monitor.core.agent.session.getSessionEntry = (scope) => {
+      reads.push(scope);
+      if (scope.sessionKey === parent) return { sessionId: "test-session" } as never;
+      if (scope.sessionKey === child && scope.agentId === undefined) return {
+        sessionId: "reviewer-session", spawnedBy: parent, spawnedBySessionId: "test-session",
+        label: "Review API", status: "queued",
+      } as never;
+      return undefined;
+    };
+    await f.run(async (params) => {
+      params.replyOptions?.onAgentRunStart?.("parent-run");
+      await params.replyOptions?.onVisibleWorkSessions?.([], { createdSessionKey: child });
+      expect(f.posts.get("post-1")?.message).toContain("Review API · Queued");
+      expect(f.posts.get("post-1")?.props?.openclaw_mattermost).toMatchObject({ kind: "subagent_progress" });
+    });
+    expect(reads.filter((scope) => scope.sessionKey === child)).toEqual([{ sessionKey: child }]);
+  });
+  it("keeps cleanup-only child discovery descriptive after an ordinary non-streamed final", async () => {
+    const f = fixture("off");
+    const sequence: string[] = [];
+    normalSend.mockImplementationOnce(async () => {
+      sequence.push("final");
+      return { messageId: "normal-final", channelId: "channel-1" } as never;
+    });
+    f.monitor.core.agent.session.listSessionEntries = () => {
+      sequence.push("discovery");
+      return [{ sessionKey: "suppressed-child", entry: {
+        spawnedBy: "agent:main:mattermost:channel:channel-1:thread:thread-1",
+        createdAt: Date.now(), status: "running", label: "Private child",
+      } }] as never;
+    };
+    await f.run(async (params) => {
+      params.replyOptions?.onAgentRunStart?.("plain-parent");
+      await f.final(params, "Visible final");
+    });
+    expect(sequence).toEqual(["final", "discovery"]);
+    expect(f.calls.filter((call) => call.path.split("?")[0] === "/posts")).toEqual([]);
+    expect(f.posts.size).toBe(0);
+  });
+  it.each(["no-plan", "late-plan", "after-commentary"] as const)(
+    "admits no-URL children before their first lifecycle and preserves physical card/result order (%s)",
+    async (boundary) => {
+      vi.useFakeTimers();
+      const f = fixture("partial");
+      const parent = "agent:main:mattermost:channel:channel-1:thread:thread-1";
+      const child = "agent:main:subagent:live-child";
+      let onAgentEvent: ((event: any) => void) | undefined;
+      f.monitor.core.events = { onAgentEvent: (listener: typeof onAgentEvent) => {
+        onAgentEvent = listener; return () => { onAgentEvent = undefined; };
+      } } as never;
+      f.monitor.core.agent.session.getSessionEntry = ({ sessionKey }) => (
+        sessionKey === child ? { sessionId: "child-session", spawnedBy: parent,
+          spawnedBySessionId: "test-session", label: "Inspect API", status: "queued" }
+          : { sessionId: "test-session" }
+      ) as never;
+      await f.run(async (params) => {
+        params.replyOptions?.onAgentRunStart?.("parent-run");
+        if (boundary === "after-commentary") {
+          await params.replyOptions?.onPartialReply?.({ text: "Early commentary" });
+          await vi.advanceTimersByTimeAsync(1200);
+        }
+        await params.replyOptions?.onVisibleWorkSessions?.([], { createdSessionKey: child });
+        expect(f.posts.get("post-1")?.props?.openclaw_mattermost).toMatchObject({ kind: "subagent_progress" });
+        expect(f.posts.get("post-1")?.message).toContain("Inspect API · Queued");
+        onAgentEvent?.({ runId: "child-run", sessionKey: child, sessionId: "child-session", seq: 1,
+          stream: "lifecycle", data: { phase: "start" } });
+        if (boundary !== "no-plan") {
+          await params.replyOptions?.onPlanUpdate?.({ steps: [{ step: "Report findings", status: "completed" }] });
+          expect(f.posts.get("post-1")?.props?.openclaw_mattermost).toMatchObject({ kind: "task_progress" });
+        }
+        await params.replyOptions?.onPartialReply?.({ text: "Final answer" });
+        await vi.advanceTimersByTimeAsync(1200);
+        await f.final(params, "Final answer");
+      });
+      expect(f.posts.get("post-1")?.message).toContain("· In progress");
+      onAgentEvent?.({ runId: "child-run", sessionKey: child, sessionId: "child-session", seq: 2,
+        stream: "lifecycle", data: { phase: "end" } });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(f.posts.get("post-1")?.message).toContain("· Completed");
+      expect(f.posts.get("post-2")?.message).toBe("Final answer");
+      expect(f.posts.get("post-2")?.props?.openclaw_work_details).toBeUndefined();
+      const creates = f.calls.filter((call) => call.path.split("?")[0] === "/posts");
+      expect(creates).toHaveLength(2);
+      expect(f.calls.filter((call) => call.body.message === "Final answer" && call.method === "PUT")
+        .every((call) => call.path === "/posts/post-2/patch")).toBe(true);
+      if (boundary === "after-commentary") {
+        const successor = f.calls.indexOf(creates[1]);
+        expect(f.calls.findIndex((call) => call.path === "/posts/post-1/patch" &&
+          String(call.body.message).startsWith("#### Task progress"))).toBeGreaterThan(successor);
+      }
+    },
+  );
+
+  it.each(["parent-read", "child-read", "foreign-parent", "foreign-incarnation", "publish"] as const)(
+    "isolates child presentation failure or foreign creation admission (%s)", async (failure) => {
+      const f = fixture("off");
+      const parent = "agent:main:mattermost:channel:channel-1:thread:thread-1";
+      f.monitor.core.agent.session.getSessionEntry = ({ sessionKey }) => {
+        if (failure === "parent-read" && sessionKey === parent ||
+            failure === "child-read" && sessionKey !== parent) throw new Error("metadata unavailable");
+        return (sessionKey === parent ? { sessionId: "test-session" } : {
+          spawnedBy: failure === "foreign-parent" ? "foreign-parent" : parent,
+          spawnedBySessionId: failure === "foreign-incarnation" ? "old-session" : "test-session",
+          sessionId: "child-session", label: "Inspect", status: "queued",
+        }) as never;
+      };
+      if (failure === "publish") f.monitor.client.request = async () => { throw new Error("REST unavailable"); };
+      let childExecuted = false;
+      await f.run(async (params) => {
+        params.replyOptions?.onAgentRunStart?.("parent-run");
+        await expect(Promise.resolve(params.replyOptions?.onVisibleWorkSessions?.([],
+          { createdSessionKey: "child" }))).resolves.toBeUndefined();
+        childExecuted = true;
+      });
+      expect(childExecuted).toBe(true);
+      expect(f.posts.size).toBe(0);
+    },
+  );
+
   it.each((["rest", "companion"] as const).flatMap(transport =>
     (["partial", "block", "progress"] as const).map(mode => ({ transport, mode }))))(
     "keeps $transport $mode previews and task cards free of standalone Stop controls",

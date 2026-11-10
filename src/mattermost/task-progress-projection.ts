@@ -29,7 +29,8 @@ export function restoreMattermostTaskMessage<T extends {
   const source = marker?.source_message;
   if (!botUserId || post.user_id !== botUserId ||
       post.type !== "custom_openclaw_task" || marker?.version !== 1 ||
-      identity?.version !== 1 || identity.kind !== "task_progress" ||
+      identity?.version !== 1 ||
+      (identity.kind !== "task_progress" && identity.kind !== "subagent_progress") ||
       identity.channelId !== post.channel_id ||
       (identity.threadId ?? "") !== (post.root_id ?? "") ||
       card?.version !== 1 || typeof card.source_message !== "string" ||

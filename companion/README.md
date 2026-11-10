@@ -27,6 +27,16 @@ the root OpenClaw npm artifact does not include it.
 
 ## Task progress cards
 
+Version 0.5.0 presents one durable Plan + Subagents card and a matching compact
+Activity card. Admitted children are visible without a plan; child-only cards use
+`subagent_progress` and upgrade in place when a real plan arrives. The collapsed
+header includes real plan progress and child status counts, including tracked
+children beyond the five visible rows. Plan and Subagents sections omit absent
+content. Final answers remain directly visible outside disclosures. The channel
+artifact remains on OpenClaw 2026.11.2. Reader-local toggles and the 0.4.2 native
+Plan details / Activity labels retain their existing ownership; child-only
+native disclosures use Agent details to avoid repeating the Subagents section.
+
 Version 0.4.0 starts task details and bounded subagent summaries collapsed.
 The visible header retains the task status and completion summary. The web
 renderer uses an uncontrolled native HTML disclosure, so each reader's toggle

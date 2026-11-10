@@ -17,12 +17,13 @@ var taskHeading = regexp.MustCompile(`^#### Task progress · (In progress|Comple
 var taskMarkdown = regexp.MustCompile("([\\\\`*_{}\\[\\]()<>!|#~])")
 
 type mobileTask struct {
-	Version     int    `json:"version"`
-	Source      string `json:"source_message"`
-	Title       string `json:"title"`
-	Explanation string `json:"explanation"`
-	Status      string `json:"status"`
-	Hidden      int    `json:"hidden_work_sessions"`
+	Version     int            `json:"version"`
+	Source      string         `json:"source_message"`
+	Title       string         `json:"title"`
+	Explanation string         `json:"explanation"`
+	Status      string         `json:"status"`
+	Hidden      int            `json:"hidden_work_sessions"`
+	Counts      map[string]int `json:"work_session_counts"`
 	Steps       []struct {
 		Step   string `json:"step"`
 		Status string `json:"status"`
@@ -57,7 +58,7 @@ func (p *Plugin) nativeTask(post *model.Post) *mobileTask {
 		return nil
 	}
 	identity, ok := propertyMap(post.Props["openclaw_mattermost"])
-	if !ok || identity["version"] != float64(1) || identity["kind"] != "task_progress" ||
+	if !ok || identity["version"] != float64(1) || (identity["kind"] != "task_progress" && identity["kind"] != "subagent_progress") ||
 		identity["channelId"] != post.ChannelId ||
 		!(identity["threadId"] == post.RootId || (identity["threadId"] == nil && post.RootId == "")) {
 		return nil
@@ -108,6 +109,14 @@ func (p *Plugin) nativeTask(post *model.Post) *mobileTask {
 		!taskHeading.MatchString(card.Source) || len(card.Title) > 1500 || len(card.Explanation) > 6000 ||
 		len(card.Steps) > 50 || len(card.Work) > 5 || card.Hidden < 0 || card.Hidden > 1_000_000 {
 		return nil
+	}
+	if identity["kind"] == "subagent_progress" && len(card.Steps) > 0 {
+		return nil
+	}
+	for _, count := range card.Counts {
+		if count < 0 || count > 1_000_000 {
+			return nil
+		}
 	}
 	if !oneOf(card.Status, "in_progress", "completed", "incomplete", "failed", "cancelled") {
 		return nil
@@ -192,7 +201,16 @@ func (p *Plugin) MessagesWillBeConsumed(posts []*model.Post) []*model.Post {
 		// Strip only the validated generated heading and its single newline.
 		content := strings.TrimPrefix(post.Message, taskHeading.FindString(post.Message))
 		if len(post.Message) <= 15000 && content != "" {
-			copy.AddProp("mm_blocks", collapsedWorkBlocks("Plan details", content))
+			label := "Plan details"
+			identity, _ := propertyMap(post.Props["openclaw_mattermost"])
+			if identity["kind"] == "subagent_progress" {
+				label = "Agent details"
+			}
+			blocks := collapsedWorkBlocks(label, content)
+			header := blocks[0].(map[string]any)["header"].([]any)
+			blocks[0].(map[string]any)["header"] = append(header,
+				map[string]any{"type": "text", "text": nativeTaskSummary(card)})
+			copy.AddProp("mm_blocks", blocks)
 		}
 		out[i] = copy
 	}
@@ -238,6 +256,35 @@ func (p *Plugin) restoreTaskProjection(post, old *model.Post) (*model.Post, stri
 	return copy, ""
 }
 
+func nativeTaskSummary(card *mobileTask) string {
+	parts := []string{}
+	if len(card.Steps) > 0 {
+		done := 0
+		for _, step := range card.Steps {
+			if step.Status == "completed" {
+				done++
+			}
+		}
+		parts = append(parts, fmt.Sprintf("%d of %d steps completed", done, len(card.Steps)))
+	}
+	counts := card.Counts
+	if counts == nil {
+		counts = map[string]int{}
+		for _, work := range card.Work {
+			counts[work.Status]++
+		}
+	}
+	for _, status := range []string{"running", "queued", "completed", "failed", "cancelled"} {
+		if counts[status] > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", counts[status], status))
+		}
+	}
+	if len(parts) == 0 {
+		return "Work in progress"
+	}
+	return strings.Join(parts, " · ")
+}
+
 func nativeTaskAttachment(card *mobileTask) map[string]any {
 	active := card.Status == "in_progress"
 	labels := map[string]string{
@@ -265,12 +312,8 @@ func nativeTaskAttachment(card *mobileTask) map[string]any {
 		text = strings.Join(strings.Fields(text), " ")
 		return taskMarkdown.ReplaceAllString(text, "\\$1")
 	}
-	done := 0
 	fields := []any{}
 	for _, step := range card.Steps {
-		if step.Status == "completed" {
-			done++
-		}
 		fields = append(fields, map[string]any{"short": false, "value": symbol(step.Status) + " " + plain(step.Step)})
 	}
 	for i, work := range card.Work {
@@ -282,9 +325,6 @@ func nativeTaskAttachment(card *mobileTask) map[string]any {
 			label = "[" + label + "](" + link + ")"
 		}
 		status := work.Status
-		if !active && oneOf(status, "running", "queued") {
-			status = "pending"
-		}
 		field := map[string]any{"short": false, "value": symbol(work.Status) + " " + label + " · " + labels[status]}
 		if i == 0 {
 			field["title"] = "Subtasks"
@@ -297,9 +337,13 @@ func nativeTaskAttachment(card *mobileTask) map[string]any {
 	if card.Hidden > 0 {
 		fields = append(fields, map[string]any{"short": false, "value": fmt.Sprintf("%d additional subtasks tracked", card.Hidden)})
 	}
-	summary := fmt.Sprintf("%d of %d steps completed", done, len(card.Steps))
+	summary := nativeTaskSummary(card)
 	if !active {
-		summary = labels[card.Status]
+		if summary == "Work in progress" {
+			summary = labels[card.Status]
+		} else {
+			summary = labels[card.Status] + " · " + summary
+		}
 	}
 	color := "primary"
 	if card.Status == "completed" {

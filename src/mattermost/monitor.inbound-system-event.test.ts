@@ -1882,6 +1882,7 @@ describe("mattermost inbound user posts", () => {
           sessionKey: "agent:main:subagent:child-one",
           url: "https://control.example.com/sessions/child-one",
           label: "Inspect upstream",
+          publicRead: true,
         },
       ]);
       return withAgentRunTerminalOutcome({ counts: {} }, "completed");
@@ -2348,11 +2349,10 @@ describe("mattermost inbound user posts", () => {
         },
       });
     }
-    await vi.waitFor(() => {
-      expect(String(mockState.updateMattermostPost.mock.calls.at(-1)?.[2].message)).toContain(
-        "Reviewing source differences",
-      );
-    });
+    // No public-read grant: raw child event prose cannot cross into the channel.
+    await Promise.resolve();
+    expect(String(mockState.updateMattermostPost.mock.calls.at(-1)?.[2].message))
+      .not.toContain("Reviewing source differences");
 
     for (const listener of [...mockState.agentEventListeners]) {
       listener({

@@ -36,7 +36,7 @@ test('reader toggles survive progress edits and terminal card updates; finals le
         const [first, second] = [...dom.window.document.querySelectorAll('details')];
         assert.equal(first.open, false);
         assert.equal(second.open, false);
-        assert.equal(first.querySelector('summary').textContent, 'Work details');
+        assert.equal(first.querySelector('summary').textContent, 'Activity');
         first.open = true;
         const updated = {...post, message: source + '\nCheck passed',
             props: {...post.props, openclaw_work_details: {version: 1, source_message: source + '\nCheck passed'}}};
@@ -76,6 +76,19 @@ test('reader toggles survive progress edits and terminal card updates; finals le
         assert.doesNotMatch(disclosure.querySelector('summary').textContent, /Working/);
         assert.equal(disclosure.querySelectorAll('.oc-task-icon--spin').length, 0);
         assert.match(disclosure.textContent, /Reviewing public summary/);
+
+        const child = {...card, props: {...card.props,
+            openclaw_mattermost: {...card.props.openclaw_mattermost, kind: 'subagent_progress'},
+            openclaw_task_progress: {...card.props.openclaw_task_progress, steps: []}}};
+        await act(async () => roots.forEach((root) => root.render(renderCard(React, child, markdown))));
+        const childDisclosure = dom.window.document.querySelector('#a details');
+        childDisclosure.open = true;
+        await act(async () => roots.forEach((root) => root.render(renderCard(React, card, markdown))));
+        assert.equal(dom.window.document.querySelector('#a details'), childDisclosure);
+        assert.equal(childDisclosure.open, true, 'late plan retains the reader-open child disclosure');
+        assert.equal(dom.window.document.querySelector('#b details').open, false);
+        assert.deepEqual([...childDisclosure.querySelectorAll('h4')].map((node) => node.textContent),
+            ['Plan', 'Subagents']);
     } finally {
         await act(async () => roots.forEach((root) => root.unmount()));
         dom.window.close();

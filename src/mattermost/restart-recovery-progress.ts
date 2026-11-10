@@ -8,6 +8,7 @@ import { updateMattermostPost } from "./client.js";
 import { createMattermostDraftStream } from "./draft-stream.js";
 import { resolveMattermostTextLimit } from "./text-limits.js";
 import { shouldUpdateMattermostDraftToolProgress } from "./monitor-context.js";
+import { isMattermostTaskProgressYieldedWaiting } from "./task-progress-card.js";
 import type { MattermostMonitorContext } from "./monitor-types.js";
 import {
   buildMattermostPostIdentityProps,
@@ -209,12 +210,15 @@ function resolveRecoveryTerminalStatus(
   if (event.stream !== "lifecycle") {
     return undefined;
   }
-  if (event.data.phase === "end") {
-    return "completed";
-  }
-  if (event.data.phase !== "error") {
+  if (event.data.phase !== "end" && event.data.phase !== "error") {
     return undefined;
   }
+  if (event.data.stopReason === "timeout" || event.data.status === "timeout" ||
+      event.data.status === "timed_out" || event.data.timeoutPhase != null) return "failed";
+  if (isMattermostTaskProgressYieldedWaiting(event.data)) return undefined;
+  if (event.data.aborted === true || event.data.status === "cancelled" ||
+      event.data.stopReason === "restart" || event.data.stopReason === "superseded") return "cancelled";
+  if (event.data.phase === "end" && event.data.error == null) return "completed";
   const terminalReason = [event.data.reason, event.data.error, event.data.message, event.data.status]
     .filter((value): value is string => typeof value === "string")
     .join(" ");

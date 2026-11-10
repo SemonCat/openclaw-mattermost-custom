@@ -1,4 +1,4 @@
-// Mattermost plugin module owns one durable, plan-backed task card per inbound turn.
+// One durable progress owner: a real plan or admitted children, never a synthetic plan.
 import { isChannelPartialDeliveryError } from "openclaw/plugin-sdk/channel-inbound";
 import type { AgentPlanStep } from "openclaw/plugin-sdk/channel-outbound";
 import { sliceUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
@@ -28,6 +28,9 @@ export type MattermostTaskProgressPlan = {
 export type MattermostTaskProgressAgentEvent = {
   runId?: string;
   sessionKey?: string;
+  sessionId?: string;
+  seq?: number;
+  ts?: number;
   stream: string;
   data: Record<string, unknown>;
 };
@@ -37,6 +40,8 @@ export type MattermostVisibleWorkSession = {
   url?: string;
   label?: string;
   runId?: string;
+  sessionId?: string;
+  publicRead?: boolean;
   status?: "queued" | "running" | "done" | "failed" | "interrupted" | "killed" | "timeout";
 };
 
@@ -49,6 +54,7 @@ type MattermostTaskProgressStatus =
 
 type MattermostTaskProgressSnapshot = {
   revision: number;
+  hasPlan?: boolean;
   title?: string;
   explanation?: string;
   steps: AgentPlanStep[];
@@ -69,6 +75,11 @@ type MattermostTaskProgressWorkSession = {
   url?: string;
   label: string;
   runId?: string;
+  sessionId?: string;
+  publicRead?: boolean;
+  lastEventSeq?: number;
+  lastEventTs?: number;
+  retiredRuns?: Set<string>;
   progress?: string;
   status: MattermostTaskProgressWorkSessionStatus;
 };
@@ -299,6 +310,7 @@ function readWorkSessionProgress(event: MattermostTaskProgressAgentEvent): strin
   }
   if (event.stream === "item") {
     if (
+      event.data.kind !== "tool" ||
       event.data.hideFromChannelProgress === true ||
       event.data.suppressChannelProgress === true
     ) {
@@ -334,12 +346,12 @@ export function renderMattermostTaskProgressCard(
   }
   const checklist = snapshot.steps.map(renderChecklistLine);
   if (checklist.length > 0) {
-    lines.push("", ...checklist);
+    lines.push("", "##### Plan", ...checklist);
   }
   const allWorkSessions = snapshot.workSessions ?? [];
   const workSessions = allWorkSessions.slice(0, MAX_RENDERED_WORK_SESSIONS);
   if (workSessions.length > 0) {
-    lines.push("", "##### Subtasks", ...workSessions.map(renderWorkSessionLine));
+    lines.push("", "##### Subagents", ...workSessions.map(renderWorkSessionLine));
     const hiddenCount = allWorkSessions.length - workSessions.length;
     if (hiddenCount > 0) {
       lines.push(`- _${hiddenCount} additional ${hiddenCount === 1 ? "subtask" : "subtasks"} tracked_`);
@@ -371,6 +383,9 @@ export function createMattermostTaskProgressCard(params: {
   let nextRevision = 0;
   const pendingNativeProgressCards: PendingNativeProgressCard[] = [];
   let publishedMessage: string | undefined;
+  let publishedKind: string | undefined;
+  let publishedPresentation: string | undefined;
+  let childToolProgressSuppressed = false;
   let publishedRevision = 0;
   let resultPostStarted = false;
   let taskPostId: string | undefined;
@@ -391,8 +406,12 @@ export function createMattermostTaskProgressCard(params: {
       return Boolean(taskPostId);
     }
     const message = renderMattermostTaskProgressCard(snapshot);
+    const kind = snapshot.hasPlan === false ? "subagent_progress" : "task_progress";
+    const identity = params.postProps?.openclaw_mattermost;
     const props = {
       ...params.postProps,
+      ...(identity && typeof identity === "object"
+        ? { openclaw_mattermost: { ...identity, kind } } : {}),
       openclaw_task_progress: {
         version: 1,
         source_message: message,
@@ -406,9 +425,18 @@ export function createMattermostTaskProgressCard(params: {
         hidden_work_sessions: Math.max(
           0, (snapshot.workSessions?.length ?? 0) - MAX_RENDERED_WORK_SESSIONS,
         ),
+        work_session_counts: {
+          queued: (snapshot.workSessions ?? []).filter((session) => session.status === "queued").length,
+          running: (snapshot.workSessions ?? []).filter((session) => session.status === "running").length,
+          completed: (snapshot.workSessions ?? []).filter((session) => session.status === "completed").length,
+          failed: (snapshot.workSessions ?? []).filter((session) => session.status === "failed").length,
+          cancelled: (snapshot.workSessions ?? []).filter((session) => session.status === "cancelled").length,
+        },
       },
     };
-    if (taskPostId && message === publishedMessage) {
+    const presentation = JSON.stringify(props.openclaw_task_progress);
+    if (taskPostId && message === publishedMessage && kind === publishedKind &&
+        presentation === publishedPresentation) {
       publishedRevision = snapshot.revision;
       return true;
     }
@@ -444,6 +472,8 @@ export function createMattermostTaskProgressCard(params: {
         });
         taskPostId = post.id;
         publishedMessage = message;
+        publishedKind = kind;
+        publishedPresentation = presentation;
         publishedRevision = snapshot.revision;
         return true;
       } catch (error: unknown) {
@@ -462,6 +492,8 @@ export function createMattermostTaskProgressCard(params: {
         props,
       });
       publishedMessage = message;
+      publishedKind = kind;
+      publishedPresentation = presentation;
       publishedRevision = snapshot.revision;
       return true;
     } catch (error: unknown) {
@@ -561,7 +593,16 @@ export function createMattermostTaskProgressCard(params: {
 
   return {
     postId: () => taskPostId,
+    hasProgress: () => Boolean(latestSnapshot),
     hasWorkSession: (sessionKey: string) => workSessions.has(sessionKey),
+    ownsChildActivity: (itemId?: string) => Boolean(itemId &&
+      [...workSessions.values()].some((session) =>
+        session.runId === itemId || session.retiredRuns?.has(itemId))),
+    suppressChildToolProgress: () => {
+      childToolProgressSuppressed = true;
+      for (const session of workSessions.values()) session.progress = undefined;
+      if (latestSnapshot) publishWorkSessionChange();
+    },
     suspendContinuation: () => {
       if (parentTerminalStatus === "failed" || parentTerminalStatus === "cancelled") return;
       // Host custody survives steering, but old run correlation does not.
@@ -604,7 +645,7 @@ export function createMattermostTaskProgressCard(params: {
       if (!title && !explanation && steps.length === 0) return false;
       // A committed native call replaces the card, including a revised or absent checklist.
       lastNativeProgressMarkdown = markdown;
-      latestSnapshot = { revision: ++nextRevision, title, explanation, steps,
+      latestSnapshot = { revision: ++nextRevision, hasPlan: true, title, explanation, steps,
         status: "in_progress", workSessions: listWorkSessions() };
       return await schedulePublish(isCurrent);
     },
@@ -660,6 +701,9 @@ export function createMattermostTaskProgressCard(params: {
         return;
       }
       const phase = event.data.phase;
+      if (workSession.sessionId && event.sessionId && workSession.sessionId !== event.sessionId) return;
+      if (event.runId && workSession.retiredRuns?.has(event.runId)) return;
+      const newRun = event.runId && workSession.runId && event.runId !== workSession.runId;
       if (
         workSession.runId &&
         event.runId &&
@@ -668,6 +712,19 @@ export function createMattermostTaskProgressCard(params: {
       ) {
         return;
       }
+      if (newRun) {
+        if (event.ts !== undefined && workSession.lastEventTs !== undefined &&
+            event.ts < workSession.lastEventTs) return;
+        (workSession.retiredRuns ??= new Set()).add(workSession.runId!);
+        workSession.lastEventSeq = undefined;
+      } else if (!isActiveWorkSession(workSession.status)) {
+        // A late plan/item/start from the same finished run cannot revive a child.
+        return;
+      }
+      if (event.seq !== undefined && workSession.lastEventSeq !== undefined &&
+          event.seq <= workSession.lastEventSeq) return;
+      if (event.seq !== undefined) workSession.lastEventSeq = event.seq;
+      if (event.ts !== undefined) workSession.lastEventTs = event.ts;
       if (event.runId) {
         workSession.runId = event.runId;
       }
@@ -683,6 +740,12 @@ export function createMattermostTaskProgressCard(params: {
           return;
         }
       } else if (event.stream === "plan" || event.stream === "item" || event.stream === "tool") {
+        // Only publicly readable children may expose authored details. During host
+        // adoption its prepared activity lane owns tool summaries, exactly once.
+        if (!workSession.publicRead || childToolProgressSuppressed ||
+            event.data.hideFromChannelProgress === true ||
+            event.data.suppressChannelProgress === true ||
+            event.data.suppressDurableProgress === true) return;
         const progress = readWorkSessionProgress(event);
         if (!progress) {
           return;
@@ -708,6 +771,8 @@ export function createMattermostTaskProgressCard(params: {
           continue;
         }
         const existing = workSessions.get(sessionKey);
+        if (existing?.sessionId && session.sessionId && existing.sessionId !== session.sessionId) continue;
+        if (existing?.runId && session.runId && existing.runId !== session.runId) continue;
         const status = normalizeWorkSessionStatus(session.status);
         const label =
           normalizeBoundedSingleLine(session.label, MAX_WORK_LABEL_CHARS) ??
@@ -716,7 +781,11 @@ export function createMattermostTaskProgressCard(params: {
         if (existing) {
           existing.url = url ?? existing.url;
           existing.label = label;
-          existing.runId = session.runId ?? existing.runId;
+          // Discovery is a descriptive snapshot, never authority to replace a
+          // live run correlation or revive a terminal child.
+          existing.runId ??= session.runId;
+          existing.sessionId ??= session.sessionId;
+          existing.publicRead = session.publicRead ?? existing.publicRead;
           if (!(isActiveWorkSession(status) && !isActiveWorkSession(existing.status))) {
             existing.status = status;
             if (!isActiveWorkSession(status)) {
@@ -729,14 +798,18 @@ export function createMattermostTaskProgressCard(params: {
             url,
             label,
             runId: session.runId,
+            sessionId: session.sessionId,
+            publicRead: session.publicRead,
             status,
           });
         }
         changed = true;
       }
-      if (!changed || !latestSnapshot) {
+      if (!changed) {
         return false;
       }
+      latestSnapshot ??= { revision: ++nextRevision, hasPlan: false, steps: [],
+        status: "in_progress", workSessions: listWorkSessions() };
       publishWorkSessionChange();
       return await writeTail;
     },
@@ -764,6 +837,7 @@ export function createMattermostTaskProgressCard(params: {
       }
       latestSnapshot = {
         revision: ++nextRevision,
+        hasPlan: true,
         title,
         explanation,
         steps,

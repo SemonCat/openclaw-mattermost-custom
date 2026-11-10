@@ -22,6 +22,7 @@ export function retainMattermostProgressDraft(params: {
   abortSignal?: AbortSignal;
   assertCurrent: () => void;
   onRetired?: () => void;
+  ownsChildActivity?: (itemId?: string) => boolean;
   log: (message: string) => void;
 }): MattermostRetainedDraft {
   let retired = false;
@@ -82,6 +83,10 @@ export function retainMattermostProgressDraft(params: {
   if (params.abortSignal?.aborted) retire();
   return {
     push: (item) => {
+      // Suppress a duplicate child row only when its prepared identity exactly
+      // matches a lifecycle identity already owned by the durable card. Unknown
+      // host cohorts retain their existing prepared visibility.
+      if (item.kind === "subagent" && params.ownsChildActivity?.(item.itemId)) return;
       tail = tail.then(async () => {
         if (retired) return;
         params.assertCurrent();

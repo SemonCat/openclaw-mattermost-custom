@@ -1,10 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  attachMattermostRestartRecoveryProgress,
   createMattermostRestartRecoveryProgressBridge,
   parseMattermostRestartRecoverySessionKey,
   type MattermostRestartRecoveryEvent,
   type MattermostRestartRecoveryRunUi,
 } from "./restart-recovery-progress.js";
+import { buildMattermostPostIdentityProps } from "./post-identity.js";
+import type { MattermostMonitorContext } from "./monitor-types.js";
 
 function createHarness() {
   let listener: ((event: MattermostRestartRecoveryEvent) => void) | undefined;
@@ -34,6 +37,47 @@ function createHarness() {
 }
 
 describe("Mattermost restart recovery progress", () => {
+  it.each([
+    { data: { phase: "end" }, heading: "Incomplete" },
+    { data: { phase: "end", stopReason: "restart" }, heading: "Cancelled" },
+    { data: { phase: "end", aborted: true }, heading: "Cancelled" },
+    { data: { phase: "end", stopReason: "timeout" }, heading: "Failed" },
+    { data: { phase: "error", reason: "cancelled" }, heading: "Cancelled" },
+    { data: { phase: "end", yielded: true, livenessState: "paused", stopReason: "end_turn" }, heading: undefined },
+  ])("recovers a child-only card with truthful terminal heading: $heading", async ({ data, heading }) => {
+    let listener: ((event: MattermostRestartRecoveryEvent) => void) | undefined;
+    const post = {
+      id: "child-card", user_id: "bot", channel_id: "chan-1", root_id: "root-1", create_at: 1,
+      message: "#### Task progress · In progress\n\n##### Subagents\n- [ ] Reviewer · Running",
+      props: buildMattermostPostIdentityProps("subagent_progress", {
+        accountId: "default", agentId: "main", channelId: "chan-1", threadId: "root-1",
+      }),
+    };
+    const request = vi.fn(async (path: string, init?: RequestInit) =>
+      init?.method === "PUT" ? { ...post, ...JSON.parse(String(init.body)) } :
+        { order: [post.id], posts: { [post.id]: post } });
+    const monitor = {
+      account: { accountId: "default", config: {}, streamingMode: "off" },
+      core: { events: { onAgentEvent: (next: typeof listener) => {
+        listener = next; return () => { listener = undefined; };
+      } } },
+      client: { request }, botUserId: "bot", resources: { sendTypingIndicator: async () => {} },
+      logVerboseMessage: vi.fn(),
+    } as unknown as MattermostMonitorContext;
+    const bridge = attachMattermostRestartRecoveryProgress(monitor);
+    listener?.({ runId: "recover", sessionKey: "agent:main:mattermost:channel:chan-1:thread:root-1",
+      mainSessionRestartRecovery: true, stream: "lifecycle", data: { phase: "start" } });
+    listener?.({ runId: "recover", mainSessionRestartRecovery: true, stream: "lifecycle", data });
+    await bridge.stop();
+    const patches = request.mock.calls.filter(([, init]) => init?.method === "PUT");
+    if (heading) {
+      expect(patches).toHaveLength(1);
+      expect(patches[0][0]).toBe("/posts/child-card/patch");
+      expect(JSON.parse(String(patches[0][1]?.body)).message).toBe(
+        post.message.replace("In progress", heading));
+    } else expect(patches).toHaveLength(0);
+  });
+
   it("parses only canonical Mattermost channel and group routes", () => {
     expect(
       parseMattermostRestartRecoverySessionKey(

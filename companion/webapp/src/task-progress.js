@@ -23,7 +23,7 @@
         // Mattermost's Go plugin RPC round trip encodes empty arrays as null.
         const steps = card?.steps === null ? [] : card?.steps;
         const workSessions = card?.work_sessions === null ? [] : card?.work_sessions;
-        if (identity?.version !== 1 || identity.kind !== 'task_progress' ||
+        if (identity?.version !== 1 || !['task_progress', 'subagent_progress'].includes(identity.kind) ||
             identity.channelId !== post.channel_id ||
             (identity.threadId || '') !== (post.root_id || '') ||
             card?.version !== 1 || !statuses.has(card.status) ||
@@ -31,6 +31,7 @@
             (card.title !== undefined && typeof card.title !== 'string') ||
             (card.explanation !== undefined && typeof card.explanation !== 'string') ||
             !Array.isArray(steps) || steps.length > 50 ||
+            (identity.kind === 'subagent_progress' && steps.length > 0) ||
             !steps.every((step) => typeof step?.step === 'string' && stepStatuses.has(step.status)) ||
             !Array.isArray(workSessions) || workSessions.length > 5 ||
             !workSessions.every((work) => typeof work?.label === 'string' &&
@@ -61,7 +62,10 @@
             }
             status = match[1].toLowerCase();
         }
-        return {...card, status, steps, work_sessions: workSessions};
+        const counts = card.work_session_counts;
+        if (counts !== undefined && (!counts || !['queued', 'running', 'completed', 'failed', 'cancelled']
+            .every((key) => Number.isSafeInteger(counts[key]) && counts[key] >= 0))) return null;
+        return {...card, status, steps, work_sessions: workSessions, hasPlan: identity.kind === 'task_progress'};
     }
 
     function renderCard(React, post, markdown) {
@@ -72,12 +76,20 @@
         const h = React.createElement;
         const active = card.status === 'in_progress';
         const done = card.steps.filter((step) => step.status === 'completed').length;
-        const summary = card.status === 'completed'
+        let summary = card.status === 'completed'
             ? (card.steps.length ? 'All steps completed' : 'Task completed')
             : card.status === 'incomplete' ? 'Finished with unfinished steps'
                 : card.status === 'failed' ? 'Task failed'
                     : card.status === 'cancelled' ? 'Task cancelled'
                         : card.steps.length ? `${done} of ${card.steps.length} steps completed` : 'Work in progress';
+        if (!active && card.steps.length) summary += ` · ${done} of ${card.steps.length} steps completed`;
+        const counts = card.work_session_counts || card.work_sessions.reduce((result, work) => {
+            result[work.status] = (result[work.status] || 0) + 1;
+            return result;
+        }, {});
+        const childSummary = ['running', 'queued', 'completed', 'failed', 'cancelled']
+            .filter((status) => counts[status])
+            .map((status) => `${counts[status]} ${status}`).join(' · ');
 
         function icon(status) {
             const spinning = active && ['in_progress', 'running'].includes(status);
@@ -100,9 +112,7 @@
                 icon(work.status),
                 h('div', {className: 'oc-task-row-content'},
                     url ? h('a', {href: url, target: '_blank', rel: 'noopener noreferrer'}, work.label) : work.label,
-                    h('span', {className: 'oc-task-work-status'}, ` · ${labels[
-                        !active && ['running', 'queued'].includes(work.status) ? 'pending' : work.status
-                    ]}`),
+                    h('span', {className: 'oc-task-work-status'}, ` · ${labels[work.status]}`),
                     work.progress ? h('div', {className: 'oc-task-work-progress'}, work.progress) : null));
         }
 
@@ -110,17 +120,22 @@
         const updated = Number.isFinite(updatedAt) && updatedAt > 0 ? new Date(updatedAt) : null;
         return h('details', {className: 'oc-task-card', key: post.id, 'aria-label': card.title || 'Task progress'},
             h('summary', {className: 'oc-task-heading'},
-                h('h3', {className: 'oc-task-title'}, card.title || 'Task progress'),
+                h('h3', {className: 'oc-task-title'}, card.title || (card.hasPlan ? 'Task progress' : 'Subagents')),
                 h('span', {className: `oc-task-status oc-task-status--${card.status}`}, labels[card.status]),
-                h('span', {className: 'oc-task-summary', role: 'status'}, summary)),
-            card.explanation ? h('div', {className: 'oc-task-explanation'}, markdown(card.explanation)) : null,
+                card.hasPlan || !active || !childSummary
+                    ? h('span', {className: 'oc-task-summary', role: 'status'}, summary) : null,
+                childSummary ? h('span', {className: 'oc-task-child-summary'}, childSummary) : null,
+                h('span', {className: 'oc-card-hint', 'aria-hidden': true})),
+            card.hasPlan && (card.explanation || card.steps.length) ? h('section', {className: 'oc-task-section'},
+                h('h4', {className: 'oc-task-subtitle'}, 'Plan'),
+                card.explanation ? h('div', {className: 'oc-task-explanation'}, markdown(card.explanation)) : null,
             card.steps.length ? h('ol', {className: 'oc-task-list'},
                 ...card.steps.map((step, index) => h('li', {
                     className: `oc-task-row${active && step.status === 'in_progress' ? ' oc-task-row--active' : ''}`,
                     key: index,
-                }, icon(step.status), h('span', {className: 'oc-task-row-content'}, step.step)))) : null,
-            card.work_sessions.length ? h('div', {className: 'oc-task-subtasks'},
-                h('h4', {className: 'oc-task-subtitle'}, 'Subtasks'),
+                }, icon(step.status), h('span', {className: 'oc-task-row-content'}, step.step)))) : null) : null,
+            card.work_sessions.length ? h('section', {className: 'oc-task-section'},
+                h('h4', {className: 'oc-task-subtitle'}, 'Subagents'),
                 h('ul', {className: 'oc-task-list'}, ...card.work_sessions.map(workRow)),
                 card.hidden_work_sessions ? h('p', {className: 'oc-task-overflow'},
                     `${card.hidden_work_sessions} additional subtasks tracked`) : null) : null,
@@ -147,7 +162,10 @@
         // No open prop: the browser owns this reader's disclosure state across
         // React updates. Neither toggling nor progress updates write to the post.
         return React.createElement('details', {className: 'oc-work-details', key: post.id},
-            React.createElement('summary', null, 'Work details'), markdown(message));
+            React.createElement('summary', {className: 'oc-task-heading'},
+                React.createElement('h3', {className: 'oc-task-title'}, 'Activity'),
+                React.createElement('span', {className: 'oc-card-hint', 'aria-hidden': true})),
+            React.createElement('div', {className: 'oc-activity-log'}, markdown(message)));
     }
 
     window.OpenClawTaskProgress = {readCard, renderCard, workSource, renderWork};

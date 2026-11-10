@@ -16,7 +16,7 @@ func (p *Plugin) styleTaskProgress(post *model.Post) *model.Post {
 	identity, identityOK := propertyMap(post.Props["openclaw_mattermost"])
 	card, cardOK := propertyMap(post.Props["openclaw_task_progress"])
 	if identityOK && cardOK &&
-		identity["version"] == float64(1) && identity["kind"] == "task_progress" &&
+		identity["version"] == float64(1) && (identity["kind"] == "task_progress" || identity["kind"] == "subagent_progress") &&
 		identity["channelId"] == post.ChannelId &&
 		(identity["threadId"] == post.RootId || (identity["threadId"] == nil && post.RootId == "")) &&
 		card["version"] == float64(1) && card["source_message"] == post.Message &&

@@ -10,7 +10,7 @@ const MATTERMOST_IDENTITY_PROP = "openclaw_mattermost";
 const MATTERMOST_IDENTITY_VERSION = 1;
 const RECOVERY_LOOKUP_LIMIT = 200;
 
-export type MattermostDurablePostKind = "task_progress" | "turn_result";
+export type MattermostDurablePostKind = "task_progress" | "subagent_progress" | "turn_result";
 export type MattermostRecoveredTaskTerminalStatus = "completed" | "failed" | "cancelled";
 
 type MattermostPostIdentity = {
@@ -46,7 +46,7 @@ function readPostIdentity(post: MattermostPost): MattermostPostIdentity | undefi
   const threadId = identity?.threadId;
   if (
     version !== MATTERMOST_IDENTITY_VERSION ||
-    (kind !== "task_progress" && kind !== "turn_result") ||
+    (kind !== "task_progress" && kind !== "subagent_progress" && kind !== "turn_result") ||
     typeof accountId !== "string" ||
     !accountId ||
     typeof agentId !== "string" ||
@@ -136,7 +136,7 @@ export function findMattermostRecoveryPostIdentity(params: {
   const taggedTask = routed.find((post) => {
     const identity = readPostIdentity(post);
     return (
-      identity?.kind === "task_progress" &&
+      (identity?.kind === "task_progress" || identity?.kind === "subagent_progress") &&
       identity.accountId === params.accountId &&
       identity.agentId === params.agentId &&
       identity.channelId === params.channelId &&
@@ -161,7 +161,8 @@ export function findMattermostRecoveryPostIdentity(params: {
 
   // Compatibility for cards created before identity props shipped. Restrict the
   // fallback to the exact route, bot author, in-progress renderer, and posts after it.
-  const legacyTask = routed.find((post) => isInProgressTaskMessage(post.message));
+  const legacyTask = routed.find((post) =>
+    !post.props?.[MATTERMOST_IDENTITY_PROP] && isInProgressTaskMessage(post.message));
   if (!legacyTask) {
     return undefined;
   }

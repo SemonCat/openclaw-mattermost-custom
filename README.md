@@ -90,7 +90,7 @@ Compared with the official plugin, this build preserves:
   conversation, with sender visibility, size, timeout, and download checks.
 - Owner-only `/move_thread #channel` verified copy-then-delete moves without the
   licensed Mattermost move endpoint.
-- Durable plan-backed task progress cards that remain after the final answer and
+- Durable plan/subagent progress cards that remain after the final answer and
   continuously update linked child work-session progress until those subtasks settle.
 - Native exec, plugin, and system-agent approval cards with canonical Gateway resolution.
 - Native secret-entry dialogs that submit password fields directly to OpenClaw's protected store.
@@ -803,9 +803,10 @@ source post ids, and the operation id are retained in the
 `openclaw_mattermost_move` post property. Text and uploaded file contents are
 preserved; reactions, pins, and arbitrary source post properties are not copied.
 
-When an agent emits a structured plan update, the plugin lazily creates one
-Mattermost task card in the same channel or thread and edits that post for the
-rest of the turn. Tool/reasoning streaming keeps its existing preview post, and
+When an agent emits a structured plan update or the host admits a child session,
+the plugin lazily creates one durable Mattermost progress card in the same
+channel or thread and edits that post for the rest of the turn. Tool/reasoning
+streaming keeps its existing preview post, and
 the final answer keeps its existing delivery path; neither reuses or deletes the
 task-card post. Successful runs mark the card completed only when the explicit
 parent checklist is complete; completed subtasks alone leave outstanding parent
@@ -813,9 +814,12 @@ steps incomplete. A native successful yielded end (`yielded`, paused liveness,
 and `end_turn`, without failure or cancellation) keeps the parent In progress,
 even when all children or checklist steps are complete. Yielded children remain
 active until their real terminal. Failed or aborted runs retain a truthful failed or cancelled
-terminal state. Turns without a plan
-do not create an extra post. Card API failures are isolated from final-answer
-delivery and use bounded create fallback to avoid duplicate posts.
+terminal state. Child-only cards use the distinct `subagent_progress` identity
+with no synthetic checklist; a late real plan upgrades that same physical post to
+`task_progress`. Ordinary turns with neither a plan nor an admitted child do not
+create a durable card. Cleanup-only discovery cannot create a card after a final.
+Card API failures are isolated from final-answer delivery and use bounded create
+fallback to avoid duplicate posts.
 
 Cancelled cards include a reason when evidenced by the host's stable `restart`
 or `superseded` stop reason. A generic abort says
@@ -843,7 +847,7 @@ ownership. Session reset, failure/cancellation, or account stop also retires it.
 Ownership is in memory with a 24-hour absolute lifetime, at most 100 retained tasks,
 and a bounded 32-row successor buffer; ordinary original-run transcript volume does
 not consume that buffer. Existing cards and ownership lost on restart are not adopted,
-and a continuation never creates a card for a planless turn or an accepted post with
+and a continuation never creates a card for an unadmitted turn or an accepted post with
 no usable identity. Final answers keep their separate delivery path.
 An unprovenanced human correction retires unadopted continuation ownership,
 including during the original run: the transcript API does not prove same-run
@@ -870,10 +874,12 @@ and expiry still fence queued writes. Neither activity adoption nor card observa
 assistant transcript prose. Continuation commentary remains subject to the
 host's source-reply policy, and final answers keep their own delivery path.
 
-### Styled task cards on web and desktop
+### Styled progress cards on web and desktop
 
-The optional `openclaw-stream` companion 0.4.2 in [companion/](companion/README.md)
-renders task cards with blue completion checks, a spinning current step, terminal
+The optional `openclaw-stream` companion 0.5.0 in [companion/](companion/README.md)
+renders matching bordered Progress and Activity cards with compact theme-aware
+headers. Progress keeps optional Plan then Subagents sections, visible plan and
+child counts, blue completion checks, a spinning current step, terminal
 status, subtask links, and the last update time. It follows the Mattermost theme,
 supports narrow web layouts and reduced motion, and works with either REST or
 companion reply streaming. The channel artifact and companion artifact must both
@@ -1288,8 +1294,7 @@ All included suites run green via `vitest run`.
 
 `npx tsc --noEmit` is an additional diagnostic, not a passing standalone gate:
 the published SDK omits declarations for several exported runtime subpaths, and
-this checkout also has existing type errors, including a task-card reader of
-the non-public `SessionEntry.lastRunId`. The runtime build checks actual SDK
+this checkout also has existing type errors. The runtime build checks actual SDK
 exports; tests and build success do not imply a clean TypeScript check.
 
 ## Docs

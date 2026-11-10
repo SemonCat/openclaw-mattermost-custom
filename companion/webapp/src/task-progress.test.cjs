@@ -34,7 +34,7 @@ function text(tree) {
 
 test('renders checklist status, safe session link, summary and server update time', () => {
     const tree = renderCard(React, makePost(), (text) => text);
-    assert.match(text(tree), /Review PRWorking1 of 2 steps completedRead diffRun tests/);
+    assert.match(text(tree), /Review PRWorking1 of 2 steps completed1 runningPlanRead diffRun tests/);
     assert.match(text(tree), /1 of 2 steps completed/);
     assert.equal(nodes(tree, (n) => n.props?.className?.includes('oc-task-icon--spin')).length, 2);
     assert.equal(nodes(tree, (n) => n.tag === 'a')[0].props.href, 'https://dev.example/session');
@@ -61,6 +61,24 @@ test('accepts empty arrays encoded as null by Mattermost plugin RPC', () => {
     const tree = renderCard(React, post, (text) => text);
     assert.match(text(tree), /Work in progress/);
     assert.equal(nodes(tree, (n) => n.tag === 'li').length, 0);
+});
+
+test('child-only cards have no Plan section and aggregate counts update beyond visible children', () => {
+    const post = makePost();
+    post.props.openclaw_mattermost.kind = 'subagent_progress';
+    const card = post.props.openclaw_task_progress;
+    card.steps = [];
+    delete card.title;
+    card.work_session_counts = {queued: 1, running: 2, completed: 2, failed: 1, cancelled: 0};
+    let tree = renderCard(React, post, (value) => value);
+    assert.match(text(tree), /SubagentsWorking2 running · 1 queued · 2 completed · 1 failed/);
+    assert.equal(nodes(tree, (n) => n.tag === 'h4' && text(n) === 'Plan').length, 0);
+    card.work_session_counts.running--;
+    card.work_session_counts.completed++;
+    tree = renderCard(React, post, (value) => value);
+    assert.match(text(tree), /1 running · 1 queued · 3 completed · 1 failed/);
+    card.work_session_counts.running = -1;
+    assert.equal(readCard(post), null);
 });
 
 test('honors restart recovery terminal-only edits without using stale active status', () => {

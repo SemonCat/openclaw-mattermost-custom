@@ -225,6 +225,23 @@ export async function dispatchMattermostInboundTurn(
     onSettled: stopAgentEvents,
     log: monitor.logVerboseMessage,
   });
+  const registerContinuation = () => {
+    if (continuationRegistered || !initialRunId || !monitor.taskCardContinuation) return;
+    try {
+      const entry = core.agent.session.getSessionEntry({
+        agentId: route.agentId, sessionKey: thread.sessionKey,
+      });
+      if (!entry?.sessionId) return;
+      continuationSessionId = entry.sessionId;
+      continuationOwner = monitor.taskCardContinuation.register({
+        agentId: route.agentId, sessionId: entry.sessionId,
+        sessionKey: thread.sessionKey, initialRunId, card: taskProgressCard,
+      });
+      continuationRegistered = true;
+    } catch (error: unknown) {
+      monitor.logVerboseMessage(`mattermost continuation identity unavailable: ${String(error)}`);
+    }
+  };
   const draftStream = draftPreviewEnabled
     ? createMattermostDraftStream({
         client,
@@ -566,10 +583,12 @@ export async function dispatchMattermostInboundTurn(
                 silent: confirmed.props?.silent_notification === true,
                 entry: account.config, seed: `${account.accountId}:${channelId}`, maxChars: textLimit,
                 abortSignal: monitor.abortSignal, assertCurrent, log: monitor.logVerboseMessage,
+                ownsChildActivity: taskProgressCard.ownsChildActivity,
                 onRetired: () => releaseRetained?.(),
               });
               if (info.adoptProgressDraft(retained)) {
                 progressDraftAdopted = true;
+                taskProgressCard.suppressChildToolProgress();
                 previewLifecycle.retainPreview();
                 if (!retained.retired) releaseRetained = monitor.taskCardContinuation.retainProgressDraft({
                   agentId: route.agentId, sessionId: continuationSessionId,
@@ -806,12 +825,13 @@ export async function dispatchMattermostInboundTurn(
             {
               sessionKey,
               label: typeof entry.label === "string" ? entry.label : undefined,
-              runId: entry.lastRunId,
+              sessionId: entry.sessionId,
               status: readVisibleWorkSessionStatus(entry.status),
             } satisfies MattermostVisibleWorkSession,
           ];
         });
-      if (directChildSessions.length > 0) {
+      if (directChildSessions.length > 0 && taskProgressCard.hasProgress()) {
+        registerContinuation();
         await taskProgressCard.noteVisibleWorkSessions(directChildSessions);
       }
     } catch (error: unknown) {
@@ -927,52 +947,59 @@ export async function dispatchMattermostInboundTurn(
                   initialRunId ??= runId;
                   taskProgressCard.noteRunStart(runId);
                 },
-                onVisibleWorkSessions: (sessions) => {
-                  const visibleWorkSessions = sessions.map((session) => {
-                    let entry:
-                      | { lastRunId?: string; status?: unknown }
-                      | undefined;
-                    try {
-                      entry = core.agent.session.getSessionEntry({
-                        sessionKey: session.sessionKey,
-                      });
-                    } catch (error: unknown) {
-                      monitor.logVerboseMessage(
-                        `mattermost work session state read failed session=${session.sessionKey}: ${String(error)}`,
-                      );
-                    }
-                    return {
-                      ...session,
-                      runId: entry?.lastRunId,
-                      status: readVisibleWorkSessionStatus(entry?.status),
-                    } satisfies MattermostVisibleWorkSession;
-                  });
-                  void taskProgressCard
-                    .noteVisibleWorkSessions(visibleWorkSessions)
-                    .catch((error: unknown) => {
-                      monitor.logVerboseMessage(
-                        `mattermost work session card callback failed: ${String(error)}`,
-                      );
+                onVisibleWorkSessions: async (sessions, creation) => {
+                  hasStartedWork = true;
+                  try {
+                    const visibleWorkSessions: MattermostVisibleWorkSession[] = [];
+                    const parent = core.agent.session.getSessionEntry({
+                      agentId: route.agentId, sessionKey: thread.sessionKey,
                     });
+                    const candidates: MattermostVisibleWorkSession[] = [...sessions];
+                    if (creation && !candidates.some((session) =>
+                      session.sessionKey === creation.createdSessionKey)) {
+                      candidates.push({ sessionKey: creation.createdSessionKey, status: "queued" });
+                    }
+                    for (const session of candidates) {
+                      try {
+                        const entry = core.agent.session.getSessionEntry({
+                          sessionKey: session.sessionKey,
+                        });
+                        // The no-URL creation key proves existence, not a public label
+                        // or foreign-parent authority. Validate its exact parent first.
+                        if (creation?.createdSessionKey === session.sessionKey &&
+                            (!parent?.sessionId || !entry ||
+                              entry.spawnedBy !== thread.sessionKey ||
+                              entry.spawnedBySessionId && entry.spawnedBySessionId !== parent.sessionId)) continue;
+                        if (entry?.spawnedBy && entry.spawnedBy !== thread.sessionKey ||
+                            entry?.spawnedBySessionId && parent?.sessionId &&
+                              entry.spawnedBySessionId !== parent.sessionId) continue;
+                        visibleWorkSessions.push({
+                          ...session,
+                          label: session.label ?? (typeof entry?.label === "string" ? entry.label : undefined),
+                          sessionId: entry?.sessionId,
+                          status: readVisibleWorkSessionStatus(entry?.status) ?? session.status,
+                        });
+                      } catch (error: unknown) {
+                        monitor.logVerboseMessage(
+                          `mattermost work session state read failed session=${session.sessionKey}: ${String(error)}`,
+                        );
+                      }
+                    }
+                    if (!visibleWorkSessions.length) return;
+                    registerContinuation();
+                    // The SDK awaits this callback before child dispatch. Join the
+                    // serialized write so lifecycle events cannot outrun its admission.
+                    await taskProgressCard.noteVisibleWorkSessions(visibleWorkSessions);
+                  } catch (error: unknown) {
+                    monitor.logVerboseMessage(
+                      `mattermost work session card callback failed: ${String(error)}`,
+                    );
+                  }
                 },
                 onModelSelected,
                 onPlanUpdate: async (planUpdate) => {
                   hasStartedWork = true;
-                  if (!continuationRegistered && initialRunId && monitor.taskCardContinuation) {
-                    continuationRegistered = true;
-                    try {
-                      const entry = core.agent.session.getSessionEntry({ sessionKey: thread.sessionKey });
-                      if (entry?.sessionId) {
-                        continuationSessionId = entry.sessionId;
-                        continuationOwner = monitor.taskCardContinuation.register({
-                        agentId: route.agentId, sessionId: entry.sessionId,
-                        sessionKey: thread.sessionKey, initialRunId, card: taskProgressCard,
-                        });
-                      }
-                    } catch (error: unknown) {
-                      monitor.logVerboseMessage(`mattermost continuation identity unavailable: ${String(error)}`);
-                    }
-                  }
+                  registerContinuation();
                   try {
                     await taskProgressCard.updatePlan(planUpdate);
                   } catch (error: unknown) {
@@ -1047,6 +1074,8 @@ export async function dispatchMattermostInboundTurn(
                   if (!draftToolProgressEnabled) {
                     return false;
                   }
+                  if (payloadLocal.kind === "subagent" &&
+                      taskProgressCard.ownsChildActivity(payloadLocal.itemId)) return false;
                   if (payloadLocal.hideFromChannelProgress || payloadLocal.suppressChannelProgress) {
                     return progressDraft.pushItemEvent(payloadLocal);
                   }

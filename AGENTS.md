@@ -44,7 +44,10 @@ OpenClaw. Keep changes scoped to that plugin boundary.
   lacks a usable post id. On an unaccepted failure, keep the original result
   identity safe to edit. On an accepted-without-id failure, stop that delivery
   path and do not retry into duplicate visible posts.
-- Turns without a plan must not create a card. Completed, failed, and cancelled
+- Turns without a plan must not create a `task_progress` card. Admitted child-only
+  work may create `subagent_progress` through the same serialized owner, without
+  a synthetic plan; a late plan upgrades that same physical card. Plain turns
+  without admitted children remain card-free. Completed, failed, and cancelled
   turns must leave a truthful terminal card without blocking final delivery.
 
 ## Delegated maintenance

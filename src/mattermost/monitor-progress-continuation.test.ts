@@ -4,7 +4,10 @@ import { retainMattermostProgressDraft } from "./monitor-progress-continuation.j
 
 const drain = async () => { for (let i = 0; i < 60; i++) await Promise.resolve(); };
 
-function fixture(requestOverride?: MattermostClient["request"]) {
+function fixture(
+  requestOverride?: MattermostClient["request"],
+  ownsChildActivity?: (itemId?: string) => boolean,
+) {
   const request = vi.fn<MattermostClient["request"]>(requestOverride ?? (async (_path, init) =>
     ({ id: "retained-preview", message: JSON.parse(String(init?.body ?? "{}")).message }) as never));
   const client: MattermostClient = { baseUrl: "https://mattermost.example.com",
@@ -15,6 +18,7 @@ function fixture(requestOverride?: MattermostClient["request"]) {
     client, channelId: "channel", rootId: "thread", postId: "retained-preview", text: "Working",
     snapshot: { lines: [] }, entry: { streaming: { mode: "progress", progress: { toolProgress: true } } },
     seed: "test", maxChars: 300, abortSignal: abort.signal, assertCurrent, log: vi.fn(),
+    ownsChildActivity,
   });
   return { draft, abort, request, assertCurrent };
 }
@@ -22,6 +26,23 @@ function fixture(requestOverride?: MattermostClient["request"]) {
 afterEach(() => vi.useRealTimers());
 
 describe("host-owned Mattermost continuation draft", () => {
+  it("suppresses only exactly owned child rows while retaining unknown children and tools", async () => {
+    vi.useFakeTimers();
+    const f = fixture(undefined, (itemId) => itemId === "known-child-run");
+    f.draft.push({ itemId: "known-child-run", kind: "subagent", title: "Known review", status: "running" });
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(f.request).not.toHaveBeenCalled();
+    f.draft.push({ itemId: "unknown-task", kind: "subagent", title: "Other review", status: "running" });
+    f.draft.push({ itemId: "known-child-run", kind: "tool", name: "read", status: "running" });
+    await vi.advanceTimersByTimeAsync(1500);
+    const message = JSON.parse(String(f.request.mock.calls.at(-1)?.[1]?.body)).message;
+    expect(message).toContain("Other review");
+    expect(message).toContain("Read");
+    expect(message).not.toContain("Known review");
+    f.draft.release();
+    await drain();
+  });
+
   it("renders the host's minimal operation and status on one bounded post, then retires once", async () => {
     vi.useFakeTimers();
     const f = fixture();

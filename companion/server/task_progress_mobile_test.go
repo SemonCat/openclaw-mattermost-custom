@@ -63,9 +63,89 @@ func TestNativeTaskProjectionAndWriteback(t *testing.T) {
 		}
 		visible := p.MessagesWillBeConsumed([]*model.Post{updated})[0]
 		raw, _ := json.Marshal(visible.Props["attachments"])
-		if status != "In progress" && (strings.Contains(string(raw), "▶") || strings.Contains(string(raw), "Running")) {
+		if status != "In progress" && strings.Contains(string(raw), "▶") {
 			t.Fatalf("terminal %s retained running state: %s", status, raw)
 		}
+	}
+}
+
+func TestChildOnlyNativeProjectionUpgradeAndFallback(t *testing.T) {
+	p, _ := newTestPlugin()
+	post := mobilePost()
+	identity := post.Props["openclaw_mattermost"].(map[string]any)
+	identity["kind"] = "subagent_progress"
+	card := post.Props["openclaw_task_progress"].(map[string]any)
+	post.Message = "#### Task progress · In progress\n\n##### Subagents\n- [ ] Child · Running"
+	card["source_message"], card["steps"] = post.Message, []any{}
+	delete(card, "title")
+	card["work_session_counts"] = map[string]any{
+		"queued": float64(0), "running": float64(2), "completed": float64(3),
+		"failed": float64(1), "cancelled": float64(0),
+	}
+	stored, reason := p.MessageWillBePosted(nil, post)
+	if reason != "" || stored.Type != taskProgressPostType || stored.Message != post.Message {
+		t.Fatal("child-only admission must retain the same canonical storage and renderer")
+	}
+	projected := wirePost(p.MessagesWillBeConsumed([]*model.Post{stored})[0])
+	block := projected.Props["mm_blocks"].([]any)[0].(map[string]any)
+	header := block["header"].([]any)
+	if header[0].(map[string]any)["text"] != "Agent details" ||
+		!strings.Contains(header[1].(map[string]any)["text"].(string), "2 running · 3 completed · 1 failed") {
+		t.Fatal("collapsed child-only header must show real aggregate counts without a fake plan")
+	}
+	if !strings.Contains(projected.Props["attachments"].([]any)[0].(map[string]any)["footer"].(string), "2 running") {
+		t.Fatal("Blocks-disabled native attachment must retain truthful aggregate summary")
+	}
+	restored, reason := p.MessageWillBeUpdated(nil, projected, stored)
+	if reason != "" || restored.Message != post.Message {
+		t.Fatal("child-only projected writes must restore complete canonical Markdown")
+	}
+	newer := stored.Clone()
+	newer.Message += "\nNew child"
+	if _, reason := p.MessageWillBeUpdated(nil, projected, newer); reason == "" {
+		t.Fatal("stale child-only projection must not overwrite newer progress")
+	}
+	upgrade := wirePost(stored)
+	upgrade.Props["openclaw_mattermost"].(map[string]any)["kind"] = "task_progress"
+	upgraded, reason := p.MessageWillBeUpdated(nil, upgrade, stored)
+	if reason != "" || upgraded.Id != stored.Id || p.nativeTask(upgraded) == nil {
+		t.Fatal("late real plan must keep the original physical child-card identity")
+	}
+	for _, kind := range []string{"turn_result", "forged"} {
+		foreign := wirePost(stored)
+		foreign.Props["openclaw_mattermost"].(map[string]any)["kind"] = kind
+		if p.nativeTask(foreign) != nil {
+			t.Fatal("new kind admission must remain an exact allowlist")
+		}
+	}
+}
+
+func TestFailedParentPreservesActualNativeChildStates(t *testing.T) {
+	p, _ := newTestPlugin()
+	post := mobilePost()
+	post.Message = strings.Replace(post.Message, "In progress", "Failed", 1)
+	card := post.Props["openclaw_task_progress"].(map[string]any)
+	card["status"], card["source_message"] = "failed", post.Message
+	card["work_sessions"] = []any{
+		map[string]any{"label": "Reviewer", "status": "running"},
+		map[string]any{"label": "Verifier", "status": "queued"},
+	}
+	card["work_session_counts"] = map[string]any{
+		"queued": float64(1), "running": float64(1), "completed": float64(0),
+		"failed": float64(0), "cancelled": float64(0),
+	}
+	projected := p.MessagesWillBeConsumed([]*model.Post{p.prepareNativeTask(post)})[0]
+	raw, _ := json.Marshal(projected.Props["attachments"])
+	if !strings.Contains(string(raw), "Reviewer · Running") ||
+		!strings.Contains(string(raw), "Verifier · Queued") || strings.Contains(string(raw), "▶") {
+		t.Fatalf("terminal parent must stop animation without falsifying child state: %s", raw)
+	}
+	header := projected.Props["mm_blocks"].([]any)[0].(map[string]any)["header"].([]any)
+	if !strings.Contains(header[1].(map[string]any)["text"].(string), "1 running · 1 queued") {
+		t.Fatal("collapsed native summary must agree with actual child rows")
+	}
+	if !strings.Contains(string(raw), "Failed · 1 of 2 steps completed · 1 running · 1 queued") {
+		t.Fatal("Blocks-disabled attachment must keep terminal status and actual child counts")
 	}
 }
 
