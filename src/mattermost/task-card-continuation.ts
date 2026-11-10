@@ -158,7 +158,6 @@ export function createMattermostTaskCardContinuation(params: {
     if (!runId || !event || (owner.terminalRunId !== runId &&
         !(owner.yieldedRunId === runId && isMattermostTaskProgressYieldedWaiting(event.data)))) return;
     owner.terminalRunId = undefined;
-    owner.yieldedRunId = undefined;
     owner.lifecycle.delete(runId);
     owner.finishingGeneration = owner.generation;
     queue(owner, async (isCurrent) => {
@@ -168,7 +167,10 @@ export function createMattermostTaskCardContinuation(params: {
       await owner.card.finish({ outcome: event.data.phase === "error" ? "failed" : "completed", isCurrent });
       if (!isCurrent()) return;
       owner.finishingGeneration = undefined;
-      if (owner.runId === runId) owner.input = undefined;
+      if (owner.runId === runId) {
+        owner.input = undefined;
+        owner.terminalRunId = undefined;
+      }
       if (owner.releasing || !owner.card.canContinue()) retire(owner);
     });
   };
@@ -261,6 +263,20 @@ export function createMattermostTaskCardContinuation(params: {
     if (message.role === "assistant" && update.runId === rowRunId) {
       const cancelled = message.stopReason === "aborted";
       const failed = message.stopReason === "error";
+      // sessions_yield publishes an empty aborted assistant before stripping it.
+      // Its same-run successful tool result makes this row ambiguous: only the
+      // native lifecycle can prove a clean pause or a genuine cancellation.
+      if (cancelled && owner.yieldedRunId === rowRunId && message.errorMessage == null &&
+          Array.isArray(message.content) && message.content.every((value) => {
+            const block = record(value);
+            return block?.type === "text" && block.text === "";
+          })) {
+        // Keep the committed terminal correlated if host draft custody ends
+        // before the native receipt; draining must not manufacture a cancel.
+        owner.terminalRunId = rowRunId;
+        finishCommitted(owner);
+        return;
+      }
       const receipt = owner.lifecycle.get(rowRunId);
       if ((failed || cancelled) && (!receipt || !failedLifecycle(receipt))) {
         owner.lifecycle.set(rowRunId, { runId: rowRunId, stream: "lifecycle",
@@ -338,14 +354,16 @@ export function createMattermostTaskCardContinuation(params: {
           (event.data.phase !== "end" && event.data.phase !== "error")) continue;
       // A native end may precede its first transcript broadcast. Receipts alone
       // grant no authority: exact-session input and committed run rows still gate writes.
-      if (!owner.input && !owner.bufferingContinuation) continue;
+      const yieldedFailure = event.runId === owner.runId &&
+        owner.yieldedRunId === event.runId && failedLifecycle(event);
+      if (!owner.input && !owner.bufferingContinuation && !yieldedFailure) continue;
       if (owner.usedRuns.has(event.runId) && event.runId !== owner.runId) continue;
       if (!owner.lifecycle.has(event.runId) && owner.lifecycle.size >= MAX_PENDING) {
         retire(owner);
         continue;
       }
       owner.lifecycle.set(event.runId, event);
-      if (!owner.ready || event.runId !== owner.runId || !owner.input) continue;
+      if (!owner.ready || event.runId !== owner.runId || !owner.input && !yieldedFailure) continue;
       if (!failedLifecycle(event)) {
         finishCommitted(owner);
         continue;

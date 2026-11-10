@@ -51,13 +51,14 @@ async function fixture(options: { noPlan?: boolean; noChildren?: boolean; missin
   const complete = (options: { runId?: string; partial?: boolean; outerError?: boolean;
     innerError?: boolean; wrongCall?: boolean; wrongWrapper?: boolean; terminal?: "stop" | "error" | "aborted";
     yielded?: boolean; lifecycleFirst?: boolean; skipLifecycle?: boolean;
-    progress?: Record<string, unknown>; nested?: boolean; yieldToolOnly?: boolean } = {}) => {
+    progress?: Record<string, unknown>; nested?: boolean; yieldToolOnly?: boolean;
+    syntheticYieldAbort?: boolean; lifecycleData?: Record<string, unknown> } = {}) => {
     const runId = options.runId ?? "successor-run";
     emit({ role: "user", provenance: { kind: "inter_session", sourceChannel: "internal",
       sourceTool: "subagent_settle", sourceSessionKey: "child-1" }, content: [] });
-    const terminalData = options.yielded ? yieldedEnd : {
+    const terminalData = options.lifecycleData ?? (options.yielded ? yieldedEnd : {
       phase: options.terminal === "error" ? "error" : "end", aborted: options.terminal === "aborted",
-    };
+    });
     if (options.lifecycleFirst) end(runId, terminalData);
     const args = options.progress ?? {
       plan: steps.map((step, index) => ({ step, status: options.partial && index === 1 ? "pending" : "completed" })),
@@ -78,8 +79,16 @@ async function fixture(options: { noPlan?: boolean; noChildren?: boolean; missin
       }) }] });
     }
     if (options.yieldToolOnly) {
+      if (options.syntheticYieldAbort) {
+        emit({ role: "assistant", __openclaw: { runId }, stopReason: "toolUse",
+          content: [{ type: "toolCall", id: `${runId}-yield`, name: "sessions_yield", arguments: {} }] });
+      }
       emit({ role: "toolResult", __openclaw: { runId }, toolName: "sessions_yield",
-        isError: false, details: { status: "yielded" }, content: [] });
+        toolCallId: `${runId}-yield`, isError: false, details: { status: "yielded" }, content: [] });
+      if (options.syntheticYieldAbort) {
+        emit({ role: "assistant", __openclaw: { runId }, stopReason: "aborted",
+          content: [{ type: "text", text: "" }] }, runId);
+      }
     } else {
       emit({ role: "assistant", __openclaw: { runId },
         stopReason: options.terminal ?? "stop", content: [{ type: "text", text: "Result delivered separately" }] }, runId);
@@ -516,6 +525,186 @@ describe("continuation ownership and terminal fences", () => {
       f.complete({ runId: "retry-successor", lifecycleFirst });
       await drain();
       f.assertCompleted();
+    } finally { f.bridge.stop(); }
+  });
+
+  it.each([false, true])("keeps the card through synthetic yield aborts and child completion (lifecycle first=%s)", async (lifecycleFirst) => {
+    const f = await fixture({ yielded: true, childRunning: true });
+    const bodies = () => f.request.mock.calls.map(([, options]) => JSON.parse(String(options?.body)));
+    try {
+      await f.finish();
+      for (const runId of ["yield-1", "yield-2"]) {
+        f.complete({ runId, yielded: true, yieldToolOnly: true,
+          syntheticYieldAbort: true, lifecycleFirst, partial: true });
+        await drain();
+        expect(f.message()).toContain("Task progress · In progress");
+        expect(f.card.canContinue()).toBe(true);
+        expect(bodies().at(-1).props.openclaw_task_progress.work_session_counts).toMatchObject({
+          running: 1, completed: 0,
+        });
+      }
+      for (const listener of f.agentListeners) listener({
+        runId: "child-run", sessionKey: "child-1", stream: "lifecycle",
+        data: { phase: "end", aborted: false, stopReason: "end_turn" },
+      });
+      await drain();
+      expect(bodies().at(-1).props.openclaw_task_progress.work_session_counts).toMatchObject({
+        running: 0, completed: 1,
+      });
+      f.complete({ runId: "final-success", lifecycleFirst });
+      await drain();
+      f.assertCompleted();
+      expect(bodies().every(body => !body.message.includes("Cancelled"))).toBe(true);
+      expect(bodies().at(-1).props.openclaw_task_progress.work_session_counts).toMatchObject({
+        running: 0, completed: 1,
+      });
+      expect(f.card.canContinue()).toBe(false);
+    } finally { f.bridge.stop(); }
+  });
+
+  it("waits for native pause evidence after a yield result and empty aborted transcript", async () => {
+    const f = await fixture({ yielded: true });
+    try {
+      await f.finish();
+      f.complete({ yielded: true, yieldToolOnly: true, syntheticYieldAbort: true,
+        skipLifecycle: true, partial: true });
+      await drain();
+      expect(f.message()).toContain("Task progress · In progress");
+      const count = f.request.mock.calls.length;
+      f.end("foreign-run", yieldedEnd);
+      await drain();
+      expect(f.request.mock.calls).toHaveLength(count);
+      f.end("successor-run", yieldedEnd);
+      await drain();
+      f.complete({ runId: "final-success" });
+      await drain();
+      f.assertCompleted();
+      expect(f.request.mock.calls.every(([, options]) => !String(options?.body).includes("Cancelled"))).toBe(true);
+    } finally { f.bridge.stop(); }
+  });
+
+  describe.each([false, true])("deferred yield receipt after adopted draft release (drained=%s)", (beforeRelease) => {
+    it.each([
+      { data: yieldedEnd, expected: "In progress" },
+      { data: { phase: "end", aborted: true }, expected: "Cancelled" },
+      { data: { phase: "end", aborted: true, stopReason: "restart" }, expected: "Cancelled",
+        note: "Task cancelled: Gateway restart." },
+      { data: { phase: "end", aborted: true, stopReason: "superseded" }, expected: "Cancelled",
+        note: "Task cancelled: replaced by a newer session writer." },
+      { data: { phase: "error" }, expected: "Failed" },
+      { data: { phase: "end", aborted: true, stopReason: "timeout" }, expected: "Failed",
+        note: "Task failed: the run timed out." },
+    ])("joins only the native terminal after synthetic abort: $data", async ({ data, expected, note }) => {
+      const f = await fixture({ yielded: true, adopted: true });
+      try {
+        await f.finish();
+        f.complete({ yielded: true, yieldToolOnly: true, syntheticYieldAbort: true,
+          skipLifecycle: true, partial: true });
+        if (beforeRelease) await drain();
+        f.releaseDraft?.();
+        await drain();
+        expect(f.message()).toContain("Task progress · In progress");
+        const pending = f.request.mock.calls.length;
+        f.end("foreign-run", data);
+        await drain();
+        expect(f.request.mock.calls).toHaveLength(pending);
+        f.end("successor-run", data);
+        await drain();
+        expect(f.message()).toContain(`Task progress · ${expected}`);
+        if (note) expect(f.message()).toContain(note);
+        const count = f.request.mock.calls.length;
+        f.complete({ runId: "after-host-release" });
+        await drain();
+        expect(f.request.mock.calls).toHaveLength(count);
+        expect(f.request.mock.calls.filter(([path]) => path === "/posts?silent=true")).toHaveLength(1);
+        expect(f.request.mock.calls.slice(1).every(([path]) => path === "/posts/original-card/patch")).toBe(true);
+      } finally { f.bridge.stop(); }
+    });
+  });
+
+  it.each([false, true])("retires a settled synthetic yield with host custody (drained=%s)", async (beforeRelease) => {
+    const f = await fixture({ yielded: true, adopted: true });
+    try {
+      await f.finish();
+      f.complete({ yielded: true, yieldToolOnly: true, syntheticYieldAbort: true,
+        lifecycleFirst: true, partial: true });
+      if (beforeRelease) await drain();
+      f.releaseDraft?.();
+      await drain();
+      expect(f.message()).toContain("Task progress · In progress");
+      const count = f.request.mock.calls.length;
+      f.end("successor-run", { phase: "error" });
+      f.complete({ runId: "after-host-release" });
+      await drain();
+      expect(f.request.mock.calls).toHaveLength(count);
+    } finally { f.bridge.stop(); }
+  });
+
+  describe.each([false, true])("native failure precedence (lifecycle first=%s)", (lifecycleFirst) => {
+    it.each([
+      { data: { phase: "end", aborted: true }, expected: "Cancelled" },
+      { data: { phase: "end", status: "cancelled" }, expected: "Cancelled" },
+      { data: { phase: "end", aborted: true, stopReason: "restart" }, expected: "Cancelled",
+        note: "Task cancelled: Gateway restart." },
+      { data: { phase: "end", aborted: true, stopReason: "superseded" }, expected: "Cancelled",
+        note: "Task cancelled: replaced by a newer session writer." },
+      { data: { phase: "error" }, expected: "Failed" },
+      { data: { phase: "end", error: "execution failed" }, expected: "Failed" },
+      { data: { phase: "end", aborted: true, stopReason: "timeout" }, expected: "Failed",
+        note: "Task failed: the run timed out." },
+      { data: { phase: "end", status: "timed_out" }, expected: "Failed" },
+      { data: { phase: "end", timeoutPhase: "provider", aborted: true }, expected: "Failed" },
+    ])("preserves true outcomes with a successful yield and synthetic abort: $data", async ({ data, expected, note }) => {
+      const f = await fixture({ yielded: true });
+      try {
+        await f.finish();
+        f.complete({ yieldToolOnly: true, syntheticYieldAbort: true, lifecycleFirst,
+          lifecycleData: { ...yieldedEnd, ...data } });
+        await drain();
+        expect(f.message()).toContain(`Task progress · ${expected}`);
+        if (note) expect(f.message()).toContain(note);
+        expect(f.card.canContinue()).toBe(false);
+        const count = f.request.mock.calls.length;
+        f.complete({ runId: "later-run" });
+        await drain();
+        expect(f.request.mock.calls).toHaveLength(count);
+      } finally { f.bridge.stop(); }
+    });
+  });
+
+  it.each([
+    { data: { phase: "end", aborted: true, stopReason: "restart" }, expected: "Cancelled" },
+    { data: { phase: "end", aborted: true, stopReason: "superseded" }, expected: "Cancelled" },
+    { data: { phase: "error" }, expected: "Failed" },
+    { data: { phase: "end", aborted: true, stopReason: "timeout" }, expected: "Failed" },
+  ])("honours a native failure after the clean yield has finished: $data", async ({ data, expected }) => {
+    const f = await fixture({ yielded: true });
+    try {
+      await f.finish();
+      f.complete({ yielded: true, yieldToolOnly: true, syntheticYieldAbort: true });
+      await drain();
+      expect(f.message()).toContain("Task progress · In progress");
+      f.end("successor-run", data);
+      await drain();
+      expect(f.message()).toContain(`Task progress · ${expected}`);
+      expect(f.card.canContinue()).toBe(false);
+    } finally { f.bridge.stop(); }
+  });
+
+  it.each([
+    { content: [{ type: "text", text: "Actual interrupted output" }] },
+    { content: [{ type: "text", text: "" }], errorMessage: "Actual interruption" },
+    { content: [{ type: "toolCall", id: "another-call", name: "read", arguments: {} }] },
+  ])("does not hide a non-synthetic aborted assistant after a yield result: %j", async (message) => {
+    const f = await fixture({ yielded: true });
+    try {
+      await f.finish();
+      f.complete({ yielded: true, yieldToolOnly: true, skipLifecycle: true });
+      f.emit({ role: "assistant", __openclaw: { runId: "successor-run" },
+        stopReason: "aborted", ...message }, "successor-run");
+      await drain();
+      expect(f.message()).toContain("Task progress · Cancelled");
+      expect(f.card.canContinue()).toBe(false);
     } finally { f.bridge.stop(); }
   });
 
