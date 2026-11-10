@@ -212,6 +212,196 @@ function fixture(
 }
 
 describe("Mattermost monitor streaming boundaries", () => {
+  it.each(["settle", "continue", "completed", "child-failed", "restarted-child",
+    "settled-during-publish", "failed", "cancelled"] as const)(
+    "keeps earlier pending work on a normal progress reply and honors %s",
+    async (outcome) => {
+      const f = fixture("off");
+      const parent = "agent:main:mattermost:channel:channel-1:thread:thread-1";
+      const child = outcome === "continue" ? "agent:reviewer:subagent:earlier-child" :
+        "agent:main:subagent:earlier-child";
+      type Events = MattermostMonitorContext["core"]["events"];
+      const transcripts = new Set<Parameters<Events["onSessionTranscriptUpdate"]>[0]>();
+      const agents = new Set<Parameters<Events["onAgentEvent"]>[0]>();
+      const events = {
+        onSessionTranscriptUpdate: (listener: Parameters<Events["onSessionTranscriptUpdate"]>[0]) => {
+          transcripts.add(listener);
+          return () => { transcripts.delete(listener); };
+        },
+        onAgentEvent: (listener: Parameters<Events["onAgentEvent"]>[0]) => {
+          agents.add(listener);
+          return () => { agents.delete(listener); };
+        },
+      } as Events;
+      f.monitor.core.events = events;
+      const bridge = createMattermostTaskCardContinuation({ events, log: vi.fn() });
+      f.monitor.taskCardContinuation = bridge;
+      const entry = {
+        spawnedBy: parent, spawnedBySessionId: "test-session", sessionId: "child-session",
+        createdAt: Date.now() - 60_000, status: "running", label: "Earlier work",
+      };
+      f.monitor.core.agent.session.listSessionEntries = () => (
+        outcome === "continue" ? [] : [{ sessionKey: child, entry }]
+      ) as never;
+      f.monitor.core.agent.session.getSessionEntry = ({ sessionKey }) => (
+        sessionKey === child ? entry : { sessionId: "test-session" }
+      ) as never;
+      let seq = 10;
+      const transcript = (message: unknown, runId?: string) => {
+        for (const listener of transcripts) listener({
+          target: { agentId: "main", sessionId: "test-session", sessionKey: parent },
+          messageSeq: ++seq, message, runId,
+        });
+      };
+      const lifecycle = (runId: string, sessionKey: string, data: Record<string, unknown>,
+        sessionId = sessionKey === child ? "child-session" : "test-session") => {
+        for (const listener of agents) listener({ runId, sessionKey, sessionId,
+          stream: "lifecycle", data });
+      };
+      let settledDuringPublish = false;
+      const request = f.monitor.client.request;
+      f.monitor.client.request = async <T>(path: string, init?: RequestInit): Promise<T> => {
+        const body = typeof init?.body === "string" ? JSON.parse(init.body) : {};
+        if (outcome === "settled-during-publish" && !settledDuringPublish &&
+            path === "/posts/post-1/patch" &&
+            body.props?.openclaw_task_progress?.work_session_counts?.running === 1) {
+          settledDuringPublish = true;
+          lifecycle("successor-child-run", child, { phase: "end" });
+        }
+        return request<T>(path, init);
+      };
+      const steps = [
+        { step: "Inspect", status: "completed" as const },
+        { step: "Implement", status: "in_progress" as const },
+        { step: "Verify", status: "pending" as const },
+        { step: "Report", status: "pending" as const },
+      ];
+      try {
+        await f.run(async (params) => {
+          params.replyOptions?.onAgentRunStart?.("progress-run");
+          await params.replyOptions?.onPlanUpdate?.({ source: "openclaw",
+            steps: outcome === "completed" ? steps.map(({ step }) => ({ step, status: "completed" })) : steps });
+          transcript({ role: "toolResult", __openclaw: { runId: "progress-run" },
+            toolName: "sessions_yield", isError: false, content: [],
+            details: { status: "already_pending", pendingChildren: [{
+              childSessionKey: child, runId: "child-run", state: "running", wakeArmed: true,
+            }] } });
+          if (outcome === "restarted-child" || outcome === "settled-during-publish") {
+            lifecycle("successor-child-run", child, { phase: "start" });
+          }
+          // already_pending grants no new wait claim: this parent ends normally.
+          lifecycle("progress-run", parent, { phase: outcome === "failed" ? "error" : "end",
+            stopReason: "stop", aborted: outcome === "cancelled" });
+        });
+        const card = () => f.posts.get("post-1")!;
+        expect(card().props?.openclaw_mattermost).toMatchObject({ kind: "task_progress" });
+        const initialStatus = outcome === "failed" ? "Failed" :
+          outcome === "cancelled" ? "Cancelled" :
+            outcome === "settled-during-publish" ? "Incomplete" : "In progress";
+        expect(card().message).toContain(`Task progress · ${initialStatus}`);
+        expect(card().props?.openclaw_task_progress).toMatchObject({
+          work_session_counts: { running: outcome === "settled-during-publish" ? 0 : 1,
+            completed: outcome === "settled-during-publish" ? 1 : 0 },
+        });
+        // A terminal from a previous child run or incarnation must not settle this work.
+        lifecycle("previous-run", child, { phase: "end" });
+        lifecycle("child-run", child, { phase: "end" }, "previous-child-session");
+        if (outcome === "restarted-child") lifecycle("child-run", child, { phase: "end" });
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+        expect(card().message).toContain(`Task progress · ${initialStatus}`);
+        if (outcome !== "settled-during-publish") {
+          lifecycle(outcome === "restarted-child" ? "successor-child-run" : "child-run", child,
+            { phase: outcome === "child-failed" ? "error" : "end" });
+        } else expect(settledDuringPublish).toBe(true);
+        if (outcome === "continue") {
+          transcript({ role: "user", content: [], provenance: { kind: "inter_session",
+            sourceChannel: "internal", sourceTool: "subagent_settle", sourceSessionKey: child } });
+          transcript({ role: "custom", customType: "openclaw.nested-tool.v1",
+            details: { runId: "continuation-run", toolName: "progress_card", isError: false,
+              input: { plan: steps.map(({ step }) => ({ step, status: "completed" })) },
+              result: { content: [], details: {} } } });
+          transcript({ role: "assistant", __openclaw: { runId: "continuation-run" },
+            stopReason: "stop", content: [] }, "continuation-run");
+          lifecycle("continuation-run", parent, { phase: "end", stopReason: "stop" });
+        }
+        await vi.waitFor(() => {
+          const status = outcome === "continue" || outcome === "completed" ? "Completed" :
+            outcome === "child-failed" ? "Failed" :
+              outcome === "settle" || outcome === "restarted-child" ? "Incomplete" : initialStatus;
+          expect(card().message).toContain(`Task progress · ${status}`);
+          expect(card().props?.openclaw_task_progress).toMatchObject({
+            work_session_counts: { running: 0, completed: outcome === "child-failed" ? 0 : 1,
+              failed: outcome === "child-failed" ? 1 : 0 },
+          });
+        });
+        if (outcome !== "continue" && outcome !== "completed") {
+          expect(card().message).toContain("- [ ] **Implement**");
+        }
+        expect(f.calls.filter(call => call.path.split("?")[0] === "/posts")).toHaveLength(1);
+        expect(f.calls.filter(call => call.path.endsWith("/patch"))
+          .every(call => call.path === "/posts/post-1/patch")).toBe(true);
+      } finally {
+        bridge.stop();
+        expect(agents.size).toBe(0);
+        expect(transcripts.size).toBe(0);
+      }
+    },
+  );
+
+  it.each([
+    "no-receipt", "wrong-run", "wrong-transcript", "tool-error", "not-pending",
+    "paused", "foreign-parent", "foreign-incarnation", "missing-incarnation",
+    "terminal-child", "unknown-status", "replaced-child", "replaced-parent", "no-plan",
+  ] as const)("does not adopt historical or unproven work (%s)", async (boundary) => {
+    const f = fixture("off");
+    const parent = "agent:main:mattermost:channel:channel-1:thread:thread-1";
+    const child = "agent:reviewer:subagent:earlier-child";
+    type Listener = Parameters<MattermostMonitorContext["core"]["events"]["onSessionTranscriptUpdate"]>[0];
+    let transcript: Listener | undefined;
+    f.monitor.core.events = { onSessionTranscriptUpdate: (listener: Listener) => {
+      transcript = listener;
+      return () => { transcript = undefined; };
+    } } as never;
+    const entry = {
+      spawnedBy: boundary === "foreign-parent" ? "another-thread" : parent,
+      spawnedBySessionId: boundary === "foreign-incarnation" ? "previous-parent" :
+        boundary === "missing-incarnation" ? undefined : "test-session",
+      sessionId: "child-session", createdAt: Date.now() - 60_000,
+      status: boundary === "terminal-child" ? "done" : boundary === "unknown-status" ? undefined : "running",
+    };
+    let parentSessionId = "test-session";
+    f.monitor.core.agent.session.listSessionEntries = () => [{ sessionKey: child, entry }] as never;
+    f.monitor.core.agent.session.getSessionEntry = ({ sessionKey }) => (
+      sessionKey === child ? entry : { sessionId: parentSessionId }
+    ) as never;
+    await f.run(async (params) => {
+      params.replyOptions?.onAgentRunStart?.("progress-run");
+      if (boundary !== "no-plan") await params.replyOptions?.onPlanUpdate?.({
+        steps: [{ step: "Implement", status: "in_progress" }],
+      });
+      if (boundary !== "no-receipt") transcript?.({
+        target: { agentId: "main", sessionId: boundary === "wrong-transcript" ? "previous-parent" : "test-session",
+          sessionKey: parent },
+        messageSeq: 1,
+        message: { role: "toolResult", __openclaw: { runId: boundary === "wrong-run" ? "previous-run" : "progress-run" },
+          toolName: "sessions_yield", isError: boundary === "tool-error", content: [],
+          details: { status: boundary === "not-pending" ? "nothing_pending" : "already_pending",
+            pendingChildren: [{ childSessionKey: child, runId: "child-run",
+              state: boundary === "paused" ? "paused" : "running", wakeArmed: true }] } },
+      });
+      if (boundary === "replaced-child") entry.sessionId = "replacement-child";
+      if (boundary === "replaced-parent") parentSessionId = "replacement-parent";
+    });
+    expect(transcript).toBeUndefined();
+    if (boundary === "no-plan") expect(f.posts.size).toBe(0);
+    else {
+      expect(f.posts.get("post-1")?.message).toContain("Task progress · Incomplete");
+      expect(f.posts.get("post-1")?.props?.openclaw_task_progress).toMatchObject({
+        work_sessions: [], work_session_counts: { running: 0 },
+      });
+    }
+  });
+
   it("resolves cross-agent creation in the child key's owning store", async () => {
     const f = fixture("off");
     const parent = "agent:main:mattermost:channel:channel-1:thread:thread-1";

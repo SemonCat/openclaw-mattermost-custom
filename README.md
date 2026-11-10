@@ -821,6 +821,15 @@ create a durable card. Cleanup-only discovery cannot create a card after a final
 Card API failures are isolated from final-answer delivery and use bounded create
 fallback to avoid duplicate posts.
 
+A normal progress reply may describe work spawned by an earlier turn. A successful,
+same-run `sessions_yield` result with `already_pending` can identify those active
+children for an existing card, after exact parent and child session-incarnation
+checks. This does not give the progress reply a new yield claim. The card remains
+In progress while that work runs; child settlement and proven parent continuation
+update the same post. Once the work settles, unfinished checklist steps still
+produce Incomplete. Historical children without that pending-work evidence are
+not adopted merely because they share a thread.
+
 Cancelled cards include a reason when evidenced by the host's stable `restart`
 or `superseded` stop reason. A generic abort says
 `Task cancelled; reason unavailable.` It does not attribute cancellation to a

@@ -1129,8 +1129,6 @@ describe("mattermost inbound user posts", () => {
       replyOptions.onAgentRunStart("selected-run");
       if (order === "after") replyOptions.onModelSelected(selected);
       expect(mockState.agentEventListeners.length).toBeGreaterThan(0);
-      // Account-scoped task-card continuation still observes transcript changes.
-      expect(mockState.sessionTranscriptListeners).toHaveLength(1);
       for (const listener of mockState.agentEventListeners) {
         listener({ runId: "selected-run", sessionKey: ctx.SessionKey, stream: "usage", data: { inputTokens: 50, outputTokens: 100 } });
       }
@@ -1150,6 +1148,7 @@ describe("mattermost inbound user posts", () => {
 
     expect(mockState.onModelSelected).toHaveBeenCalledExactlyOnceWith(selected);
     expect(mockState.updateMattermostPost).not.toHaveBeenCalled();
+    expect(mockState.sessionTranscriptListeners).toHaveLength(0);
   });
 
   it("formats current and pending-history timestamps in the configured user timezone", async () => {

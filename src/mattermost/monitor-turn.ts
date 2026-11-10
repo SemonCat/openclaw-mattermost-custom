@@ -64,6 +64,7 @@ import { withMattermostSessionAdmissionRetry } from "./session-admission-retry.j
 import { recordMattermostThreadParticipation } from "./thread-participation.js";
 import {
   createMattermostTaskProgressCard,
+  type MattermostTaskProgressAgentEvent,
   type MattermostVisibleWorkSession,
 } from "./task-progress-card.js";
 
@@ -104,6 +105,11 @@ function readVisibleWorkSessionStatus(
     default:
       return undefined;
   }
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown> : undefined;
 }
 
 function createDisabledMattermostDraftStream(): ReturnType<typeof createMattermostDraftStream> {
@@ -299,10 +305,56 @@ export async function dispatchMattermostInboundTurn(
     },
     deleteCurrent: () => draftStream.deleteCurrentMessage(),
   });
+  const pendingChildren = new Map<string, MattermostVisibleWorkSession & {
+    parentSessionId: string;
+    events: MattermostTaskProgressAgentEvent[];
+  }>();
   unsubscribeAgentEvents =
     core.events?.onAgentEvent?.((evt) => {
+      const pending = evt.sessionKey ? pendingChildren.get(evt.sessionKey) : undefined;
+      if (pending && evt.stream === "lifecycle") {
+        // Preserve the admission-to-cleanup window without retaining tool/prose
+        // traffic. An overflowing candidate loses authority rather than freshness.
+        if (pending.events.length >= 32) pendingChildren.delete(pending.sessionKey);
+        else pending.events.push(evt);
+      }
       taskProgressCard.noteAgentEvent(evt);
     }) ?? (() => {});
+  // An already_pending receipt proves earlier child work, not a yield by this
+  // turn. Retain its run identity; public session metadata has no active run id.
+  const unsubscribePendingChildren = core.events?.onSessionTranscriptUpdate?.((update) => {
+    if (!initialRunId || update.target.agentId !== route.agentId ||
+        update.target.sessionKey !== thread.sessionKey) return;
+    const message = record(update.message);
+    const details = record(message?.details);
+    if (message?.role !== "toolResult" || message.toolName !== "sessions_yield" ||
+        message.isError !== false || record(message.__openclaw)?.runId !== initialRunId ||
+        details?.status !== "already_pending" || !Array.isArray(details.pendingChildren)) return;
+    try {
+      const parent = core.agent.session.getSessionEntry({
+        agentId: route.agentId, sessionKey: thread.sessionKey,
+      });
+      if (!parent?.sessionId || parent.sessionId !== update.target.sessionId) return;
+      for (const value of details.pendingChildren) {
+        const child = record(value);
+        if (child?.state !== "running" || typeof child.childSessionKey !== "string" ||
+            typeof child.runId !== "string" || !child.runId.trim()) continue;
+        const entry = core.agent.session.getSessionEntry({ sessionKey: child.childSessionKey });
+        if (!entry?.sessionId || entry.spawnedBy !== thread.sessionKey ||
+            entry.spawnedBySessionId !== parent.sessionId ||
+            entry.status !== "running" && entry.status !== "queued") continue;
+        const existing = pendingChildren.get(child.childSessionKey);
+        if (existing?.runId === child.runId && existing.sessionId === entry.sessionId &&
+            existing.parentSessionId === parent.sessionId) continue;
+        pendingChildren.set(child.childSessionKey, {
+          sessionKey: child.childSessionKey, runId: child.runId, sessionId: entry.sessionId,
+          parentSessionId: parent.sessionId, events: [],
+        });
+      }
+    } catch (error: unknown) {
+      monitor.logVerboseMessage(`mattermost pending work identity unavailable: ${String(error)}`);
+    }
+  }) ?? (() => {});
   if (agentEventsShouldStop) {
     stopAgentEvents();
   }
@@ -786,6 +838,7 @@ export async function dispatchMattermostInboundTurn(
       return;
     }
     presentationCleanupStarted = true;
+    unsubscribePendingChildren();
     try {
       await draftStream.stop();
     } catch (err) {
@@ -808,13 +861,15 @@ export async function dispatchMattermostInboundTurn(
       failed: dispatchError || finalDeliveryFailed || queuedFollowupDeliveryError,
     });
     try {
-      const directChildSessions = core.agent.session
+      const pendingChildEvents: MattermostTaskProgressAgentEvent[] = [];
+      const directChildSessions: MattermostVisibleWorkSession[] = core.agent.session
         .listSessionEntries({
           agentId: route.agentId,
           readOnly: true,
         })
         .flatMap(({ sessionKey, entry }) => {
           if (
+            pendingChildren.has(sessionKey) ||
             entry.spawnedBy !== thread.sessionKey ||
             typeof entry.createdAt !== "number" ||
             entry.createdAt < turnStartedAt
@@ -830,14 +885,39 @@ export async function dispatchMattermostInboundTurn(
             } satisfies MattermostVisibleWorkSession,
           ];
         });
+      if (pendingChildren.size > 0) {
+        const parent = core.agent.session.getSessionEntry({
+          agentId: route.agentId, sessionKey: thread.sessionKey,
+        });
+        for (const child of pendingChildren.values()) {
+          const entry = core.agent.session.getSessionEntry({ sessionKey: child.sessionKey });
+          const status = readVisibleWorkSessionStatus(entry?.status);
+          if (!parent?.sessionId || parent.sessionId !== child.parentSessionId ||
+              !entry || !status || entry.sessionId !== child.sessionId ||
+              entry.spawnedBy !== thread.sessionKey ||
+              entry.spawnedBySessionId !== parent.sessionId) continue;
+          directChildSessions.push({
+            sessionKey: child.sessionKey, runId: child.runId, sessionId: child.sessionId,
+            label: typeof entry.label === "string" ? entry.label : undefined,
+            status,
+          });
+          pendingChildEvents.push(...child.events);
+        }
+      }
       if (directChildSessions.length > 0 && taskProgressCard.hasProgress()) {
         registerContinuation();
-        await taskProgressCard.noteVisibleWorkSessions(directChildSessions);
+        const publication = taskProgressCard.noteVisibleWorkSessions(directChildSessions);
+        // Admission is synchronous. Restore its run transitions before a REST
+        // await lets a live successor terminal overtake the buffered start.
+        for (const event of pendingChildEvents) taskProgressCard.noteAgentEvent(event);
+        await publication;
       }
     } catch (error: unknown) {
       monitor.logVerboseMessage(
         `mattermost hidden work session discovery failed parent=${thread.sessionKey}: ${String(error)}`,
       );
+    } finally {
+      pendingChildren.clear();
     }
     await taskProgressCard.finish({
       outcome: readAgentRunTerminalOutcome(dispatchResult),
