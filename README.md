@@ -41,7 +41,7 @@ mkdir -p .artifacts/releases
 npm run build
 npm pack --omit=dev --pack-destination .artifacts/releases
 openclaw plugins install \
-  ./.artifacts/releases/openclaw-mattermost-custom-2026.11.2.tgz --force
+  ./.artifacts/releases/openclaw-mattermost-custom-2026.11.3.tgz --force
 ```
 
 Do not use `plugins install --link` or add this source checkout to
@@ -111,7 +111,7 @@ Compared with the official plugin, this build preserves:
 - Channel/sender tool policies through the published host's shared policy pipeline.
 - Up to ten ordered attachments on one post, including ordinary inbound replies.
 
-This artifact targets the published OpenClaw `2026.11.2` SDK and requires an
+This artifact targets the published OpenClaw `2026.11.3` SDK and requires an
 OpenClaw host at least that version. Its Node contract follows that release:
 `>=24.16.0 <25 || >=26.1.0`. Development checks use Node `26.12.1`; this does
 not establish the runtime version of an installed Gateway.
@@ -1018,8 +1018,8 @@ The package build bundles plugin-owned TypeScript only. OpenClaw Plugin SDK,
 the plugin's declared runtime dependencies. This keeps OpenClaw core code and
 state migrations out of the plugin artifact.
 
-This release targets the published OpenClaw `2026.11.2` SDK and requires host
-and plugin API `>=2026.11.2`. Earlier hosts are not covered by this build's
+This release targets the published OpenClaw `2026.11.3` SDK and requires host
+and plugin API `>=2026.11.3`. Earlier hosts are not covered by this build's
 compatibility checks. The build verifies every emitted SDK subpath and named
 binding against the exact dev dependency in this checkout's `node_modules`;
 linked host checkouts and Gateway host overrides are not used.
@@ -1041,7 +1041,26 @@ changes in this repo's `src/`. Recheck the downstream command, callback,
 reaction, and trigger-cap behavior when upstream touches the corresponding
 files.
 
-### OpenClaw 2026.11.2 adaptation
+### OpenClaw 2026.11.3 adaptation
+
+This build advances the artifact, exact published development SDK, minimum host,
+plugin API and build metadata together to 2026.11.3. The Node engine contract
+remains `>=24.16.0 <25 || >=26.1.0`.
+
+Unscoped directory discovery now deduplicates clients by normalized server URL,
+token and private-network policy. Accounts that share a token across servers or
+use different network policies no longer hide a valid directory connection;
+identical connections still share one lookup. Explicit account-scoped discovery
+keeps its existing boundary.
+
+Existing downstream commands, controls, reactions, task cards, child progress,
+yield/continuation handling, thread routing, delivery and companion previews
+remain in place. Host-owned private child-result filtering and child handoffs
+are consumed through the published SDK. Source comparison, validation and
+deployment requirements are recorded in
+[the 11.3 upstream review](docs/upstream-2026.11.3.md).
+
+### Previous OpenClaw 2026.11.2 adaptation
 
 This build advances the artifact, exact published development SDK, minimum host,
 plugin API and build metadata together to 2026.11.2. The Node engine contract
@@ -1286,7 +1305,7 @@ shared Mattermost contract tests and the downstream behavior tests.
 ### Test status against the published npm SDK
 
 This repo builds and tests against the published `openclaw` npm package
-(`2026.11.2`), not the OpenClaw monorepo checkout. One category of tests
+(`2026.11.3`), not the OpenClaw monorepo checkout. One category of tests
 behaves differently from the monorepo for that reason:
 
 - Ten suites import test-only Plugin SDK subpaths (`channel-test-helpers`,
