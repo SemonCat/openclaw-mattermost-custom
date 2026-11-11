@@ -76,7 +76,12 @@ function normalizePostId(value: unknown): string | undefined {
 }
 
 function trimUrlPunctuation(value: string): string {
-  return value.replace(/[),.!?\]}]+$/u, "");
+  let end = value.length;
+  // Scan only the suffix so non-terminal punctuation cannot trigger rescanning.
+  while (end > 0 && "),.!?]}".includes(value.charAt(end - 1))) {
+    end -= 1;
+  }
+  return value.slice(0, end);
 }
 
 function normalizeHttpOrigin(value: string): string | undefined {

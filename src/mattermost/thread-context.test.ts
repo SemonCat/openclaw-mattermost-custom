@@ -137,6 +137,35 @@ describe("Mattermost permalink parsing", () => {
       }),
     ).toBeUndefined();
   });
+
+  it("preserves permalink punctuation trimming without stripping other path characters", () => {
+    const baseUrl = "https://chat.example.com";
+    const permalink = `${baseUrl}/team/pl/${LINK_ID}`;
+    for (const suffix of [")", ",", ".", "!", "?", "]", "}", "),.!?]}"]) {
+      expect(parseMattermostPermalinkReference({ value: permalink + suffix, baseUrl })).toBe(LINK_ID);
+    }
+    for (const suffix of ["x", ";", ":", "[", "）"]) {
+      expect(
+        parseMattermostPermalinkReference({ value: permalink + suffix, baseUrl }),
+      ).toBeUndefined();
+    }
+  });
+
+  it("collects links with long terminal and non-terminal punctuation runs promptly", () => {
+    const baseUrl = "https://chat.example.com";
+    const punctuation = "!".repeat(40_000);
+    const text = [
+      `https://foreign.example.com/team/pl/${ROOT_ID}?q=${punctuation}x`,
+      `${baseUrl}/team/pl/${LINK_ID}?q=${punctuation}x`,
+      `${baseUrl}/team/pl/${LINK_ID}${punctuation}`,
+    ].join(" ");
+    const started = performance.now();
+    const references = collectMattermostPermalinkReferences({ text, baseUrl });
+    const elapsed = performance.now() - started;
+
+    expect(references).toEqual([LINK_ID]);
+    expect(elapsed).toBeLessThan(500);
+  });
 });
 
 describe("projected task thread context", () => {
