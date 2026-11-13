@@ -858,6 +858,17 @@ and a bounded 32-row successor buffer; ordinary original-run transcript volume d
 not consume that buffer. Existing cards and ownership lost on restart are not adopted,
 and a continuation never creates a card for an unadmitted turn or an accepted post with
 no usable identity. Final answers keep their separate delivery path.
+Automatic `sessions_send` notifications and runtime notices (`internal_system`,
+with no source tool or `exec`) retain observation of the unfinished session card.
+They clear prior run correlation and do not themselves reopen, edit, or finish
+the physical card. A committed successor in the exact parent incarnation must
+successfully save a nonempty native `progress_card`, with a positive saved
+revision, before that same post can follow its plan. Native card revisions are
+session versions, not task identities. Notification text, assistant prose,
+failed saves, and lifecycle receipts alone grant no writes. Initial runtime
+notices leave the original callback writer intact. Unknown input provenance
+continues to fence observation.
+
 An unprovenanced human correction retires unadopted continuation ownership,
 including during the original run: the transcript API does not prove same-run
 steer adoption on user rows. Later original-run tools alone cannot establish it.
@@ -875,7 +886,9 @@ keeps ordinary final delivery; abort and session replacement still stop stale wo
 Current host-adopted custody preserves the original card's observation across
 same-session input. Each input clears previous run/tool correlation; only a fresh
 trusted settle from an already-known child can authorize subsequent committed
-progress and terminal receipts. Host retirement closes observation and drains an
+progress and terminal receipts after human input. Human input or a new inbound
+turn permanently closes the automatic native-save projection path for that old
+card, even if host custody remains. Host retirement closes observation and drains an
 already-proven terminal update. If its committed terminal assistant arrived first,
 only that exact run's missing native lifecycle receipt may still finalize the card;
 draft retirement itself never proves completion. New human input, session replacement, account stop,

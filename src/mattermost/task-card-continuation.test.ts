@@ -113,6 +113,189 @@ async function fixture(options: { noPlan?: boolean; noChildren?: boolean; missin
 
 afterEach(() => vi.useRealTimers());
 
+const notifierInput = { role: "user", provenance: {
+  kind: "inter_session", sourceTool: "sessions_send", sourceSessionKey: "notifier",
+}, content: [] };
+const notifierPlan = [
+  { step: "Product checks", status: "completed" },
+  { step: "Tool review", status: "completed" },
+  { step: "Wait for notifier", status: "in_progress" },
+  { step: "Activation verification", status: "pending" },
+] as const;
+function nativeSave(runId: string, completed = true) {
+  const plan = notifierPlan.map(step => ({ ...step,
+    step: !completed && step.step === "Wait for notifier" ? "Check fresh handoff" : step.step,
+    status: completed ? "completed" : step.status }));
+  return { role: "custom", customType: "openclaw.nested-tool.v1", details: {
+    runId, toolName: "progress_card", isError: false, input: { plan },
+    result: { content: [], details: { revision: completed ? 12 : 9, steps: {
+      completed: completed ? 4 : 2, total: 4,
+    } } },
+  } };
+}
+
+describe("native session-card projection after automatic input", () => {
+  it.each([false, true])("preserves early native lifecycle across automatic input, before initial finish=%s", async before => {
+    const f = await fixture({ yielded: true });
+    try {
+      if (!before) await f.finish();
+      f.emit(notifierInput);
+      f.end("notifier-run");
+      f.emit(nativeSave("notifier-run"));
+      f.emit({ role: "assistant", __openclaw: { runId: "notifier-run" },
+        stopReason: "stop", content: [] }, "notifier-run");
+      if (before) await f.finish();
+      await drain();
+      expect(f.message()).toContain("Task progress · Completed");
+    } finally { f.bridge.stop(); }
+  });
+
+  it.each([
+    { before: false, adopted: false }, { before: true, adopted: false },
+    { before: false, adopted: true }, { before: true, adopted: true },
+  ])("projects notifier 2/4 then 4/4 onto the original card, before=$before adopted=$adopted", async ({ before, adopted }) => {
+    const f = await fixture({ yielded: true, adopted });
+    try {
+      await f.card.updatePlan({ source: "openclaw", steps: [...notifierPlan] });
+      if (!before) await f.finish();
+      f.emit(notifierInput);
+      f.emit({ role: "assistant", __openclaw: { runId: "notifier-run" }, stopReason: "toolUse",
+        content: [{ type: "toolCall", id: "dispatch", name: "dispatch_action", arguments: {} }] });
+      f.emit(nativeSave("notifier-run", false));
+      if (before) await f.finish();
+      await drain();
+      expect(f.message()).toContain("Task progress · In progress");
+      expect(f.message()).toContain("Check fresh handoff");
+      expect(f.message()).not.toContain("Wait for notifier");
+      f.emit({ role: "assistant", __openclaw: { runId: "notifier-run" },
+        stopReason: "stop", content: [] }, "notifier-run");
+      f.end("notifier-run");
+      await drain();
+      expect(f.message()).toContain("Task progress · Incomplete");
+      f.emit(notifierInput);
+      f.emit(nativeSave("completed-run"));
+      f.emit({ role: "assistant", __openclaw: { runId: "completed-run" },
+        stopReason: "stop", content: [] }, "completed-run");
+      f.end("completed-run");
+      await drain();
+      expect(f.message()).toContain("Task progress · Completed");
+      for (const step of notifierPlan) expect(f.message()).toContain(`- [x] ${step.step}`);
+      expect(f.request.mock.calls.filter(([path]) => path === "/posts?silent=true")).toHaveLength(1);
+      expect(f.request.mock.calls.slice(1).every(([path]) => path === "/posts/original-card/patch")).toBe(true);
+    } finally { f.bridge.stop(); }
+  });
+
+  it.each([undefined, "exec"])("preserves the initial callback across runtime input sourceTool=%s", async sourceTool => {
+    const f = await fixture({ yielded: true });
+    try {
+      f.emit({ role: "user", provenance: { kind: "internal_system", sourceTool }, content: [] });
+      await f.card.updatePlan({ source: "openclaw", steps: [...notifierPlan] });
+      await f.finish();
+      f.emit(notifierInput);
+      f.emit(nativeSave("notifier-run"));
+      f.emit({ role: "assistant", __openclaw: { runId: "notifier-run" },
+        stopReason: "stop", content: [] }, "notifier-run");
+      f.end("notifier-run");
+      await drain();
+      expect(f.message()).toContain("Task progress · Completed");
+    } finally { f.bridge.stop(); }
+  });
+
+  it.each(["notification", "prose", "lifecycle", "outer-error", "inner-error", "missing-revision", "cleared", "wrong-tool"])(
+    "does not reopen or finalize without a successful save: %s", async cause => {
+      const f = await fixture({ yielded: true });
+      try {
+        await f.finish();
+        const count = f.request.mock.calls.length;
+        f.emit(notifierInput);
+        if (cause === "prose") f.emit({ role: "assistant", __openclaw: { runId: "unproven" },
+          stopReason: "stop", content: [{ type: "text", text: "All four completed" }] }, "unproven");
+        if (cause !== "notification" && cause !== "prose" && cause !== "lifecycle") {
+          const event = nativeSave("unproven");
+          if (cause === "outer-error") event.details.isError = true;
+          if (cause === "inner-error") Object.assign(event.details.result, { isError: true });
+          if (cause === "missing-revision") event.details.result.details.revision = 0;
+          if (cause === "cleared") event.details.input.plan = [];
+          if (cause === "wrong-tool") event.details.toolName = "other_tool";
+          f.emit(event);
+          f.emit({ role: "assistant", __openclaw: { runId: "unproven" }, stopReason: "stop", content: [] }, "unproven");
+        }
+        f.end("unproven", { phase: "end" });
+        await drain();
+        expect(f.request.mock.calls).toHaveLength(count);
+        // Unproven lifecycle cannot poison the retained owner.
+        f.emit(notifierInput);
+        f.emit(nativeSave("verified"));
+        await drain();
+        expect(f.request.mock.calls.length).toBeGreaterThan(count);
+      } finally { f.bridge.stop(); }
+    },
+  );
+
+  it.each(["human", "new-inbound", "incarnation", "unknown-runtime", "foreign-child"])(
+    "prevents notifier resurrection after %s, even with host custody", async cause => {
+      const f = await fixture({ yielded: true, adopted: true });
+      try {
+        await f.finish();
+        if (cause === "human") f.emit({ role: "user", content: [] });
+        if (cause === "new-inbound") f.bridge.retireSession(target.sessionKey);
+        if (cause === "incarnation") f.emit({ role: "user" }, undefined, { ...target, sessionId: "new" });
+        if (cause === "unknown-runtime") f.emit({ role: "user", provenance: { kind: "internal_system", sourceTool: "unknown" } });
+        if (cause === "foreign-child") f.emit({ role: "user", provenance: {
+          kind: "inter_session", sourceTool: "subagent_settle", sourceChannel: "internal", sourceSessionKey: "unrelated",
+        } });
+        const count = f.request.mock.calls.length;
+        f.emit(notifierInput);
+        f.emit(nativeSave("notifier-run"));
+        f.emit({ role: "assistant", __openclaw: { runId: "notifier-run" }, stopReason: "stop", content: [] }, "notifier-run");
+        f.end("notifier-run");
+        await drain();
+        expect(f.request.mock.calls).toHaveLength(count);
+      } finally { f.bridge.stop(); }
+    },
+  );
+
+  it("requires a fresh native save after a ready-phase exec wake and fences queued previous writes", async () => {
+    const f = await fixture({ yielded: true });
+    try {
+      await f.finish();
+      const count = f.request.mock.calls.length;
+      f.emit(notifierInput);
+      f.emit(nativeSave("before-exec"));
+      f.emit({ role: "user", provenance: { kind: "internal_system", sourceTool: "exec" } });
+      f.emit({ role: "assistant", __openclaw: { runId: "exec-run" }, stopReason: "stop", content: [] }, "exec-run");
+      f.end("exec-run");
+      await drain();
+      expect(f.request.mock.calls).toHaveLength(count);
+      f.emit({ role: "user", provenance: { kind: "internal_system", sourceTool: "exec" } });
+      f.emit(nativeSave("next-exec-run"));
+      f.emit({ role: "assistant", __openclaw: { runId: "next-exec-run" }, stopReason: "stop", content: [] }, "next-exec-run");
+      f.end("next-exec-run");
+      await drain();
+      expect(f.request.mock.calls.length).toBeGreaterThan(count);
+    } finally { f.bridge.stop(); }
+  });
+
+  it.each(["error", "aborted"] as const)("does not revive a notifier card after terminal %s", async terminal => {
+    const f = await fixture({ yielded: true });
+    try {
+      await f.finish();
+      f.emit(notifierInput);
+      f.emit(nativeSave("failed-run"));
+      f.emit({ role: "assistant", __openclaw: { runId: "failed-run" },
+        stopReason: terminal, content: [] }, "failed-run");
+      f.end("failed-run", terminal === "error" ? { phase: "error" } : { phase: "end", aborted: true });
+      await drain();
+      expect(f.message()).toContain(terminal === "error" ? "Task progress · Failed" : "Task progress · Cancelled");
+      const count = f.request.mock.calls.length;
+      f.emit(notifierInput);
+      f.emit(nativeSave("revival"));
+      await drain();
+      expect(f.request.mock.calls).toHaveLength(count);
+    } finally { f.bridge.stop(); }
+  });
+});
+
 describe("committed native task-card continuation retention", () => {
   it("continues an admitted child-only card and upgrades it through proven native progress", async () => {
     const f = await fixture({ noPlan: true, yielded: true });

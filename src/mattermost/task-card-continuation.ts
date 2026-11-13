@@ -43,7 +43,21 @@ function readPlan(value: unknown): MattermostTaskProgressPlan | undefined {
   return { source: "openclaw", steps, explanation, markdown };
 }
 
-function successfulWrappedResult(message: Record<string, unknown>): boolean {
+function savedRevision(result: Record<string, unknown> | undefined): boolean {
+  const revision = record(result?.details)?.revision;
+  return typeof revision === "number" && Number.isSafeInteger(revision) && revision > 0;
+}
+
+// Automatic inputs preserve observation only. A later native save authorizes projection.
+function isAutomaticInput(message: Record<string, unknown>): boolean {
+  const provenance = record(message.provenance);
+  return provenance?.kind === "inter_session" && provenance.sourceTool === "sessions_send" &&
+    typeof provenance.sourceSessionKey === "string" && Boolean(provenance.sourceSessionKey.trim()) ||
+    provenance?.kind === "internal_system" &&
+    (provenance.sourceTool === undefined || provenance.sourceTool === "exec");
+}
+
+function successfulWrappedResult(message: Record<string, unknown>, requireSave = false): boolean {
   if (message.isError !== false || !Array.isArray(message.content)) return false;
   for (const value of message.content) {
     const block = record(value);
@@ -53,7 +67,8 @@ function successfulWrappedResult(message: Record<string, unknown>): boolean {
       const tool = record(payload?.tool);
       const result = record(payload?.result);
       if (tool?.id === PROGRESS_TOOL_ID && tool.name === "progress_card" &&
-          tool.source === "openclaw" && result && result.isError !== true) return true;
+          tool.source === "openclaw" && result && result.isError !== true &&
+          (!requireSave || savedRevision(result))) return true;
     } catch { /* A non-JSON tool result cannot prove progress success. */ }
   }
   return false;
@@ -68,7 +83,8 @@ type Owner = {
   ready: boolean;
   active: boolean;
   seq: number;
-  input?: { sourceSessionKey: string; seq: number };
+  input?: { sourceSessionKey?: string; seq: number; requireSave?: boolean; candidateRunId?: string };
+  nativeProjection: boolean;
   runId?: string;
   usedRuns: Set<string>;
   calls: Map<string, MattermostTaskProgressPlan>;
@@ -128,8 +144,7 @@ export function createMattermostTaskCardContinuation(params: {
     return target && target.sessionKey === owner.sessionKey &&
       target.sessionId === owner.sessionId && target.agentId === owner.agentId;
   };
-  const fenceInput = (owner: Owner) => {
-    if (!hasHostCustody(owner)) { retire(owner); return; }
+  const resetInput = (owner: Owner, preserveLifecycle = false) => {
     owner.generation += 1;
     owner.input = undefined;
     owner.runId = undefined;
@@ -137,10 +152,15 @@ export function createMattermostTaskCardContinuation(params: {
     owner.yieldedRunId = undefined;
     owner.finishingGeneration = undefined;
     owner.calls.clear();
-    owner.lifecycle.clear();
+    if (!preserveLifecycle) owner.lifecycle.clear();
     owner.pending.length = 0;
     owner.bufferingContinuation = false;
-    owner.card.suspendContinuation();
+    if (owner.ready) owner.card.suspendContinuation();
+  };
+  const fenceInput = (owner: Owner) => {
+    owner.nativeProjection = false;
+    if (!hasHostCustody(owner)) { retire(owner); return; }
+    resetInput(owner);
   };
   const queue = (owner: Owner, operation: (isCurrent: () => boolean) => Promise<void>) => {
     const generation = owner.generation;
@@ -198,6 +218,13 @@ export function createMattermostTaskCardContinuation(params: {
     if (update.messageSeq <= owner.seq) return;
     owner.seq = update.messageSeq;
     if (message.role === "user") {
+      if (owner.nativeProjection && isAutomaticInput(message)) {
+        // A native receipt may precede buffered committed rows. It grants no
+        // writes until this input's successor proves a successful native save.
+        resetInput(owner, true);
+        owner.input = { seq: update.messageSeq, requireSave: true };
+        return;
+      }
       const provenance = record(message.provenance);
       if (provenance?.kind !== "inter_session" || provenance.sourceChannel !== "internal" ||
           provenance.sourceTool !== "subagent_settle" ||
@@ -218,7 +245,35 @@ export function createMattermostTaskCardContinuation(params: {
     const details = record(message.details);
     const rowRunId = committedRunId(update);
     if (!rowRunId || rowRunId === owner.initialRunId) return;
+    if (owner.runId && rowRunId !== owner.runId ||
+        owner.usedRuns.has(rowRunId) && rowRunId !== owner.runId) return;
+    if (owner.input.requireSave) {
+      owner.input.candidateRunId ??= rowRunId;
+      if (rowRunId !== owner.input.candidateRunId) return;
+    }
+    let plan: MattermostTaskProgressPlan | undefined;
+    if (message.role === "custom" && message.customType === "openclaw.nested-tool.v1" &&
+        details?.toolName === "progress_card" && details.isError === false &&
+        record(details.result) && record(details.result)?.isError !== true &&
+        (!owner.input.requireSave || savedRevision(record(details.result)))) {
+      plan = readPlan(details.input);
+    } else if (message.role === "assistant" && Array.isArray(message.content)) {
+      for (const value of message.content) {
+        const block = record(value);
+        if (block?.type !== "toolCall" || typeof block.id !== "string") continue;
+        const args = record(block.arguments);
+        const pendingPlan = (block.name === "tool_call" || block.name === "dispatch_action") &&
+          args?.id === PROGRESS_TOOL_ID ? readPlan(args.args) : undefined;
+        if (pendingPlan && owner.calls.size < MAX_PENDING) owner.calls.set(block.id, pendingPlan);
+      }
+    } else if (message.role === "toolResult" && typeof message.toolCallId === "string") {
+      const pendingPlan = owner.calls.get(message.toolCallId);
+      owner.calls.delete(message.toolCallId);
+      if ((message.toolName === "tool_call" || message.toolName === "dispatch_action") &&
+          successfulWrappedResult(message, owner.input.requireSave)) plan = pendingPlan;
+    }
     if (!owner.runId) {
+      if (owner.input.requireSave && !plan) return;
       if (owner.usedRuns.has(rowRunId)) return;
       if (owner.usedRuns.size >= MAX_PENDING) { retire(owner); return; }
       owner.runId = rowRunId;
@@ -233,27 +288,8 @@ export function createMattermostTaskCardContinuation(params: {
       }
     }
     if (rowRunId !== owner.runId) return;
-    const apply = (plan: MattermostTaskProgressPlan | undefined) => {
-      if (plan) queue(owner, async (isCurrent) => { await owner.card.updateContinuationPlan(rowRunId, plan, isCurrent); });
-    };
-    if (message.role === "custom" && message.customType === "openclaw.nested-tool.v1" &&
-        details?.toolName === "progress_card" && details.isError === false &&
-        record(details.result) && record(details.result)?.isError !== true) {
-      apply(readPlan(details.input));
-    } else if (message.role === "assistant" && Array.isArray(message.content)) {
-      for (const value of message.content) {
-        const block = record(value);
-        if (block?.type !== "toolCall" || typeof block.id !== "string") continue;
-        const args = record(block.arguments);
-        const plan = block.name === "tool_call" && args?.id === PROGRESS_TOOL_ID
-          ? readPlan(args.args) : undefined;
-        if (plan && owner.calls.size < MAX_PENDING) owner.calls.set(block.id, plan);
-      }
-    } else if (message.role === "toolResult" && typeof message.toolCallId === "string") {
-      const plan = owner.calls.get(message.toolCallId);
-      owner.calls.delete(message.toolCallId);
-      if (message.toolName === "tool_call" && successfulWrappedResult(message)) apply(plan);
-    }
+    const savedPlan = plan;
+    if (savedPlan) queue(owner, async (isCurrent) => { await owner.card.updateContinuationPlan(rowRunId, savedPlan, isCurrent); });
     if (message.role === "toolResult" && message.toolName === "sessions_yield" &&
         message.isError === false && details?.status === "yielded") {
       owner.yieldedRunId = rowRunId;
@@ -315,7 +351,11 @@ export function createMattermostTaskCardContinuation(params: {
       const message = record(update.message);
       if (message?.role === "user") {
         const provenance = record(message.provenance);
-        if (provenance?.kind !== "inter_session" || provenance.sourceTool !== "subagent_settle" ||
+        if (owner.nativeProjection && isAutomaticInput(message)) {
+          // The original callback remains the writer until finishInitial. Runtime
+          // notices must not erase retention or consume its tool-heavy transcript.
+          if (provenance?.kind === "internal_system" && !owner.bufferingContinuation) return;
+        } else if (provenance?.kind !== "inter_session" || provenance.sourceTool !== "subagent_settle" ||
             provenance.sourceChannel !== "internal" ||
             typeof provenance.sourceSessionKey !== "string") { fenceInput(owner); return; }
         // Hidden children are discovered by finishPresentation before finishInitial.
@@ -382,7 +422,7 @@ export function createMattermostTaskCardContinuation(params: {
       if (previous) retire(previous);
       if (stopped) return undefined;
       if (owners.size >= MAX_OWNERS) retire(owners.values().next().value!);
-      const owner: Owner = { ...input, ready: false, active: true, seq: -1, generation: 0,
+      const owner: Owner = { ...input, ready: false, active: true, seq: -1, generation: 0, nativeProjection: true,
         usedRuns: new Set([input.initialRunId]), calls: new Map(), pending: [], bufferingContinuation: false,
         lifecycle: new Map(),
         tail: Promise.resolve(), timer: setTimeout(() => retire(owner), OWNER_TTL_MS) };
