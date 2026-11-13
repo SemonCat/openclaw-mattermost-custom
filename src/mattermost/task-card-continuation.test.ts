@@ -135,6 +135,22 @@ function nativeSave(runId: string, completed = true) {
 }
 
 describe("native session-card projection after automatic input", () => {
+  it.each([undefined, { kind: "internal_system", sourceTool: "unknown" }])(
+    "suspends original callbacks on adopted human/unknown input before initial finish: %j", async provenance => {
+      const f = await fixture({ yielded: true, adopted: true });
+      try {
+        const count = f.request.mock.calls.length;
+        f.emit({ role: "user", provenance, content: [] });
+        await f.card.updatePlan({ source: "openclaw", steps: [
+          { step: "Stale original callback", status: "completed" },
+        ] });
+        await drain();
+        expect(f.request.mock.calls).toHaveLength(count);
+        expect(f.message()).not.toContain("Stale original callback");
+      } finally { f.bridge.stop(); }
+    },
+  );
+
   it.each([false, true])("preserves early native lifecycle across automatic input, before initial finish=%s", async before => {
     const f = await fixture({ yielded: true });
     try {

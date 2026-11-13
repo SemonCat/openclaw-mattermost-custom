@@ -161,6 +161,7 @@ export function createMattermostTaskCardContinuation(params: {
     owner.nativeProjection = false;
     if (!hasHostCustody(owner)) { retire(owner); return; }
     resetInput(owner);
+    if (!owner.ready) owner.card.suspendContinuation();
   };
   const queue = (owner: Owner, operation: (isCurrent: () => boolean) => Promise<void>) => {
     const generation = owner.generation;
