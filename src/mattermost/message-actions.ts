@@ -1,7 +1,7 @@
 import type { ChannelMessageActionContext } from "openclaw/plugin-sdk/channel-contract";
 import { isPrivateNetworkOptInEnabled } from "openclaw/plugin-sdk/ssrf-runtime";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
-import { normalizeMattermostMessagingTarget } from "../normalize.js";
+import { normalizeMattermostMessagingTarget, resolveMattermostPresentation } from "../normalize.js";
 import { resolveMattermostAccount } from "./accounts.js";
 import {
   createMattermostClient,
@@ -13,11 +13,15 @@ import {
   fetchMattermostPostReactions,
   setMattermostPostPinned,
   updateMattermostPostMessageWithReadback,
+  updateMattermostPost,
+  parseMattermostApiStatus,
   type MattermostClient,
   type MattermostFetch,
   type MattermostPost,
   type MattermostReaction,
 } from "./client.js";
+import { buildButtonProps, resolveInteractionCallbackUrl, setInteractionSecret } from "./interactions.js";
+import { detectMattermostBlocksSupport, resolveMattermostButtonFormat } from "./capabilities.js";
 import type { OpenClawConfig } from "./runtime-api.js";
 
 type ConversationReadInvocationOrigin = NonNullable<
@@ -131,13 +135,51 @@ async function resolveAuthorizedPost(
 }
 
 export async function editMattermostMessageAction(
-  params: MattermostPostActionContext & { message: string },
+  params: MattermostPostActionContext & { message: string; presentation?: unknown },
 ): Promise<MattermostPost> {
   const message = normalizeOptionalString(params.message);
   if (!message) {
     throw new Error("Mattermost edit requires non-empty message text.");
   }
-  const { client } = await resolveAuthorizedPost(params);
+  const { client, post } = await resolveAuthorizedPost(params);
+  if (params.presentation !== undefined) {
+    const channelId = normalizeOptionalString(post.channel_id);
+    if (!channelId) throw new Error("Mattermost post is missing its conversation binding.");
+    const me = await fetchMattermostMe(client);
+    if (post.user_id !== me.id) {
+      throw new Error("Mattermost presentation edits require a post authored by this bot.");
+    }
+    const account = resolveMattermostAccount(params);
+    const rendered = resolveMattermostPresentation({
+      text: message, presentation: params.presentation,
+      channelData: { mattermost: { typedCallbackOwner: "agent" } },
+    });
+    setInteractionSecret(account.accountId, client.token);
+    const callbackUrl = resolveInteractionCallbackUrl(account.accountId, {
+      ...params.cfg, interactions: account.config.interactions,
+    });
+    // An explicit presentation replaces controls; text-only edits retain them.
+    const props = { ...post.props };
+    for (const key of ["attachments", "mm_blocks", "mm_blocks_actions", "openclaw_question_form"]) {
+      delete props[key];
+    }
+    const configuredBlocks = account.config.interactions?.blocks;
+    const format = resolveMattermostButtonFormat(configuredBlocks,
+      rendered.buttons.length && configuredBlocks === undefined ? await detectMattermostBlocksSupport(client) : undefined);
+    const patch = (format: "legacy" | "blocks") => updateMattermostPost(client, params.postId, {
+      message: rendered.text,
+      props: { ...props, ...buildButtonProps({
+        buttons: rendered.buttons, accountId: account.accountId, channelId,
+        callbackUrl, format,
+      }) },
+    });
+    try {
+      return await patch(format);
+    } catch (error) {
+      if (format !== "blocks" || !rendered.buttons.length || parseMattermostApiStatus(error) !== 400) throw error;
+      return await patch("legacy");
+    }
+  }
   return await updateMattermostPostMessageWithReadback(client, params.postId, message);
 }
 

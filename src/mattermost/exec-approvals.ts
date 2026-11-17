@@ -1,11 +1,11 @@
 // Mattermost plugin module resolves native approval enablement, routing, and stable approvers.
 import { resolveApprovalApprovers } from "openclaw/plugin-sdk/approval-auth-runtime";
 import {
-  createChannelExecApprovalProfile,
+  createChannelExecApprovalProfileAsync,
   isChannelExecApprovalClientEnabledFromConfig,
   matchesApprovalRequestFilters,
 } from "openclaw/plugin-sdk/approval-client-runtime";
-import { doesApprovalRequestSelectChannelAccount } from "openclaw/plugin-sdk/approval-native-runtime";
+import { doesApprovalRequestSelectChannelAccountAsync } from "openclaw/plugin-sdk/approval-native-runtime";
 import type {
   ExecApprovalRequest,
   PluginApprovalRequest,
@@ -90,13 +90,13 @@ function isMattermostApprovalAccountEligible(params: {
   );
 }
 
-function matchesMattermostRequestAccount(params: {
+async function matchesMattermostRequestAccount(params: {
   cfg: OpenClawConfig;
   accountId?: string | null;
   request: ApprovalRequest;
-}): boolean {
+}): Promise<boolean> {
   const accountId = params.accountId ?? resolveDefaultMattermostAccountId(params.cfg);
-  return doesApprovalRequestSelectChannelAccount({
+  return doesApprovalRequestSelectChannelAccountAsync({
     ...params,
     channel: "mattermost",
     defaultAccountId: resolveDefaultMattermostAccountId(params.cfg),
@@ -111,7 +111,7 @@ function matchesMattermostRequestAccount(params: {
   });
 }
 
-const mattermostApprovalProfile = createChannelExecApprovalProfile({
+const mattermostApprovalProfile = createChannelExecApprovalProfileAsync({
   resolveConfig: resolveMattermostExecApprovalConfig,
   resolveApprovers: getMattermostExecApprovalApprovers,
   normalizeSenderId: normalizeMattermostApproverId,

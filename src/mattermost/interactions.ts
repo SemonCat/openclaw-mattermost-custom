@@ -136,6 +136,7 @@ type MattermostInteractionHandlerOptions = {
     actionId: string;
     actionName: string;
     selectedValue?: string;
+    callbackValue?: string;
     postId: string;
     post: MattermostPost;
   }) => Promise<void>;
@@ -439,6 +440,26 @@ export function buildButtonProps(params: {
     return undefined;
   }
 
+  for (const button of buttons) {
+    if (button.context.oc_callback !== 1) continue;
+    if (!params.accountId?.trim()) {
+      throw new Error("Mattermost callback requires an account identity.");
+    }
+    const value = button.context.callback_data;
+    if (typeof value !== "string" || !value || value.length > 2000) {
+      throw new Error("Mattermost callback requires 1–2000 characters of data.");
+    }
+    // Bind each rendered revision to a fresh physical control, including same-label edits.
+    button.id = `occallback${randomUUID().replaceAll("-", "")}`;
+    button.context = {
+      [SIGNED_CHANNEL_ID_CONTEXT_KEY]: params.channelId,
+      oc_callback: 1,
+      callback_account: params.accountId,
+      callback_data: value,
+      callback_expires: Date.now() + 24 * 60 * 60 * 1000,
+    };
+  }
+
   const formButton = buttons.find((button) =>
     button.id === "ocquestionform" && button.context.oc_question_form === 1);
   const formControl = formButton ? {
@@ -585,6 +606,25 @@ function readSelectControl(post: MattermostPost, actionId: string): {
   return block?.type === "static_select" && context ? { options: block.options, context } : null;
 }
 
+/** Queue rows carry authenticated data, but a replaced/deleted control cannot replay it. */
+function isCurrentAgentCallback(params: {
+  post: MattermostPost; payload: MattermostInteractionPayload; actionId: string;
+  context: Record<string, unknown>; botUserId: string; accountId: string;
+}): boolean {
+  const { post, payload, actionId, context } = params;
+  if (context.oc_callback !== 1 || !/^occallback[a-f0-9]{32}$/.test(actionId) ||
+    context.action_id !== actionId || context.callback_account !== params.accountId ||
+    context[SIGNED_CHANNEL_ID_CONTEXT_KEY] !== payload.channel_id ||
+    typeof context.callback_data !== "string" || !context.callback_data || context.callback_data.length > 2000 ||
+    typeof context.callback_expires !== "number" || !Number.isSafeInteger(context.callback_expires) ||
+    context.callback_expires <= Date.now() || post.id !== payload.post_id || post.channel_id !== payload.channel_id ||
+    post.user_id !== params.botUserId || post.delete_at) return false;
+  const attachments = post.props?.attachments;
+  return (Array.isArray(attachments) && attachments.some(attachment =>
+    Array.isArray(attachment?.actions) && attachment.actions.some((action: { id?: string } | null) => action?.id === actionId))) ||
+    findMattermostBlockControl(post.props?.mm_blocks, actionId)?.type === "button";
+}
+
 /** Validate the mutable choice against the currently signed, bot-authored post control. */
 function resolveSelectChoice(params: {
   post: MattermostPost; payload: MattermostInteractionPayload; actionId: string;
@@ -654,6 +694,13 @@ export function createMattermostInteractionProcessor(
   const { accountId, client, log } = params;
   const core = getMattermostRuntime();
   return async (interaction) => {
+    if ("oc_callback" in interaction.context || /^occallback[a-f0-9]{32}$/.test(interaction.actionId)) {
+      const currentPost = await client.request<MattermostPost>(`/posts/${encodeURIComponent(interaction.payload.post_id)}`);
+      if (!isCurrentAgentCallback({
+        post: currentPost, payload: interaction.payload, actionId: interaction.actionId,
+        context: interaction.context, botUserId: params.botUserId, accountId,
+      })) return;
+    }
     if (interaction.context.oc_select === true) {
       const currentPost = await client.request<MattermostPost>(`/posts/${encodeURIComponent(interaction.payload.post_id)}`);
       const choice = resolveSelectChoice({
@@ -719,7 +766,7 @@ export function createMattermostInteractionProcessor(
     }
 
     try {
-      if (interaction.context.oc_select !== true) {
+      if (interaction.context.oc_select !== true && interaction.context.oc_callback !== 1) {
       await updateMattermostPost(client, payload.post_id, {
         message: interaction.originalMessage,
         props: {
@@ -744,6 +791,7 @@ export function createMattermostInteractionProcessor(
           actionId: interaction.actionId,
           actionName: interaction.actionName,
           ...(typeof interaction.context.selected_option === "string" ? { selectedValue: interaction.context.selected_option } : {}),
+          ...(interaction.context.oc_callback === 1 ? { callbackValue: interaction.context.callback_data as string } : {}),
           postId: payload.post_id,
           post,
         });
@@ -934,6 +982,17 @@ export function createMattermostInteractionHandler(
         return;
       }
       originalMessage = originalPost.message ?? "";
+
+      if (("oc_callback" in contextWithoutToken || /^occallback[a-f0-9]{32}$/.test(actionId)) &&
+        !isCurrentAgentCallback({
+          post: originalPost, payload, actionId: String(actionId),
+          context: contextWithoutToken, botUserId: params.botUserId, accountId,
+        })) {
+        res.statusCode = 403;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ error: "Expired or invalid callback control" }));
+        return;
+      }
 
       if (hasSelection || context.oc_select === true) {
         const selected = context.selected_option ?? payload.selected_option;
@@ -1146,7 +1205,7 @@ export function createMattermostInteractionHandler(
 
     // Update the post via API to replace buttons with a completion indicator.
     try {
-      if (contextWithoutToken.oc_select !== true) {
+      if (contextWithoutToken.oc_select !== true && contextWithoutToken.oc_callback !== 1) {
       await updateMattermostPost(client, payload.post_id, {
         message: originalMessage,
         props: {
@@ -1177,6 +1236,7 @@ export function createMattermostInteractionHandler(
           actionId,
           actionName: clickedButtonName,
           ...(typeof contextWithoutToken.selected_option === "string" ? { selectedValue: contextWithoutToken.selected_option } : {}),
+          ...(contextWithoutToken.oc_callback === 1 ? { callbackValue: contextWithoutToken.callback_data as string } : {}),
           postId: payload.post_id,
           post: originalPost,
         });

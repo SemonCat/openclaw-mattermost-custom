@@ -1,10 +1,9 @@
 // Mattermost plugin module exposes OpenClaw's channel-native approval capability.
-import { createApproverRestrictedNativeApprovalCapability } from "openclaw/plugin-sdk/approval-delivery-runtime";
-import { createLazyChannelApprovalNativeRuntimeAdapter } from "openclaw/plugin-sdk/approval-handler-adapter-runtime";
-import type { ChannelApprovalNativeRuntimeAdapter } from "openclaw/plugin-sdk/approval-handler-runtime";
+import { createApproverRestrictedNativeApprovalCapabilityAsync } from "openclaw/plugin-sdk/approval-delivery-runtime";
+import { createLazyChannelApprovalNativeRuntimeAdapterAsync } from "openclaw/plugin-sdk/approval-handler-adapter-runtime";
 import {
-  createChannelApproverDmTargetResolver,
-  createChannelNativeOriginTargetResolver,
+  createChannelApproverDmTargetResolverAsync,
+  createChannelNativeOriginTargetResolverAsync,
 } from "openclaw/plugin-sdk/approval-native-runtime";
 import type {
   ExecApprovalRequest,
@@ -41,7 +40,7 @@ function resolveTurnSourceTarget(request: ApprovalRequest): MattermostApprovalTa
   return { to, ...(threadId ? { threadId } : {}) };
 }
 
-const resolveMattermostOriginTarget = createChannelNativeOriginTargetResolver({
+const resolveMattermostOriginTarget = createChannelNativeOriginTargetResolverAsync({
   channel: "mattermost",
   shouldHandleRequest: ({ cfg, accountId, request }) =>
     shouldHandleMattermostExecApprovalRequest({ cfg, accountId, request }),
@@ -52,7 +51,7 @@ const resolveMattermostOriginTarget = createChannelNativeOriginTargetResolver({
   }),
 });
 
-const resolveMattermostApproverDmTargets = createChannelApproverDmTargetResolver({
+const resolveMattermostApproverDmTargets = createChannelApproverDmTargetResolverAsync({
   shouldHandleRequest: ({ cfg, accountId, request }) =>
     shouldHandleMattermostExecApprovalRequest({ cfg, accountId, request }),
   resolveApprovers: getMattermostExecApprovalApprovers,
@@ -68,7 +67,7 @@ function describeMattermostApprovalSetup({ accountId }: { accountId?: string | n
 }
 
 export const mattermostApprovalCapability: ChannelApprovalCapability =
-  createApproverRestrictedNativeApprovalCapability({
+  createApproverRestrictedNativeApprovalCapabilityAsync({
     channel: "mattermost",
     channelLabel: "Mattermost",
     describeExecApprovalSetup: describeMattermostApprovalSetup,
@@ -91,7 +90,8 @@ export const mattermostApprovalCapability: ChannelApprovalCapability =
     resolveOriginTarget: resolveMattermostOriginTarget,
     resolveApproverDmTargets: resolveMattermostApproverDmTargets,
     notifyOriginWhenDmOnly: true,
-    nativeRuntime: createLazyChannelApprovalNativeRuntimeAdapter({
+    nativeRuntimeAsync: createLazyChannelApprovalNativeRuntimeAdapterAsync({
+      capabilityBoundary: true,
       eventKinds: ["exec", "plugin", "system-agent"],
       isConfigured: ({ cfg, accountId }) =>
         isMattermostExecApprovalClientEnabled({ cfg, accountId }),
@@ -99,6 +99,6 @@ export const mattermostApprovalCapability: ChannelApprovalCapability =
         shouldHandleMattermostExecApprovalRequest({ cfg, accountId, request }),
       load: async () =>
         (await import("./mattermost/approval-handler.runtime.js"))
-          .mattermostApprovalNativeRuntime as unknown as ChannelApprovalNativeRuntimeAdapter,
+          .mattermostApprovalNativeRuntime,
     }),
   });

@@ -467,13 +467,14 @@ const mattermostMessageActions: ChannelMessageActionAdapter = {
     return {
       ...payload,
       ...(mediaUrls.length ? { mediaUrl: mediaUrls[0], mediaUrls } : {}),
-      ...(attachmentText !== undefined
+      ...(attachmentText !== undefined || payload.presentation
         ? {
             channelData: {
               ...payload.channelData,
               mattermost: {
                 ...existingMattermostData,
-                attachmentText,
+                ...(attachmentText !== undefined ? { attachmentText } : {}),
+                ...(payload.presentation ? { typedCallbackOwner: "agent" } : {}),
               },
             },
           }
@@ -601,7 +602,10 @@ const mattermostMessageActions: ChannelMessageActionAdapter = {
         if (!message) {
           throw new Error("Mattermost edit requires message or content.");
         }
-        const post = await runtime.editMattermostMessageAction({ ...common, message });
+        const post = await runtime.editMattermostMessageAction({
+          ...common, message,
+          ...(params.presentation !== undefined ? { presentation: params.presentation } : {}),
+        });
         return jsonResult({ ok: true, post });
       }
       if (action === "delete") {
@@ -1168,7 +1172,7 @@ export const mattermostPlugin: ChannelPlugin<ResolvedMattermostAccount> = create
         const limit = resolveMattermostTextLimit(account);
         return [
           `Mattermost text replies support up to ${limit} UTF-16 code units per post on this account. Write a cohesive reply normally; delivery handles splitting when needed.`,
-          '- Inline buttons: `send` with `presentation={"blocks":[{"type":"buttons","buttons":[{"label":"Yes","value":"yes","style":"primary"}]}]}`. Typed `callback` actions render as plain text.',
+          '- Inline buttons: `send` or `edit` with `presentation={"blocks":[{"type":"buttons","buttons":[{"label":"Yes","action":{"type":"callback","value":"yes"},"style":"primary"}]}]}`. Callback values reach the agent as data, including slash-prefixed values; typed command actions remain text.',
           "Use the message tool's presentation blocks for buttons and single-select menus (1-25 distinct options). Use ask_user for questions so the original pending question is resolved by the user's choice.",
           "Protected credential requests use the host's secret-entry flow and native password dialog. Never request secrets as ordinary messages or generic form values.",
           "On Mattermost 12+, ask_user multiSelect and multiple questions open a dialog via Fill form, preserving Other answers. Use mattermost_form for multiple choices or row/column matrices; its tool result contains structured answers. Fill form uses mobile-compatible multi-select menus and one menu per matrix row; Web form provides native checkbox groups and matrices for the web client. The user must click a button to open the dialog. Forms are for ordinary, non-secret choices.",

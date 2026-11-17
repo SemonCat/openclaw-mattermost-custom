@@ -496,6 +496,37 @@ beforeEach(() => {
 });
 
 describe("mattermost ack reactions", () => {
+  it("passes the runtime thread key to shared delivery while retaining parent-session metadata", async () => {
+    const socket = new FakeWebSocket();
+    const abortController = new AbortController();
+    const config = { ...baseConfig, channels: { mattermost: {
+      ...baseConfig.channels?.mattermost, replyToMode: "all",
+    } } } as OpenClawConfig;
+    const core = createRuntimeCore(config);
+    mockState.runtimeCore = core;
+    mockState.dispatchInboundMessage.mockResolvedValue({ queuedFinal: false, counts: {} });
+    const monitor = monitorMattermostProvider({
+      config, runtime: testRuntime(), abortSignal: abortController.signal,
+      webSocketFactory: () => socket,
+    });
+    try {
+      await vi.waitFor(() => expect(socket.openListenerCount).toBeGreaterThan(0));
+      socket.emitOpen();
+      await emitMattermostChannelPost(socket, { id: "thread-hook-root", message: "hello" });
+    } finally {
+      abortController.abort();
+      socket.emitClose(1000);
+      await monitor;
+    }
+    const [turn] = vi.mocked(core.channel.session.recordInboundSession).mock.calls[0] as unknown as [{
+      route: { sessionKey: string }; ctxPayload: { SessionKey: string; ParentSessionKey: string };
+    }];
+    expect(turn.ctxPayload.SessionKey).toBe("mattermost:default:channel:chan-1:thread:thread-hook-root");
+    expect(turn.ctxPayload.ParentSessionKey).toBe("mattermost:default:channel:chan-1");
+    expect(turn.route.sessionKey).toBe(turn.ctxPayload.SessionKey);
+    expect(mockState.dispatchInboundMessage.mock.calls[0][0].ctx.SessionKey).toBe(turn.route.sessionKey);
+  }, 30_000);
+
   it("routes posted events through durable ingress and settles the accepted claim", async () => {
     const socket = new FakeWebSocket();
     const abortController = new AbortController();

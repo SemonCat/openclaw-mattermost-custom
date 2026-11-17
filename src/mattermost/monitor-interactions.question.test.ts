@@ -318,7 +318,7 @@ describe("Mattermost question interactions", () => {
     expect(mocks.resolveOption).not.toHaveBeenCalled();
   });
 
-  it("dispatches slash-shaped menu values as prose with the configured prompt and empty skill filter", async () => {
+  it.each(["menu", "callback"])("dispatches slash-shaped %s values as prose with the configured prompt and empty skill filter", async kind => {
     const channelCfg = { channels: { mattermost: { groups: { "chan-1": { systemPrompt: "Configured instructions", skills: [] } } } } };
     const dispatch = vi.fn(async (_params: { ctxPayload: Record<string, unknown>; replyOptions: { skillFilter?: string[] } }) => { });
     captureOptions(undefined, {
@@ -335,7 +335,9 @@ describe("Mattermost question interactions", () => {
     const registered = mocks.createProcessor.mock.calls[0][0] as Parameters<typeof createMattermostInteractionProcessor>[0];
     await registered.dispatchButtonClick!({
       channelId: "chan-1", userId: "user-1", userName: "ada", actionId: "select0",
-      actionName: "Review", selectedValue: "/skill code-review", postId: "post-1",
+      actionName: "Review",
+      ...(kind === "menu" ? { selectedValue: "/skill code-review" } : { callbackValue: "/skill code-review" }),
+      postId: "post-1",
       post: { id: "post-1", root_id: "root-1" },
     });
     expect(dispatch).toHaveBeenCalledOnce();
@@ -343,8 +345,20 @@ describe("Mattermost question interactions", () => {
       ctxPayload: { GroupSystemPrompt: "Configured instructions", CommandAuthorized: false, MessageThreadId: "root-1" },
       replyOptions: { skillFilter: [] },
     });
-    expect(dispatch.mock.calls[0][0].ctxPayload.CommandBody).toMatch(/^\[Menu selection:/);
+    expect(dispatch.mock.calls[0][0].ctxPayload.CommandBody).toMatch(kind === "menu" ? /^\[Menu selection:/ : /^\[Button callback:/);
+    expect(dispatch.mock.calls[0][0].ctxPayload.CommandBody).toContain('"/skill code-review"');
     expect(mocks.resolveOption).not.toHaveBeenCalled();
+  });
+
+  it("rejects an agent callback after the account is disabled", async () => {
+    const disabled = { channels: { mattermost: { enabled: false } } };
+    const options = captureOptions(undefined, {
+      cfg: disabled,
+      core: { config: { current: () => disabled } },
+    });
+    expect(await options.authorizeButtonClick!({
+      payload: { channel_id: "chan-1", user_id: "user-1", context: { oc_callback: 1 } },
+    } as never)).toMatchObject({ ok: false });
   });
 });
 

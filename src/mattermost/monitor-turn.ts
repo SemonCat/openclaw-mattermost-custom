@@ -953,7 +953,7 @@ export async function dispatchMattermostInboundTurn(
               route: {
                 agentId: route.agentId,
                 dmScope: route.dmScope,
-                sessionKey: route.sessionKey,
+                sessionKey: thread.sessionKey,
               },
               ctxPayload,
               afterRecord: reactions.activateAfterRecord,

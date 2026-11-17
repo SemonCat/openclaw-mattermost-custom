@@ -231,11 +231,11 @@ function expectSingleMattermostSend(to: string, text: string): Record<string, un
 }
 
 describe("mattermostPlugin", () => {
-  it("exposes the native approval runtime and stable-id authorization", () => {
+  it("exposes the async native approval runtime and stable-id authorization", async () => {
     const approval = mattermostPlugin.approvalCapability;
-    expect(approval?.nativeRuntime).toBeDefined();
+    expect(approval?.nativeRuntimeAsync).toBeDefined();
     expect(
-      approval?.authorizeActorAction?.({
+      await approval?.authorizeActorActionAsync?.({
         cfg: {
           channels: {
             mattermost: {
@@ -1800,10 +1800,9 @@ describe("mattermostPlugin", () => {
       expect(options.buttons).toStrictEqual([
         [
           {
-            id: "yes",
+            id: "callback-0",
             text: "Yes",
-            callback_data: "yes",
-            context: { callback_data: "yes" },
+            context: { oc_callback: 1, callback_data: "yes" },
             style: "primary",
           },
         ],
@@ -1857,7 +1856,7 @@ describe("mattermostPlugin", () => {
       ]);
     });
 
-    it("does not render callback action buttons that Mattermost cannot round-trip", async () => {
+    it("renders message-action callback buttons as agent-owned controls", async () => {
       const cfg = createMattermostTestConfig();
 
       await runMattermostMessageAction(
@@ -1881,7 +1880,9 @@ describe("mattermostPlugin", () => {
       );
 
       const options = expectSingleMattermostSend("channel:CHAN1", "Pick\n\n- Inspect");
-      expect(options.buttons).toBeUndefined();
+      expect(options.buttons).toEqual([[
+        expect.objectContaining({ text: "Inspect", context: { oc_callback: 1, callback_data: "inspect" } }),
+      ]]);
     });
 
     it("does not render command action buttons that Mattermost cannot execute", async () => {

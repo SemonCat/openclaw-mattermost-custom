@@ -676,6 +676,23 @@ commands or callback namespaces. They do not execute privileged commands.
 Question menus resolve the original Gateway question and retire the control after
 an answer; terminal clicks and replay cannot create an extra agent turn.
 
+Message-tool `send` and `edit` presentations also support typed button callbacks:
+`{"label":"Review","action":{"type":"callback","value":"pick:today"}}`.
+The value reaches the conversation agent as quoted callback data, including values
+such as `/new`; it does not execute a slash command. Native question, approval,
+secret and model controls retain their own handlers. Typed callbacks from other
+plugin reply presentations still use text fallback; typed commands and typed
+select options remain unsupported.
+
+Each rendered callback button has a fresh control identity, expires after
+24 hours and requires a current bot-authored post plus existing sender/channel
+authorization. Editing with a presentation replaces controls and invalidates
+older callbacks, even when the label stays the same. Text-only edits preserve
+controls. Presentation edits require this account's bot to own the post.
+Callbacks preserve up to 2,000 characters of data. Retries of the same control
+by the same user share one durable event identity, including across restart.
+The queue rechecks the current control and authorization before dispatch.
+
 Native approval cards enable automatically when a stable 26-character
 Mattermost user id is available in `execApprovals.approvers`, `allowFrom`, or
 `commands.ownerAllowFrom`. They default to the originating Mattermost
@@ -699,6 +716,9 @@ Approval decisions use typed, HMAC-signed callback context and the canonical
 Gateway approval service, so first-answer-wins state remains authoritative.
 Mutable usernames are deliberately ignored for privileged approval decisions.
 Pending cards are edited in place when resolved, expired, or cancelled.
+Native approval eligibility, account selection, target resolution and runtime
+availability use the public asynchronous SDK contracts; stable approvers,
+origin/DM/both delivery and canonical terminal decisions retain their rules.
 
 Secret requests originating in Mattermost include an **Enter credential** button. It opens a
 Mattermost password dialog for the requested secret. The submitted value is handled synchronously

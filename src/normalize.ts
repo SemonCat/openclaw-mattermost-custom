@@ -57,7 +57,7 @@ export function resolveMattermostPresentation(params: {
     ? presentation.blocks
         .filter((block) => block.type === "buttons")
         .map((block) =>
-          block.buttons.flatMap((button): MattermostPresentationButton[] => {
+          block.buttons.flatMap((button, buttonIndex): MattermostPresentationButton[] => {
             const action = button.action;
             if (action?.type === "question") {
               if ("intent" in action) {
@@ -84,6 +84,15 @@ export function resolveMattermostPresentation(params: {
                   ];
             }
             if (action) {
+              const mattermost = params.channelData?.mattermost as Record<string, unknown> | undefined;
+              if (action.type === "callback" && mattermost?.typedCallbackOwner === "agent") {
+                return [{
+                  id: `callback-${buttonIndex}`,
+                  text: button.label,
+                  context: { oc_callback: 1, callback_data: action.value },
+                  style: button.style,
+                }];
+              }
               return [];
             }
             const value = resolveMessagePresentationControlValue(button);

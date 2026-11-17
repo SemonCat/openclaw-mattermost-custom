@@ -181,6 +181,13 @@ export function registerMattermostInteractions(params: {
     authorizeButtonClick: async ({ payload }) => {
       const eventMonitor = pinMattermostMonitorConfig(monitor);
       const { cfg } = eventMonitor;
+      const isAgentCallback = payload.context?.oc_callback === 1;
+      const currentAccount = isAgentCallback
+        ? resolveMattermostAccount({ cfg, accountId: account.accountId })
+        : account;
+      if (isAgentCallback && (!currentAccount.enabled || cfg.channels?.mattermost?.enabled === false)) {
+        return { ok: false as const, response: { ephemeral_text: "This Mattermost account is disabled." } };
+      }
       const approvalAction = parseMattermostApprovalAction(payload.context ?? {});
       if (
         approvalAction !== null &&
@@ -198,7 +205,7 @@ export function registerMattermostInteractions(params: {
         surface: "mattermost",
       });
       const decision = await authorizeMattermostCommandInvocation({
-        account,
+        account: currentAccount,
         cfg,
         senderId: payload.user_id,
         senderName: payload.user_name ?? "",
@@ -252,7 +259,9 @@ export function registerMattermostInteractions(params: {
         return;
       }
       const { channelDisplay, channelId, kind, route, thread, to } = eventPlan;
-      const bodyText = button.selectedValue === undefined
+      const bodyText = button.callbackValue !== undefined
+        ? `[Button callback: user @${button.userName} selected ${JSON.stringify(button.actionName)}; callback data ${JSON.stringify(button.callbackValue)}]`
+        : button.selectedValue === undefined
         ? `[Button click: user @${button.userName} selected "${button.actionName}"]`
         : `[Menu selection: user @${button.userName} selected ${JSON.stringify(button.actionName)}; value ${JSON.stringify(button.selectedValue)}]`;
       const ctxPayload = eventPlan.finalizeContext({

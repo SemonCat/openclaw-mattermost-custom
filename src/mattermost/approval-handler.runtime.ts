@@ -7,7 +7,7 @@ import type {
 import {
   buildChannelApprovalExpiredText as buildSharedApprovalExpiredText,
   buildChannelApprovalResolvedText as buildSharedApprovalResolvedText,
-  createChannelApprovalNativeRuntimeAdapter,
+  createChannelApprovalNativeRuntimeAdapterAsync,
   type ExpiredApprovalView,
   type ResolvedApprovalView,
 } from "openclaw/plugin-sdk/approval-handler-runtime";
@@ -146,7 +146,7 @@ export function buildMattermostApprovalExpiredText(params: {
   return buildSharedApprovalExpiredText(params);
 }
 
-export const mattermostApprovalNativeRuntime = createChannelApprovalNativeRuntimeAdapter<
+export const mattermostApprovalNativeRuntime = createChannelApprovalNativeRuntimeAdapterAsync<
   PendingDelivery,
   PreparedTarget,
   PendingEntry,
