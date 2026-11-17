@@ -37,11 +37,11 @@ self-contained plugin artifact, then install that artifact into OpenClaw's
 managed plugin directory:
 
 ```bash
-mkdir -p .artifacts/releases
+mkdir -p .artifacts/releases/adapt-2026.11.4
 npm run build
-npm pack --omit=dev --pack-destination .artifacts/releases
+npm pack --omit=dev --pack-destination .artifacts/releases/adapt-2026.11.4
 openclaw plugins install \
-  ./.artifacts/releases/openclaw-mattermost-custom-2026.11.3.tgz --force
+  ./.artifacts/releases/adapt-2026.11.4/openclaw-mattermost-custom-2026.11.4.tgz --force
 ```
 
 Do not use `plugins install --link` or add this source checkout to
@@ -111,7 +111,7 @@ Compared with the official plugin, this build preserves:
 - Channel/sender tool policies through the published host's shared policy pipeline.
 - Up to ten ordered attachments on one post, including ordinary inbound replies.
 
-This artifact targets the published OpenClaw `2026.11.3` SDK and requires an
+This artifact targets the published OpenClaw `2026.11.4` SDK and requires an
 OpenClaw host at least that version. Its Node contract follows that release:
 `>=24.16.0 <25 || >=26.1.0`. Development checks use Node `26.12.1`; this does
 not establish the runtime version of an installed Gateway.
@@ -1054,7 +1054,25 @@ changes in this repo's `src/`. Recheck the downstream command, callback,
 reaction, and trigger-cap behavior when upstream touches the corresponding
 files.
 
-### OpenClaw 2026.11.3 adaptation
+### OpenClaw 2026.11.4 adaptation
+
+This build advances the artifact, exact published development SDK, minimum host,
+plugin API and build metadata together to 2026.11.4. Official Mattermost runtime
+source is unchanged from 11.3; its only change is package version declarations.
+The Node engine contract remains `>=24.16.0 <25 || >=26.1.0`.
+
+The published SDK adds transcript replay and session-streaming exports while
+retaining the existing export map. Host delivery custody, uncertainty notices,
+source-reply transcript mirroring and startup admission fixes stay host-owned.
+This plugin continues to consume them through public SDK boundaries.
+
+All downstream 11.3 behavior is retained, including bounded permalink
+punctuation parsing and successful native progress-card projection after
+automatic session wakes, with human input and session-incarnation fences.
+Source comparison, PostgreSQL support and the artifact validation boundary are
+recorded in [the 11.4 upstream review](docs/upstream-2026.11.4.md).
+
+### Previous OpenClaw 2026.11.3 adaptation
 
 This build advances the artifact, exact published development SDK, minimum host,
 plugin API and build metadata together to 2026.11.3. The Node engine contract
