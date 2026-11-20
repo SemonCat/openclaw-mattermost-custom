@@ -154,42 +154,61 @@ it.each(["cancel", "fail"] as const)(
   async (action) => {
     let lifecycle!: MattermostIngressLifecycle;
     const calls: string[] = [];
+    let adoptRetry!: () => void;
+    const retryReady = new Promise<void>((resolve) => {
+      adoptRetry = resolve;
+    });
     const { queue, monitor } = await setup(async (post, _e, l) => {
       calls.push(post.id);
       if (calls.length === 1) {
         lifecycle = l;
         l.onDeferred();
-      } else await l.onAdopted();
+      } else {
+        if (post.id === "A") await retryReady;
+        await l.onAdopted();
+      }
     });
-    await monitor.receive(event("A"));
-    await monitor.waitForIdle();
-    const old = (await queue.listClaims())[0]!;
-    // Callback runs against the active monitor, before stop or restart.
-    if (action === "cancel") await lifecycle.onCancelled?.();
-    else await lifecycle.onFailed?.(new Error("transient"));
-    expect(await queue.listClaims()).toEqual([]);
-    expect(await queue.listPending()).toMatchObject([
-      {
-        id: "A",
-        attempts: action === "cancel" ? 0 : 1,
-        ...(action === "fail" ? { lastError: "transient", lastAttemptAt: expect.any(Number) } : {}),
-      },
-    ]);
-    expect(await queue.complete(old)).toBe(false);
-    if (action === "fail") {
-      // Retry delay must prevent immediate replay; disposition is not completion.
-      await monitor.receive(event("B", "thread-B"));
+    try {
+      await monitor.receive(event("A"));
       await monitor.waitForIdle();
-      expect(calls.filter((id) => id === "A")).toHaveLength(1);
+      const old = (await queue.listClaims())[0]!;
+      // Callback runs against the active monitor, before stop or restart.
+      if (action === "cancel") await lifecycle.onCancelled?.();
+      else await lifecycle.onFailed?.(new Error("transient"));
+      if (action === "cancel") {
+        // Settlement now wakes the SDK pump immediately. Observe the replacement
+        // owner before adoption instead of racing the transient pending state.
+        await vi.waitFor(() => expect(calls.filter((id) => id === "A")).toHaveLength(2));
+        const replacement = (await queue.listClaims()).find((row) => row.id === "A")!;
+        expect(replacement).toMatchObject({ id: "A", attempts: 0 });
+        expect(replacement.claim.token).not.toBe(old.claim.token);
+        expect(replacement.lastError).toBeUndefined();
+        expect(replacement.lastAttemptAt).toBeUndefined();
+      } else {
+        expect(await queue.listClaims()).toEqual([]);
+        expect(await queue.listPending()).toMatchObject([
+          { id: "A", attempts: 1, lastError: "transient", lastAttemptAt: expect.any(Number) },
+        ]);
+      }
+      expect(await queue.complete(old)).toBe(false);
+      if (action === "fail") {
+        // Retry delay must prevent immediate replay; disposition is not completion.
+        await monitor.receive(event("B", "thread-B"));
+        await monitor.waitForIdle();
+        expect(calls.filter((id) => id === "A")).toHaveLength(1);
+      }
+      await vi.waitFor(() => expect(calls.filter((id) => id === "A")).toHaveLength(2), {
+        timeout: 5_000,
+      });
+      adoptRetry();
+      await monitor.waitForIdle();
+      await monitor.receive(event("A"));
+      await monitor.waitForIdle();
+      expect(calls.filter((id) => id === "A")).toHaveLength(2);
+      expect(await queue.listPending()).toEqual([]);
+    } finally {
+      adoptRetry();
     }
-    await vi.waitFor(() => expect(calls.filter((id) => id === "A")).toHaveLength(2), {
-      timeout: 5_000,
-    });
-    await monitor.waitForIdle();
-    await monitor.receive(event("A"));
-    await monitor.waitForIdle();
-    expect(calls.filter((id) => id === "A")).toHaveLength(2);
-    expect(await queue.listPending()).toEqual([]);
   },
 );
 
