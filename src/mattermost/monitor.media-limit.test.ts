@@ -8,7 +8,10 @@ const state = vi.hoisted(() => ({
   core: undefined as unknown,
 }));
 
-vi.mock("../runtime.js", () => ({ getMattermostRuntime: () => state.core }));
+vi.mock("../runtime.js", () => ({
+  getMattermostRuntime: () => state.core,
+  getOptionalMattermostRuntime: () => state.core,
+}));
 vi.mock("./client.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./client.js")>()),
   createMattermostClient: () => ({
