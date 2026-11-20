@@ -755,9 +755,34 @@ describe("mattermost inbound user posts", () => {
   it("changes Mattermost debounce at admission without replacing the socket", async () => {
     const cfg = { ...testConfig, messages: { inbound: { debounceMs: 0 } } };
     setRuntimeConfigSnapshot(cfg, cfg);
-    mockState.dispatchInboundMessage.mockResolvedValue(undefined);
+    const enqueued: unknown[] = [];
+    const flushes: unknown[][] = [];
+    let resolveBufferedDispatch = () => {};
+    const bufferedDispatched = new Promise<void>((resolve) => {
+      resolveBufferedDispatch = resolve;
+    });
+    mockState.dispatchInboundMessage.mockImplementation(async ({ ctx }) => {
+      if (ctx.BodyForAgent === "buffered") {
+        resolveBufferedDispatch();
+      }
+    });
     mockState.runtimeCore = createRuntimeCore(cfg, undefined, {
-      createInboundDebouncer,
+      createInboundDebouncer: (options) => {
+        const debouncer = createInboundDebouncer({
+          ...options,
+          onFlush: (entries, createFlush) => {
+            flushes.push([...entries]);
+            return options.onFlush(entries, createFlush);
+          },
+        });
+        return {
+          ...debouncer,
+          enqueue: (entry) => {
+            enqueued.push(entry);
+            return debouncer.enqueue(entry);
+          },
+        };
+      },
       resolveInboundDebounceMs,
     });
     const socket = new FakeWebSocket();
@@ -786,14 +811,22 @@ describe("mattermost inbound user posts", () => {
       await vi.waitFor(() => expect(bodies()).toEqual(["immediate"]));
       publishDebounce(500);
       await emitMattermostChannelPost(socket, { id: "debounce-2", message: "buffered" });
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      // Enqueue has returned, but the real debouncer has not started this flush.
+      expect(enqueued).toMatchObject([
+        { post: { id: "debounce-1" } },
+        { post: { id: "debounce-2" } },
+      ]);
+      expect(flushes).toMatchObject([[{ post: { id: "debounce-1" } }]]);
       expect(bodies()).toEqual(["immediate"]);
       publishDebounce(0);
-      // The timer's flush still awaits the published SDK's async dispatch path.
-      await vi.waitFor(() => expect(bodies()).toEqual(["immediate", "buffered"]), {
-        timeout: 5_000,
-      });
+      await bufferedDispatched;
+      expect(bodies()).toEqual(["immediate", "buffered"]);
       await emitMattermostChannelPost(socket, { id: "debounce-3", message: "after disable" });
+      expect(flushes).toMatchObject([
+        [{ post: { id: "debounce-1" } }],
+        [{ post: { id: "debounce-2" } }],
+        [{ post: { id: "debounce-3" } }],
+      ]);
       await vi.waitFor(() =>
         expect(bodies()).toEqual(["immediate", "buffered", "after disable"]),
       );
