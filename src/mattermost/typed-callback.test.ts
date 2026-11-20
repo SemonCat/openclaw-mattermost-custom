@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { renderPresentationForDelivery } from "openclaw/plugin-sdk/interactive-runtime";
 import { mattermostPlugin } from "../channel.js";
 import { resolveMattermostPresentation } from "../normalize.js";
 import { setMattermostRuntime } from "../runtime.js";
@@ -25,11 +26,11 @@ afterEach(async () => {
 });
 const C = "c".repeat(26), B = "b".repeat(26), U = "u".repeat(26), P = "p".repeat(26), R = "r".repeat(26);
 let sequence = 0;
-const presentation = (value: string) => ({ blocks: [{
-  type: "buttons", buttons: [{ label: "Review", action: { type: "callback", value } }],
+const presentation = (value: string, disabled = false) => ({ blocks: [{
+  type: "buttons", buttons: [{ label: "Review", disabled, action: { type: "callback", value } }],
 }] });
 
-async function fixture(format: "legacy" | "blocks" = "legacy", value = "/new") {
+async function fixture(format: "legacy" | "blocks" = "legacy", value = "/new", disabled = false) {
   const cfg = { channels: { mattermost: {
     botToken: "fixture", baseUrl: `https://callback${++sequence}.example`,
     groupPolicy: "open", interactions: { blocks: format === "blocks" },
@@ -54,13 +55,17 @@ async function fixture(format: "legacy" | "blocks" = "legacy", value = "/new") {
     if (String(url).endsWith(`/posts/${P}`)) return Response.json(post);
     throw new Error(`unexpected provider request ${url}`);
   });
-  const payload = { text: "Choose", presentation: presentation(value) };
+  const payload = { text: "Choose", presentation: presentation(value, disabled) };
   const prepared = await mattermostPlugin.actions!.prepareSendPayload!({
     ctx: { action: "send", params: {}, cfg }, to: `channel:${C}`, payload,
   } as never);
-  const rendered = await mattermostPlugin.outbound!.renderPresentation!({
-    payload: prepared, presentation: payload.presentation,
-  } as never);
+  const rendered = await renderPresentationForDelivery({
+    presentationCapabilities: mattermostPlugin.outbound!.presentationCapabilities,
+    renderPresentation: (payload, sourcePresentation) =>
+      mattermostPlugin.outbound!.renderPresentation!({
+        payload, presentation: payload.presentation, sourcePresentation,
+      } as never),
+  }, prepared);
   await mattermostPlugin.outbound!.sendPayload!({
     cfg, to: `channel:${C}`, text: "Choose", accountId: "default", replyToId: R, payload: rendered,
   } as never);
@@ -127,6 +132,36 @@ describe("Mattermost agent-owned typed callbacks", () => {
     await click(f, nextContext);
     await processor(f.admitted[1]);
     expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ callbackValue: "pick:tomorrow" }));
+  });
+
+  it.each(["legacy", "blocks"] as const)("keeps disabled %s send controls as labels without callback authority", async format => {
+    const f = await fixture(format, "private:disabled-value", true);
+    expect(f.post.message).toContain("Review");
+    expect(f.post.message).not.toContain("private:disabled-value");
+    expect(f.post.props ?? {}).not.toHaveProperty("attachments");
+    expect(f.post.props ?? {}).not.toHaveProperty("mm_blocks_actions");
+    expect(f.post.props ?? {}).not.toHaveProperty("mm_blocks");
+    expect(f.admitted).toHaveLength(0);
+  });
+
+  it.each(["legacy", "blocks"] as const)("retires old %s HTTP and queued callbacks when an edit disables all controls", async format => {
+    const f = await fixture(format);
+    const oldContext = f.context();
+    expect(await click(f, oldContext)).toBe(200);
+    await mattermostPlugin.actions!.handleAction!({
+      action: "edit", cfg: f.cfg, accountId: "default", conversationReadOrigin: "delegated",
+      params: { to: `channel:${C}`, messageId: P, message: "Unavailable", presentation: presentation("/new", true) },
+    } as never);
+    expect(f.post.message).toContain("Review");
+    expect(f.post.props ?? {}).not.toHaveProperty("attachments");
+    expect(f.post.props ?? {}).not.toHaveProperty("mm_blocks_actions");
+    expect(f.post.props ?? {}).not.toHaveProperty("mm_blocks");
+    expect(await click(f, oldContext)).toBe(403);
+    const dispatch = vi.fn();
+    await createMattermostInteractionProcessor({
+      client: f.client, accountId: "default", botUserId: B, dispatchButtonClick: dispatch,
+    })(f.admitted[0]);
+    expect(dispatch).not.toHaveBeenCalled();
   });
 
   it("deduplicates retry trigger ids and drains a stored callback once across restart", async () => {

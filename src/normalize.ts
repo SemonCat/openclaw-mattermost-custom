@@ -58,6 +58,9 @@ export function resolveMattermostPresentation(params: {
         .filter((block) => block.type === "buttons")
         .map((block) =>
           block.buttons.flatMap((button, buttonIndex): MattermostPresentationButton[] => {
+            // Mattermost has no portable disabled action. The SDK fallback keeps
+            // its label; never mint callback/question authority for this control.
+            if (button.disabled) return [];
             const action = button.action;
             if (action?.type === "question") {
               if ("intent" in action) {

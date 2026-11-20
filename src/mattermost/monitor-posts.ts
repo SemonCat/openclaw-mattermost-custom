@@ -1,11 +1,8 @@
 // Mattermost plugin module normalizes accepted posts into inbound turns.
 import {
   formatInboundEnvelope,
-  implicitMentionKindWhen,
   resolveInboundSessionEnvelopeContextAsync,
 } from "openclaw/plugin-sdk/channel-inbound";
-import { resolveBotThreadMentionPolicy } from "openclaw/plugin-sdk/channel-mention-gating";
-import { resolveChannelGroups } from "openclaw/plugin-sdk/channel-policy";
 import { resolvePinnedMainDmOwnerFromAllowlist } from "openclaw/plugin-sdk/security-runtime";
 import {
   normalizeOptionalString,
@@ -15,9 +12,9 @@ import {
 import { resolvePromptHistoryLimit } from "openclaw/plugin-sdk/number-runtime";
 import { resolveMattermostGroupContext } from "../group-context.js";
 import { isMattermostNativeSkillAllowed } from "./native-commands.js";
-import { MattermostPostSchema, type MattermostPost } from "./client.js";
+import type { MattermostPost } from "./client.js";
 import { waitForMattermostChannelModelTransition } from "./channel-model-transition.js";
-import { resolveMattermostInboundMentionDecision } from "./monitor-activation.js";
+import { resolveMattermostPostActivation } from "./monitor-activation.js";
 import {
   formatMattermostDirectMessageDropLog,
   normalizeMattermostAllowEntry,
@@ -31,12 +28,10 @@ import {
 import { buildMattermostEventPlan } from "./monitor-event-plan.js";
 import {
   formatInboundFromLabel,
-  matchesMattermostBotMention,
   normalizeMention,
   shouldDropEmptyMattermostBody,
 } from "./monitor-helpers.js";
 import type { MattermostIngressLifecycle } from "./monitor-ingress.js";
-import { resolveOncharPrefixes, stripOncharPrefix } from "./monitor-onchar.js";
 import { hydrateMattermostPermalinks } from "./permalink-hydration.js";
 import { resolveMattermostReferenceMedia } from "./reference-media.js";
 import {
@@ -56,7 +51,6 @@ import {
   type HistoryEntry,
 } from "./runtime-api.js";
 import { sendMessageMattermost } from "./send.js";
-import { hasMattermostThreadParticipation } from "./thread-participation.js";
 
 export function resolveMattermostHistoryLimit(params: {
   accountHistoryLimit?: number;
@@ -288,82 +282,10 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
       return;
     }
 
-    const mentionRegexes = core.channel.mentions.buildMentionRegexes(cfg, route.agentId);
-    const wasMentioned =
-      kind !== "direct" &&
-      (matchesMattermostBotMention(rawText, botUsername) ||
-        core.channel.mentions.matchesMentionPatterns(rawText, mentionRegexes));
-    const oncharEnabled = account.chatmode === "onchar" && kind !== "direct";
-    const oncharPrefixes = oncharEnabled ? resolveOncharPrefixes(account.oncharPrefixes) : [];
-    const oncharResult = oncharEnabled
-      ? stripOncharPrefix(rawText, oncharPrefixes)
-      : { triggered: false, stripped: rawText };
-    const oncharTriggered = oncharResult.triggered;
-    const canDetectMention = Boolean(botUsername) || mentionRegexes.length > 0;
-    // Threads the bot already replied in auto-engage: follow-ups resume without
-    // a re-mention even under requireMention. Keyed by the thread root id.
-    const threadAlreadyEngaged =
-      kind !== "direct" && effectiveReplyToId
-        ? await hasMattermostThreadParticipation({
-            accountId: account.accountId,
-            channelId,
-            threadRootId: effectiveReplyToId,
-          })
-        : false;
-    const shouldRequireMention =
-      kind !== "direct" &&
-      core.channel.groups.resolveRequireMention({
-        cfg,
-        channel: "mattermost",
-        accountId: account.accountId,
-        groupId: channelId,
-        requireMentionOverride: account.requireMention,
-      });
-    const groups = resolveChannelGroups(cfg, "mattermost", account.accountId);
-    const requireMentionInBotThreads =
-      groups?.[channelId]?.requireMentionInBotThreads ??
-      groups?.["*"]?.requireMentionInBotThreads ??
-      account.config.requireMentionInBotThreads;
-    const nativeThreadRootId = normalizeOptionalString(post.root_id);
-    let isBotOwnedThread = false;
-    if (kind !== "direct" && nativeThreadRootId && requireMentionInBotThreads !== undefined) {
-      try {
-        const root = MattermostPostSchema.safeParse(
-          await monitor.client.request<unknown>(
-            `/posts/${encodeURIComponent(nativeThreadRootId)}`,
-          ),
-        );
-        isBotOwnedThread =
-          root.success &&
-          root.data.id === nativeThreadRootId &&
-          root.data.channel_id === channelId &&
-          root.data.user_id === botUserId &&
-          !root.data.delete_at &&
-          !normalizeOptionalString(root.data.root_id);
-      } catch (err) {
-        monitor.logVerboseMessage(
-          `mattermost: failed resolving thread owner channel=${channelId} root=${nativeThreadRootId}: ${String(err)}`,
-        );
-      }
-    }
-    const botThreadPolicy = resolveBotThreadMentionPolicy({
-      isBotOwnedThread,
-      requireMentionInBotThreads,
-      requireMention: shouldRequireMention || oncharEnabled,
-      implicitMentionKinds: implicitMentionKindWhen("bot_thread_participant", threadAlreadyEngaged),
-    });
-    const botThreadMentionRequired = isBotOwnedThread && requireMentionInBotThreads === true;
-    const mentionDecision = resolveMattermostInboundMentionDecision({
-      cfg,
-      accountId: account.accountId,
-      kind,
-      requireMention: botThreadPolicy.requireMention,
-      canDetectMention: canDetectMention || oncharEnabled || botThreadMentionRequired,
-      wasMentioned: wasMentioned || oncharTriggered,
-      implicitMentionKinds: botThreadPolicy.implicitMentionKinds,
-      allowTextCommands,
-      hasControlCommand: isControlCommand,
-      commandAuthorized,
+    const { mentionDecision, oncharEnabled, oncharTriggered, oncharResult,
+      wasMentioned, canDetectMention, botThreadPolicy, threadAlreadyEngaged } = await resolveMattermostPostActivation(eventMonitor, {
+      post, channelId, kind, effectiveReplyToId, agentId: route.agentId, rawText,
+      allowTextCommands, isControlCommand, commandAuthorized,
     });
     const { shouldBypassMention } = mentionDecision;
 

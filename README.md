@@ -689,6 +689,10 @@ Each rendered callback button has a fresh control identity, expires after
 authorization. Editing with a presentation replaces controls and invalidates
 older callbacks, even when the label stays the same. Text-only edits preserve
 controls. Presentation edits require this account's bot to own the post.
+Disabled presentation buttons remain visible as text labels and never produce
+callback or question actions, on both legacy attachments and Blocks. Editing a
+presentation to disable every button also removes its previous controls; old
+HTTP clicks and queued callbacks cannot use the retired controls.
 Callbacks preserve up to 2,000 characters of data. Retries of the same control
 by the same user share one durable event identity, including across restart.
 The queue rechecks the current control and authorization before dispatch.
@@ -1043,6 +1047,17 @@ official plugins. Uncompleted posts can still be reclaimed after a Gateway
 restart, and debounce/adoption lifecycle settlement keeps retry and dead-letter
 handling bounded. The seven-day thread-participation mention-bypass window is
 persisted across Gateway restarts.
+
+After a posted message is committed as a terminal ingress failure, the plugin
+can send one best-effort, silent warning in its original thread. This does not
+retry the task or change progress cards. The warning requires the current
+account, sender/channel access, mention/onchar/thread and automatic-reply
+policies to permit it; pairing requests are never created for this purpose.
+Malformed events, edits, deletions, self/system posts and still-retryable
+failures do not generate warnings. Cancellation, shutdown or a changed config
+fences pending notice transport. Delivery is bounded by the SDK's 15-second
+notice timeout. Notice failures are logged without reopening failed input;
+notification delivery is not a durable exactly-once guarantee.
 
 ## Package build
 

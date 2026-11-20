@@ -275,12 +275,18 @@ export function createMattermostIngressMonitor(options: {
   accountId: string;
   queue?: ChannelIngressQueue<MattermostIngressPayload>;
   dispatch: MattermostIngressDispatch;
+  onDeadLetter?: (
+    post: MattermostIngressPost,
+    payload: MattermostEventPayload,
+    signal: AbortSignal,
+  ) => void | Promise<void>;
   runtime: Pick<RuntimeEnv, "error" | "log">;
   resolveThreadId?: (facts: MattermostIngressLaneFacts) => string | undefined;
   pollIntervalMs?: number;
   adoptionStallTimeoutMs?: number;
   abortSignal?: AbortSignal;
 }): MattermostIngressMonitor {
+  const shutdown = new AbortController();
   // Core may retain a busy reply owner for up to 15 minutes while proving that
   // a quiet tool/reply run is stale. Keep a durably queued Mattermost turn alive
   // beyond that takeover window so recovery can admit it instead of racing the
@@ -336,6 +342,23 @@ export function createMattermostIngressMonitor(options: {
       // Deferred keeps durable custody; core may admit/steer later same-lane input.
       deferredLaneOccupancy: "release",
       resolveNonRetryableFailure: resolveMattermostIngressNonRetryableFailure,
+      onDeadLetter: async (claim, _failure, signal) => {
+        // The SDK invokes this only after the claim's failed write commits.
+        // Invalid rows and mutations cannot select a notification destination.
+        if (!options.onDeadLetter || claim.payload.version !== MATTERMOST_INGRESS_PAYLOAD_VERSION) return;
+        let event: ReturnType<typeof parseClaimedEvent>;
+        try {
+          event = parseClaimedEvent(claim.payload.rawEvent, claim.id);
+        } catch {
+          return;
+        }
+        if (event.payload.event !== "posted") return;
+        const abortSignal = AbortSignal.any([
+          signal, shutdown.signal, ...(options.abortSignal ? [options.abortSignal] : []),
+        ]);
+        abortSignal.throwIfAborted();
+        await options.onDeadLetter(event.post, event.payload, abortSignal);
+      },
       deriveLaneKey,
       reconcileStoredLaneKey: (_record, storedLaneKey, derivedLaneKey) =>
         derivedLaneKey.startsWith(`${storedLaneKey}:thread:`),
@@ -365,7 +388,10 @@ export function createMattermostIngressMonitor(options: {
         options.runtime.error?.(`mattermost ingress rejected invalid event: ${error.message}`);
       }
     },
-    stop: monitor.stop,
+    stop: async () => {
+      shutdown.abort(new Error("Mattermost ingress is stopped."));
+      await monitor.stop();
+    },
     waitForIdle: monitor.waitForIdle,
   };
 }

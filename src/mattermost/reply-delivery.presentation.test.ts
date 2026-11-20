@@ -30,6 +30,37 @@ function createSendMock() {
 }
 
 describe("Mattermost normal reply presentation delivery", () => {
+  it("retains disabled labels but only delivers enabled legacy and question controls", async () => {
+    const sendMessage = createSendMock();
+    const questionId = "ask_0123456789abcdef0123456789abcdef";
+    await deliverMattermostReplyPayload({
+      core: createCore(), cfg: {}, channelId: "town-square", accountId: "default",
+      textLimit: 4000, tableMode: "off", sendMessage,
+      payload: {
+        presentation: { blocks: [{ type: "buttons", buttons: [
+          { label: "Disabled legacy", value: "disabled:legacy", disabled: true },
+          { label: "Disabled URL", action: { type: "url", url: "https://disabled.example" }, disabled: true },
+          { label: "Disabled question", disabled: true, action: { type: "question", questionId, optionValue: "production" } },
+          { label: "Enabled legacy", value: "enabled:legacy" },
+          { label: "Enabled question", action: { type: "question", questionId, optionValue: "staging" } },
+        ] }] },
+        channelData: { askUser: { questionId, optionValues: ["staging", "production"] } },
+      },
+    });
+    const [, text] = sendMessage.mock.calls[0]!;
+    expect(text).toContain("Disabled legacy");
+    expect(text).toContain("Disabled question");
+    expect(text).toContain("Disabled URL");
+    expect(text).not.toContain("disabled:legacy");
+    expect(text).not.toContain("https://disabled.example");
+    expect(sendMessage).toHaveBeenCalledWith("channel:town-square", text, expect.objectContaining({
+      buttons: [[
+        expect.objectContaining({ text: "Enabled legacy", callback_data: "enabled:legacy" }),
+        expect.objectContaining({ text: "Enabled question", context: expect.objectContaining({ option_index: 0 }) }),
+      ]],
+    }));
+  });
+
   it("renders question buttons and carries their finalization identity on the first post", async () => {
     const sendMessage = createSendMock();
     const questionId = "ask_0123456789abcdef0123456789abcdef";

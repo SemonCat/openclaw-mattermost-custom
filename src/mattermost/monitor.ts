@@ -39,6 +39,7 @@ import {
 } from "./monitor-ingress.js";
 import { createMattermostModelPickerInteractionHandler } from "./monitor-model-picker.js";
 import { createMattermostPostHandler } from "./monitor-posts.js";
+import { createMattermostDeadLetterNotifier } from "./monitor-dead-letter.js";
 import { createMattermostReactionHandler } from "./monitor-reactions.js";
 import { createMattermostPostMutationHandler } from "./post-mutations.js";
 import { attachMattermostRestartRecoveryProgress } from "./restart-recovery-progress.js";
@@ -346,6 +347,7 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
     runtime,
     abortSignal: opts.abortSignal,
     resolveThreadId: resolveIngressThreadId,
+    onDeadLetter: createMattermostDeadLetterNotifier(monitor),
     dispatch: async (post, payload, turnAdoptionLifecycle) => {
       if (payload.event === "post_edited" || payload.event === "post_deleted") {
         await handlePostMutation(post, payload, turnAdoptionLifecycle.abortSignal);
