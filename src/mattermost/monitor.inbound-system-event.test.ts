@@ -789,7 +789,10 @@ describe("mattermost inbound user posts", () => {
       await new Promise((resolve) => setTimeout(resolve, 50));
       expect(bodies()).toEqual(["immediate"]);
       publishDebounce(0);
-      await vi.waitFor(() => expect(bodies()).toEqual(["immediate", "buffered"]));
+      // The timer's flush still awaits the published SDK's async dispatch path.
+      await vi.waitFor(() => expect(bodies()).toEqual(["immediate", "buffered"]), {
+        timeout: 5_000,
+      });
       await emitMattermostChannelPost(socket, { id: "debounce-3", message: "after disable" });
       await vi.waitFor(() =>
         expect(bodies()).toEqual(["immediate", "buffered", "after disable"]),
