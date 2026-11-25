@@ -13,6 +13,7 @@ import {
 } from "./client.js";
 import { resolveMattermostTextLimit } from "./text-limits.js";
 import { createMattermostCompanionStream } from "./companion-stream.js";
+import { stripMattermostLocalFileLinks } from "./local-file-links.js";
 import { mattermostWorkDetailsProps } from "./work-details.js";
 
 const DEFAULT_THROTTLE_MS = 1000;
@@ -559,16 +560,18 @@ export function createMattermostDraftStream(params: {
   };
   const update = (text: string) => {
     if (companion && (streamState.stopped || streamState.final)) return;
-    currentGeneration.latestSourceText = text;
+    const visibleText = stripMattermostLocalFileLinks(text);
+    currentGeneration.latestSourceText = visibleText;
     currentGeneration.latestAssistantText = undefined;
-    updateLifecycle(text);
+    updateLifecycle(visibleText);
     updateCompanion(currentGeneration);
   };
   const updateAssistantText = (text: string) => {
     if (companion && (streamState.stopped || streamState.final)) return;
-    currentGeneration.latestSourceText = text;
-    currentGeneration.latestAssistantText = text;
-    updateLifecycle(text);
+    const visibleText = stripMattermostLocalFileLinks(text);
+    currentGeneration.latestSourceText = visibleText;
+    currentGeneration.latestAssistantText = visibleText;
+    updateLifecycle(visibleText);
     updateCompanion(currentGeneration);
   };
   const settleBoundaries = async () => {
@@ -577,22 +580,23 @@ export function createMattermostDraftStream(params: {
     assertNoAcceptedDeliveryFailure();
   };
   const resolveFinalText = (text: string) => {
+    const visibleText = stripMattermostLocalFileLinks(text);
     const publishedParts = [...publishedAssistantParts.values()];
     if (sealedAssistantTexts.length === 0 || finalPartsPromotionFailed) {
-      return { kind: "full" as const, text, publishedParts };
+      return { kind: "full" as const, text: visibleText, publishedParts };
     }
 
-    let remainingText = text.trim();
+    let remainingText = visibleText.trim();
     for (const sealedText of sealedAssistantTexts) {
       const completed = sealedText.text.trim();
       if (!completed || !remainingText.startsWith(completed)) {
-        return { kind: "full" as const, text, publishedParts };
+        return { kind: "full" as const, text: visibleText, publishedParts };
       }
       const suffix = remainingText.slice(completed.length);
       // Canonical assistant block aggregation uses newline separators. A plain-space
       // suffix can be a block-local final that merely shares the prior block's prefix.
       if (sealedText.requiresBlockBoundary && suffix && !/^\r?\n/.test(suffix)) {
-        return { kind: "full" as const, text, publishedParts };
+        return { kind: "full" as const, text: visibleText, publishedParts };
       }
       remainingText = suffix.replace(sealedText.requiresBlockBoundary ? /^(?:\r?\n)+/ : /^\s+/, "");
     }
@@ -604,7 +608,7 @@ export function createMattermostDraftStream(params: {
       !remaining.startsWith(currentText) &&
       (!remaining || !currentText.startsWith(remaining))
     ) {
-      return { kind: "full" as const, text, publishedParts };
+      return { kind: "full" as const, text: visibleText, publishedParts };
     }
     return remaining
       ? { kind: "remaining" as const, text: remaining, publishedParts }

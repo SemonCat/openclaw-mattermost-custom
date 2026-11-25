@@ -1,12 +1,26 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import {
   dispatchReplyWithBufferedBlockDispatcher,
   type ReplyDispatchRuntimeInfo,
 } from "openclaw/plugin-sdk/reply-runtime";
-import type { ChannelInboundTurnPlan } from "openclaw/plugin-sdk/channel-inbound";
+import {
+  createChannelPartialDeliveryError,
+  type ChannelInboundTurnPlan,
+} from "openclaw/plugin-sdk/channel-inbound";
+import { createMessageReceiptFromOutboundResults } from "openclaw/plugin-sdk/channel-outbound";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolveMattermostAccount } from "./accounts.js";
-import { sendMattermostTyping, type MattermostClient, type MattermostPost } from "./client.js";
+import {
+  MattermostApiError,
+  sendMattermostTyping,
+  type MattermostClient,
+  type MattermostPost,
+} from "./client.js";
+import { createMattermostIngressQueue } from "./ingress-queue.js";
 import { buildMattermostEventPlan } from "./monitor-event-plan.js";
+import { createMattermostIngressMonitor } from "./monitor-ingress.js";
 import { dispatchMattermostInboundTurn } from "./monitor-turn.js";
 import { setInteractionSecret } from "./interactions.js";
 import { createMattermostReactionLifecycleStore } from "./monitor-turn-reactions.js";
@@ -15,9 +29,11 @@ import type { MattermostMonitorContext } from "./monitor-types.js";
 import type { OpenClawConfig } from "./runtime-api.js";
 
 const { normalSend } = vi.hoisted(() => ({
-  normalSend: vi.fn(async () => {
-    throw new Error("expected final delivery on the existing preview identity");
-  }),
+  normalSend: vi.fn<typeof import("./send.js").sendMessageMattermost>(
+    async () => {
+      throw new Error("expected final delivery on the existing preview identity");
+    },
+  ),
 }));
 vi.mock("./send.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./send.js")>()),
@@ -39,6 +55,7 @@ function fixture(
   mode: "block" | "partial" | "progress" | "off",
   transport: "rest" | "companion" = "rest",
   channelType: "O" | "D" = "O",
+  threadRootId: string | null = "thread-1",
 ) {
   const cfg: OpenClawConfig = {
     messages: { ackReaction: "" },
@@ -181,7 +198,7 @@ function fixture(
       channelId: "channel-1",
       senderId: "user-1",
       postId: "source-post",
-      threadRootId: "thread-1",
+      threadRootId: threadRootId ?? undefined,
       dropLabel: "test",
     });
     if (!eventPlan) throw new Error("expected an accepted event plan");
@@ -212,6 +229,207 @@ function fixture(
 }
 
 describe("Mattermost monitor streaming boundaries", () => {
+  describe("session initialization conflict", () => {
+    const conflict = new Error(
+      "reply session initialization conflicted for agent:main; please retry your message.",
+    );
+    const rejectConflict = async () => {
+      throw conflict;
+    };
+    const ingress = (abortSignal = new AbortController().signal) => ({
+      abortSignal,
+      onAdopted: vi.fn(),
+      onDeferred: vi.fn(),
+      onAdoptionFinalizing: vi.fn(),
+      onAbandoned: vi.fn(),
+    });
+
+    it.each(["thread-1", null])("completes the turn after one notice for root %s", async (root) => {
+      const f = fixture("off", "rest", root ? "O" : "D", root);
+      const dispatch = vi.fn(rejectConflict);
+      const lifecycle = ingress();
+      normalSend.mockImplementationOnce(async (_to, text, opts) => {
+        opts.assertDirectAdapterHandoff?.();
+        await opts.onPlatformSendDispatch?.();
+        expect(lifecycle.onAdopted).not.toHaveBeenCalled();
+        const result = { messageId: "notice", channelId: "channel-1" };
+        return {
+          ...result,
+          content: text,
+          receipt: createMessageReceiptFromOutboundResults({
+            kind: "text",
+            results: [{ channel: "mattermost", ...result }],
+          }),
+        };
+      });
+
+      await expect(f.run(dispatch, lifecycle)).resolves.toBeUndefined();
+
+      expect(dispatch).toHaveBeenCalledOnce();
+      expect(lifecycle.onAdopted).toHaveBeenCalledOnce();
+      expect(normalSend).toHaveBeenCalledExactlyOnceWith(
+        "channel:channel-1",
+        expect.stringContaining("the session stayed busy"),
+        expect.objectContaining({
+          accountId: "default",
+          replyToId: root ?? undefined,
+          silent: true,
+        }),
+      );
+    });
+
+    it("consumes a conflict silently when source replies require the message tool", async () => {
+      const f = fixture("off");
+      const lifecycle = ingress();
+      f.monitor.cfg.messages!.groupChat = { visibleReplies: "message_tool" };
+
+      await expect(f.run(rejectConflict, lifecycle)).resolves.toBeUndefined();
+
+      expect(lifecycle.onAdopted).toHaveBeenCalledOnce();
+      expect(normalSend).not.toHaveBeenCalled();
+    });
+
+    it("keeps the conflict failure when the run already started", async () => {
+      const f = fixture("off");
+
+      await expect(f.run(async ({ replyOptions }) => {
+        replyOptions?.onAgentRunStart?.("already-started");
+        throw conflict;
+      })).rejects.toBe(conflict);
+
+      expect(normalSend).not.toHaveBeenCalled();
+    });
+
+    it.each(["onAdopted", "onDeferred", "onAbandoned"] as const)(
+      "leaves the notice alone after ingress calls %s",
+      async (callback) => {
+        const f = fixture("off");
+        const lifecycle = ingress();
+
+        await expect(f.run(async ({ replyOptions }) => {
+          await replyOptions?.turnAdoptionLifecycle?.[callback]?.();
+          throw conflict;
+        }, lifecycle)).rejects.toBe(conflict);
+
+        expect(lifecycle[callback]).toHaveBeenCalledOnce();
+        expect(lifecycle.onAdopted).toHaveBeenCalledTimes(callback === "onAdopted" ? 1 : 0);
+        expect(normalSend).not.toHaveBeenCalled();
+      },
+    );
+
+    it("does not offer a notice after ingress authority is cancelled", async () => {
+      const f = fixture("off");
+      const controller = new AbortController();
+      const cancelled = new Error("ingress retired");
+
+      await expect(f.run(async () => {
+        controller.abort(cancelled);
+        throw conflict;
+      }, ingress(controller.signal))).rejects.toBe(cancelled);
+
+      expect(normalSend).not.toHaveBeenCalled();
+    });
+
+    it("rechecks current config at final send handoff", async () => {
+      const f = fixture("off");
+      normalSend.mockImplementationOnce(async (_to, _text, opts) => {
+        f.monitor.core.config.current = () => ({});
+        opts.assertDirectAdapterHandoff?.();
+        throw new Error("unexpected dispatch");
+      });
+
+      await expect(f.run(rejectConflict)).rejects.toThrow("inbound reply configuration changed");
+    });
+
+    it("preserves ingress failure when Mattermost definitively rejects the notice", async () => {
+      const f = fixture("off");
+      const lifecycle = ingress();
+      const rejected = new MattermostApiError("Mattermost API 429: rate limited", 429);
+      normalSend.mockImplementationOnce(async (_to, _text, opts) => {
+        await opts.onPlatformSendDispatch?.();
+        throw rejected;
+      });
+
+      await expect(f.run(rejectConflict, lifecycle)).rejects.toBe(rejected);
+      expect(lifecycle.onAdopted).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      createChannelPartialDeliveryError(new Error("missing post id"), {
+        visibleReplySent: true,
+        messageIds: [],
+      }),
+      new Error("connection lost after dispatch"),
+    ])("consumes the turn when retrying could duplicate the notice (%s)", async (error) => {
+      const f = fixture("off");
+      const lifecycle = ingress();
+      normalSend.mockImplementationOnce(async (_to, _text, opts) => {
+        await opts.onPlatformSendDispatch?.();
+        throw error;
+      });
+
+      await expect(f.run(rejectConflict, lifecycle)).resolves.toBeUndefined();
+
+      expect(lifecycle.onAdopted).toHaveBeenCalledOnce();
+      expect(normalSend).toHaveBeenCalledOnce();
+    });
+
+    it("completes the SQLite claim after an ambiguous send and ignores the replay", async () => {
+      const f = fixture("off");
+      const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "mm-busy-notice-"));
+      type Queue = NonNullable<Parameters<typeof createMattermostIngressMonitor>[0]["queue"]>;
+      const queue = createMattermostIngressQueue<Parameters<Queue["enqueue"]>[1]>({
+        accountId: "default",
+        stateDir,
+      });
+      const enqueue = vi.spyOn(queue, "enqueue");
+      const dispatch = vi.fn(rejectConflict);
+      const monitor = createMattermostIngressMonitor({
+        accountId: "default",
+        queue,
+        dispatch: (_post, _event, lifecycle) => f.run(dispatch, lifecycle),
+        runtime: f.monitor.runtime,
+        pollIntervalMs: 25,
+      });
+      const event = JSON.stringify({
+        event: "posted",
+        data: {
+          channel_type: "O",
+          post: JSON.stringify({
+            id: "source-post",
+            root_id: "thread-1",
+            channel_id: "channel-1",
+            user_id: "user-1",
+            message: "test",
+          }),
+        },
+      });
+      normalSend.mockImplementationOnce(async (_to, _text, opts) => {
+        opts.assertDirectAdapterHandoff?.();
+        await opts.onPlatformSendDispatch?.();
+        throw new Error("connection lost after dispatch");
+      });
+
+      try {
+        await monitor.receive(event);
+        await monitor.waitForIdle();
+        expect(await queue.listClaims()).toEqual([]);
+        expect(await queue.listPending()).toEqual([]);
+
+        await monitor.receive(event);
+        await monitor.waitForIdle();
+        await expect(enqueue.mock.results.at(-1)?.value).resolves.toMatchObject({
+          kind: "completed",
+        });
+        expect(dispatch).toHaveBeenCalledOnce();
+        expect(normalSend).toHaveBeenCalledOnce();
+      } finally {
+        await monitor.stop();
+        await fs.rm(stateDir, { recursive: true, force: true });
+      }
+    });
+  });
+
   it.each(["settle", "continue", "completed", "child-failed", "restarted-child",
     "settled-during-publish", "failed", "cancelled"] as const)(
     "keeps earlier pending work on a normal progress reply and honors %s",
@@ -1175,6 +1393,31 @@ describe("Mattermost monitor streaming boundaries", () => {
       expect(f.calls.filter((call) => call.method === "PUT").at(-1)?.path).toBe(
         "/posts/post-2/patch",
       );
+    },
+  );
+
+  it.each(["rest", "companion"] as const)(
+    "preserves sealed post identity when flattening local links in %s previews and the final",
+    async (transport) => {
+      vi.useFakeTimers();
+      const f = fixture("block", transport);
+      const preview = "See [**Build report**](</tmp/result files/validation.json>).";
+      const final = "Published [PR](https://example.com/pull/42).";
+      await f.run(async (params) => {
+        await params.replyOptions?.onAssistantMessageStart?.();
+        await params.replyOptions?.onPartialReply?.({ text: preview });
+        await vi.advanceTimersByTimeAsync(1200);
+        expect(f.posts.get("post-1")?.message).toBe("See **Build report**.");
+        await params.replyOptions?.onAssistantMessageStart?.();
+        await params.replyOptions?.onPartialReply?.({ text: "Published" });
+        await vi.advanceTimersByTimeAsync(1200);
+        await f.final(params, `${preview}\n\n${final}`);
+      });
+      expect([...f.posts.entries()].map(([id, post]) => [id, post.message])).toEqual([
+        ["post-1", "See **Build report**."],
+        ["post-2", final],
+      ]);
+      expect(normalSend).not.toHaveBeenCalled();
     },
   );
 

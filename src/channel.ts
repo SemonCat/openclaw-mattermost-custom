@@ -69,6 +69,7 @@ import {
 import { normalizeMattermostEmojiName } from "./mattermost/emoji.js";
 import { assertMattermostAttachmentCount } from "./mattermost/attachment-limits.js";
 import { mattermostIngressIdentity } from "./mattermost/ingress-identity.js";
+import { stripMattermostLocalFileLinks } from "./mattermost/local-file-links.js";
 import { MATTERMOST_LEGACY_TEXT_LIMIT, resolveMattermostTextLimit } from "./mattermost/text-limits.js";
 import type { MattermostSendResult } from "./mattermost/send.js";
 import {
@@ -948,7 +949,7 @@ const mattermostOutbound: ChannelOutboundAdapter = {
   textChunkLimit: MATTERMOST_LEGACY_TEXT_LIMIT,
   resolveEffectiveTextChunkLimit: ({ cfg, accountId }) =>
     resolveMattermostTextLimit(inspectMattermostAccount({ cfg, accountId })),
-  sanitizeText: ({ text }) => sanitizeAssistantVisibleText(text),
+  sanitizeText: ({ text }) => stripMattermostLocalFileLinks(sanitizeAssistantVisibleText(text)),
   deliveryCapabilities: {
     durableFinal: {
       text: true,
@@ -1005,6 +1006,7 @@ const mattermostOutbound: ChannelOutboundAdapter = {
         accountId: ctx.accountId ?? undefined,
         mediaUrl,
         ...(mediaUrls.length > 1 ? { mediaUrls } : {}),
+        mediaAccess: ctx.mediaAccess,
         mediaLocalRoots: ctx.mediaLocalRoots ?? ctx.mediaAccess?.localRoots,
         mediaReadFile: ctx.mediaReadFile ?? ctx.mediaAccess?.readFile,
         ...(ctx.mediaAccess?.workspaceDir ? { workspaceDir: ctx.mediaAccess.workspaceDir } : {}),
@@ -1105,6 +1107,7 @@ const mattermostOutbound: ChannelOutboundAdapter = {
           deliveryPartIndex,
           deliveryPartCount,
           mediaUrl,
+          mediaAccess,
           mediaLocalRoots: mediaLocalRoots ?? mediaAccess?.localRoots,
           mediaReadFile: mediaReadFile ?? mediaAccess?.readFile,
           ...(mediaAccess?.workspaceDir ? { workspaceDir: mediaAccess.workspaceDir } : {}),
@@ -1167,6 +1170,14 @@ export const mattermostPlugin: ChannelPlugin<ResolvedMattermostAccount> = create
     },
     agentPrompt: {
       customInlineButtonHint: true,
+      inboundFormattingHints: () => ({
+        text_markup: "markdown",
+        rules: [
+          "Link to PRs, commits, and published documents with HTTPS URLs that recipients can open.",
+          "When explicitly delivering a local file, attach it with `MEDIA:` in a reply or the message tool's `media` field in the same conversation and thread.",
+          "Refer to local paths in code spans. Avoid Markdown links with a local path or file: URL.",
+        ],
+      }),
       messageToolHints: ({ cfg, accountId }) => {
         const account = inspectMattermostAccount({ cfg, accountId });
         const limit = resolveMattermostTextLimit(account);

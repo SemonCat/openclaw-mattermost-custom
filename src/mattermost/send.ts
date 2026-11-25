@@ -18,6 +18,7 @@ import {
 import { pruneMapToMaxSize } from "openclaw/plugin-sdk/collection-runtime";
 import { resolveMarkdownTableMode } from "openclaw/plugin-sdk/markdown-table-runtime";
 import { extensionForMime } from "openclaw/plugin-sdk/media-mime";
+import { resolveOutboundMediaAccessForConfig } from "openclaw/plugin-sdk/outbound-media";
 import { requireRuntimeConfig } from "openclaw/plugin-sdk/plugin-config-runtime";
 import { chunkMarkdownTextWithMode, resolveChunkMode } from "openclaw/plugin-sdk/reply-chunking";
 import { isPrivateNetworkOptInEnabled } from "openclaw/plugin-sdk/ssrf-runtime";
@@ -58,6 +59,7 @@ import {
   resolveInteractionCallbackUrl,
   setInteractionSecret,
 } from "./interactions.js";
+import { stripMattermostLocalFileLinks } from "./local-file-links.js";
 import { loadOutboundMediaFromUrl, type OpenClawConfig } from "./runtime-api.js";
 import {
   parseMattermostTarget,
@@ -73,7 +75,7 @@ import { mattermostWorkDetailsProps } from "./work-details.js";
 
 type MattermostSendOpts = Pick<
   ChannelOutboundContext,
-  "assertDirectAdapterHandoff" | "onPlatformSendDispatch" | "signal" | "silent"
+  "assertDirectAdapterHandoff" | "onPlatformSendDispatch" | "signal" | "silent" | "mediaAccess"
 > & {
   cfg: OpenClawConfig;
   botToken?: string;
@@ -614,7 +616,7 @@ export async function sendMessageMattermost(
       legacyButtonFallbackProps = buildButtonProps({ ...buttonParams, format: "legacy" });
     }
   }
-  let message = normalizeOptionalString(text) ?? "";
+  let message = normalizeOptionalString(stripMattermostLocalFileLinks(text)) ?? "";
   let fileIds: string[] | undefined;
   let uploadError: Error | undefined;
   const grouped = mediaUrls.length > 1;
@@ -623,6 +625,11 @@ export async function sendMessageMattermost(
   let remainingBytes = grouped
     ? Math.min(mediaMaxBytes ?? MATTERMOST_GROUPED_MEDIA_MAX_BYTES, MATTERMOST_GROUPED_MEDIA_MAX_BYTES)
     : mediaMaxBytes;
+  const configuredMediaAccess = resolveOutboundMediaAccessForConfig(cfg);
+  const blockedHostnames = opts.mediaAccess?.blockedHostnames;
+  const mediaAccess = blockedHostnames?.length
+    ? { blockedHostnames: [...(configuredMediaAccess?.blockedHostnames ?? []), ...blockedHostnames] }
+    : configuredMediaAccess;
   for (const mediaUrl of mediaUrls) {
     try {
       client.assertRequestCurrent?.();
@@ -631,6 +638,7 @@ export async function sendMessageMattermost(
       }
       const media = await loadOutboundMediaFromUrl(mediaUrl, {
         maxBytes: remainingBytes,
+        mediaAccess,
         mediaLocalRoots: opts.mediaLocalRoots,
         mediaReadFile: opts.mediaReadFile,
         workspaceDir: opts.workspaceDir,

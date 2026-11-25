@@ -23,6 +23,7 @@ import {
   resolveMattermostReplyDeliveryBarrierTimeoutMs,
   type CreateDmChannelRetryOptions,
 } from "./client.js";
+import { stripMattermostLocalFileLinks } from "./local-file-links.js";
 import { buildMattermostSecretPromptButton } from "./secret-dialog.js";
 import type { MattermostSendResult } from "./send.js";
 import { buildMattermostPostIdentityProps } from "./post-identity.js";
@@ -149,7 +150,10 @@ export async function deliverMattermostReplyPayload(params: {
     ? [...presentation.buttons, [secretPrompt.button]]
     : presentation.buttons;
   const reply = resolveSendableOutboundReplyParts(params.payload, {
-    text: params.core.channel.text.convertMarkdownTables(presentation.text, params.tableMode),
+    text: params.core.channel.text.convertMarkdownTables(
+      stripMattermostLocalFileLinks(presentation.text),
+      params.tableMode,
+    ),
   });
   const mediaLocalRoots = getAgentScopedMediaLocalRoots(params.cfg, params.agentId);
   const chunkMode = params.core.channel.text.resolveChunkMode(

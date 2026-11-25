@@ -130,6 +130,52 @@ async function prepareAndSend(f: Parameters<Parameters<typeof fixture>[1]>[0], e
 }
 
 describe("one-post Mattermost attachment collections", () => {
+  it("converts a local link in a message-tool send without uploading the referenced file", async () => {
+    await fixture({}, async (f) => {
+      const text = `[Local report](<${f.files[0]}>) and [PR](https://example.com/pull/42)`;
+      const visible = "Local report and [PR](https://example.com/pull/42)";
+      const result = await mattermostPlugin.message!.send!.text!({
+        cfg: f.cfg, to: `channel:${channelId}`, text, threadId: rootId,
+      });
+
+      expect(f.requests.map((request) => request.path)).toEqual(["/api/v4/posts"]);
+      expect(JSON.parse(f.requests[0].body)).toMatchObject({ message: visible, root_id: rootId });
+      expect(listMessageReceiptPlatformIds(result.receipt)).toEqual(["post-1"]);
+    });
+  });
+
+  it("attaches only the explicitly selected file in an ordinary threaded reply", async () => {
+    await fixture({}, async (f) => {
+      const text = `[Referenced](<${f.files[0]}>) with attached report`;
+      const result = await deliverMattermostReplyPayload({
+        cfg: f.cfg,
+        core: { channel: { text: {
+          convertMarkdownTables: (value: string) => value,
+          resolveChunkMode: () => "length",
+        } } } as unknown as PluginRuntime,
+        payload: { text, mediaUrl: f.files[1] },
+        channelId,
+        accountId: "default",
+        agentId: "main",
+        replyToId: rootId,
+        textLimit: 16383,
+        tableMode: "off",
+        sendMessage: sendMessageMattermost,
+      });
+
+      expect(f.requests.map((request) => request.path)).toEqual(["/api/v4/files", "/api/v4/posts"]);
+      expect(f.requests[0].body).toContain("file1");
+      expect(f.requests[0].body).not.toContain("file0");
+      expect(JSON.parse(f.requests[1].body)).toMatchObject({
+        message: "Referenced with attached report",
+        root_id: rootId,
+        file_ids: [fileId(1)],
+      });
+      expect(result).toMatchObject({ content: "Referenced with attached report", visibleReplySent: true });
+      expect(listMessageReceiptPlatformIds(result.receipt)).toEqual(["post-1"]);
+    });
+  });
+
   it.each([
     { grouped: false, silent: false, missingId: false },
     { grouped: false, silent: true, missingId: false },
@@ -294,6 +340,40 @@ describe("one-post Mattermost attachment collections", () => {
       expect(f.requests.some((r) => r.method === "DELETE")).toBe(false);
     });
   });
+
+  it.each(["single media", "grouped payload", "inbound reply"])(
+    "applies the outbound hostname deny list to %s",
+    async (seam) => {
+      await fixture({ byteLimit: 1024 }, async (f) => {
+        const hostname = "blocked-media.example";
+        const mediaUrl = `https://${hostname}/file.txt`;
+        const ctx = {
+          cfg: f.cfg, to: `channel:${channelId}`, text: "caption",
+          mediaAccess: { blockedHostnames: [hostname] },
+        };
+        const delivery = seam === "single media"
+          ? mattermostPlugin.outbound!.sendMedia!({ ...ctx, mediaUrl })
+          : seam === "grouped payload"
+            ? mattermostPlugin.message!.send!.payload!({
+                ...ctx, payload: { text: ctx.text, mediaUrls: [mediaUrl, f.files[0]] },
+                mediaLocalRoots: [f.directory],
+              })
+            : deliverMattermostReplyPayload({
+                cfg: { ...f.cfg, tools: {
+                  web: { fetch: { ssrfPolicy: { blockedHostnames: [hostname] } } },
+                } },
+                core: {
+                  channel: { text: { convertMarkdownTables: (text: string) => text, resolveChunkMode: () => "length" } },
+                } as unknown as PluginRuntime,
+                payload: { text: ctx.text, mediaUrls: [mediaUrl, f.files[0]] },
+                channelId, accountId: "default", agentId: "main", textLimit: 4096,
+                tableMode: "off", sendMessage: sendMessageMattermost,
+              });
+        await expect(delivery).rejects.toThrow(`Blocked hostname (configured blocklist): ${hostname}`);
+        expect(f.requests).toEqual([]);
+      });
+    },
+  );
 
   it.each(["fence", "signal", "dispatch-hook"])("rechecks %s authority after awaited preparation", async (mode) => {
     let retired = false;

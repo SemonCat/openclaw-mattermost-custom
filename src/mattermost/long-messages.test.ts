@@ -208,4 +208,12 @@ describe("Mattermost long-message delivery", () => {
     expect(hints.join("\n")).toContain("mattermost_form");
     expect(hints.join("\n")).toContain("multiSelect");
   });
+
+  it("describes HTTPS links and explicit same-thread attachments for replies and message sends", () => {
+    const hints = mattermostPlugin.agentPrompt!.inboundFormattingHints!({ cfg: {} });
+    expect(hints?.text_markup).toBe("markdown");
+    expect(hints?.rules?.join("\n")).toContain("HTTPS URLs");
+    expect(hints?.rules?.join("\n")).toContain("`MEDIA:`");
+    expect(hints?.rules?.join("\n")).toContain("`media` field in the same conversation and thread");
+  });
 });

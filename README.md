@@ -37,11 +37,11 @@ self-contained plugin artifact, then install that artifact into OpenClaw's
 managed plugin directory:
 
 ```bash
-mkdir -p .artifacts/releases/adapt-2026.11.6
+mkdir -p .artifacts/releases/adapt-2026.11.7
 npm run build
-npm pack --omit=dev --pack-destination .artifacts/releases/adapt-2026.11.6
+npm pack --omit=dev --pack-destination .artifacts/releases/adapt-2026.11.7
 openclaw plugins install \
-  ./.artifacts/releases/adapt-2026.11.6/openclaw-mattermost-custom-2026.11.6.tgz --force
+  ./.artifacts/releases/adapt-2026.11.7/openclaw-mattermost-custom-2026.11.7.tgz --force
 ```
 
 Do not use `plugins install --link` or add this source checkout to
@@ -111,7 +111,7 @@ Compared with the official plugin, this build preserves:
 - Channel/sender tool policies through the published host's shared policy pipeline.
 - Up to ten ordered attachments on one post, including ordinary inbound replies.
 
-This artifact targets the published OpenClaw `2026.11.6` SDK and requires an
+This artifact targets the published OpenClaw `2026.11.7` SDK and requires an
 OpenClaw host at least that version. Its Node contract follows that release:
 `>=24.16.0 <25 || >=26.1.0`. Development checks use Node `26.12.1`; this does
 not establish the runtime version of an installed Gateway.
@@ -437,6 +437,12 @@ Referenced attachment hydration keeps its separate aggregate cap of at most
 1024 MiB. Outbound grouped-send budgets keep their existing behavior.
 
 ### Silent sends and grouped attachments
+
+Use accessible HTTPS links for pull requests, commits, and published documents.
+Mattermost keeps the label of an inline link to a Gateway-local file and removes
+its destination. Use a code span to show a path and structured media to deliver
+the actual file in the same conversation or thread. A path in message text
+does not request a file read or upload.
 
 Message sends accept the host's per-send `silent: true` option. Outbound text,
 media and payload adapters carry it to `POST /posts?silent=true`; omitted or false
@@ -1048,6 +1054,12 @@ restart, and debounce/adoption lifecycle settlement keeps retry and dead-letter
 handling bounded. The seven-day thread-participation mention-bypass window is
 persisted across Gateway restarts.
 
+If OpenClaw exhausts its reply-session initialization retries, Mattermost can
+post a silent busy notice at the original reply destination and consume the
+inbound message. Automatic reply policy still applies. A definite delivery
+failure keeps the existing ingress retry path. An accepted or unconfirmed
+post attempt is consumed to avoid a duplicate notice.
+
 After a posted message is committed as a terminal ingress failure, the plugin
 can send one best-effort, silent warning in its original thread. This does not
 retry the task or change progress cards. The warning requires the current
@@ -1066,8 +1078,8 @@ The package build bundles plugin-owned TypeScript only. OpenClaw Plugin SDK,
 the plugin's declared runtime dependencies. This keeps OpenClaw core code and
 state migrations out of the plugin artifact.
 
-This release targets the published OpenClaw `2026.11.6` SDK and requires host
-and plugin API `>=2026.11.6`. Earlier hosts are not covered by this build's
+This release targets the published OpenClaw `2026.11.7` SDK and requires host
+and plugin API `>=2026.11.7`. Earlier hosts are not covered by this build's
 compatibility checks. The build verifies every emitted SDK subpath and named
 binding against the exact dev dependency in this checkout's `node_modules`;
 linked host checkouts and Gateway host overrides are not used.
@@ -1089,7 +1101,15 @@ changes in this repo's `src/`. Recheck the downstream command, callback,
 reaction, and trigger-cap behavior when upstream touches the corresponding
 files.
 
-### OpenClaw 2026.11.6 adaptation
+### OpenClaw 2026.11.7 adaptation
+
+Remote attachment downloads for outbound messages and agent replies honor the
+host's `tools.web.fetch.ssrfPolicy.blockedHostnames` through the published
+outbound media SDK. Web-fetch private-network exceptions stay scoped to web
+fetch. Mattermost continues to use its existing local-file access checks and
+attachment delivery semantics.
+
+### Previous OpenClaw 2026.11.6 adaptation
 
 This build advances the artifact, exact published development SDK, minimum host,
 plugin API and build metadata together to 2026.11.6, and follows the official
@@ -1390,7 +1410,7 @@ shared Mattermost contract tests and the downstream behavior tests.
 ### Test status against the published npm SDK
 
 This repo builds and tests against the published `openclaw` npm package
-(`2026.11.6`), not the OpenClaw monorepo checkout. One category of tests
+(`2026.11.7`), not the OpenClaw monorepo checkout. One category of tests
 behaves differently from the monorepo for that reason:
 
 - Ten suites import test-only Plugin SDK subpaths (`channel-test-helpers`,

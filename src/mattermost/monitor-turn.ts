@@ -13,16 +13,22 @@ import {
   createChannelProgressDraftCompositor,
   createLivePreviewLifecycle,
   listMessageReceiptPlatformIds,
+  resolveChannelMessageSourceReplyDeliveryMode,
 } from "openclaw/plugin-sdk/channel-outbound";
+import { PlatformMessageNotDispatchedError } from "openclaw/plugin-sdk/error-runtime";
 import { getGlobalHookRunner } from "openclaw/plugin-sdk/plugin-runtime";
 import {
   getReplyPayloadTtsSupplement,
   isReplyPayloadTerminalContent,
   stripReplyPayloadResponsePrefix,
 } from "openclaw/plugin-sdk/reply-payload";
-import type { finalizeInboundContext } from "openclaw/plugin-sdk/reply-runtime";
+import {
+  isReplySessionInitConflictError,
+  type finalizeInboundContext,
+} from "openclaw/plugin-sdk/reply-runtime";
 import { resolveInboundLastRouteSessionKey } from "openclaw/plugin-sdk/routing";
 import {
+  MattermostApiError,
   fetchMattermostPost,
   type MattermostPost,
 } from "./client.js";
@@ -573,9 +579,22 @@ export async function dispatchMattermostInboundTurn(
   const ingressReplyOptions = pendingDispatchIngress
     ? bindIngressLifecycleToReplyOptions(pendingDispatchIngress.lifecycle)
     : undefined;
+  let ingressHandedOff = false;
   const deferredTurnAdoptionLifecycle = ingressReplyOptions?.turnAdoptionLifecycle
     ? {
         ...ingressReplyOptions.turnAdoptionLifecycle,
+        onAdopted: async () => {
+          ingressHandedOff = true;
+          await ingressReplyOptions.turnAdoptionLifecycle.onAdopted();
+        },
+        onDeferred: () => {
+          ingressHandedOff = true;
+          return ingressReplyOptions.turnAdoptionLifecycle.onDeferred();
+        },
+        onAbandoned: async () => {
+          ingressHandedOff = true;
+          await ingressReplyOptions.turnAdoptionLifecycle.onAbandoned();
+        },
         // Core owns a deferred follow-up after the initial dispatch returns. Its
         // terminal settlement is the safe point to release this turn's provider
         // presentation resources, including plan/tool callbacks and subscriptions.
@@ -1195,7 +1214,59 @@ export async function dispatchMattermostInboundTurn(
     });
   } catch (err) {
     dispatchError = true;
-    throw err;
+    if (
+      ingressHandedOff ||
+      hasStartedWork ||
+      anyReplyDelivered ||
+      draftStream.postId() ||
+      !isReplySessionInitConflictError(err)
+    ) {
+      throw err;
+    }
+    const assertNoticeCurrent = () => {
+      monitor.abortSignal?.throwIfAborted();
+      turnAdoptionLifecycle?.abortSignal.throwIfAborted();
+      if (core.config.current() !== cfg) {
+        throw new Error("Mattermost inbound reply configuration changed");
+      }
+    };
+    assertNoticeCurrent();
+    if (resolveChannelMessageSourceReplyDeliveryMode({ cfg, ctx: ctxPayload }) === "message_tool_only") {
+      await turnAdoptionLifecycle?.onAdopted();
+      return;
+    }
+    let postAttempted = false;
+    try {
+      await sendMessageMattermost(
+        `channel:${channelId}`,
+        "⚠️ Couldn't process this message because the session stayed busy. Please try again in a moment.",
+        {
+          cfg,
+          accountId: route.accountId,
+          replyToId: effectiveReplyToId,
+          silent: true,
+          assertDirectAdapterHandoff: assertNoticeCurrent,
+          onPlatformSendDispatch: async () => {
+            postAttempted = true;
+          },
+        },
+      );
+      anyReplyDelivered = true;
+    } catch (deliveryError) {
+      if (isChannelPartialDeliveryError(deliveryError) && deliveryError.deliveryResult.visibleReplySent) {
+        anyReplyDelivered = true;
+      } else {
+        const status = deliveryError instanceof MattermostApiError ? deliveryError.status : undefined;
+        if (
+          !postAttempted || deliveryError instanceof PlatformMessageNotDispatchedError ||
+          (status !== undefined && status >= 400 && status < 500 && status !== 408)
+        ) {
+          throw deliveryError;
+        }
+        monitor.logVerboseMessage("mattermost: session busy notice delivery unconfirmed");
+      }
+    }
+    await turnAdoptionLifecycle?.onAdopted();
   } finally {
     // Once core returns, an admitted turn has completed the claim and a queued
     // follow-up owns its own retry heartbeat. This timer only bridges the
