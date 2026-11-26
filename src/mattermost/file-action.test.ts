@@ -1,4 +1,4 @@
-import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -7,6 +7,7 @@ import type { MattermostClient, MattermostPost } from "./client.js";
 import type { OpenClawConfig } from "./runtime-api.js";
 
 const CHANNEL_ID = "c".repeat(26);
+const OTHER_CHANNEL_ID = "o".repeat(26);
 const POST_ID = "p".repeat(26);
 const FILE_ID = "f".repeat(26);
 const SENDER_ID = "u".repeat(26);
@@ -14,6 +15,7 @@ const BOT_ID = "b".repeat(26);
 const tempDirs: string[] = [];
 
 type SetupOptions = {
+  channelType?: "O" | "D";
   groupPolicy?: "allowlist" | "open" | "disabled";
   mediaMaxMb?: number;
   fileSize?: number;
@@ -32,6 +34,8 @@ async function setup(options: SetupOptions = {}) {
         enabled: true,
         botToken: "fixture-token",
         baseUrl: "https://mm.example",
+        dmPolicy: "open",
+        allowFrom: ["*"],
         groupPolicy: options.groupPolicy ?? "open",
         mediaMaxMb: options.mediaMaxMb ?? 64,
       },
@@ -60,7 +64,7 @@ async function setup(options: SetupOptions = {}) {
   const fileSize = options.fileSize ?? savedBytes.length;
   const request = vi.fn(async (endpoint: string) => {
     if (endpoint === `/channels/${CHANNEL_ID}`) {
-      return { id: CHANNEL_ID, type: "O" };
+      return { id: CHANNEL_ID, type: options.channelType ?? "O" };
     }
     throw new Error(`Unexpected Mattermost request: ${endpoint}`);
   });
@@ -180,6 +184,98 @@ describe("downloadMattermostPostAttachment", () => {
     expect(fixture.fetchPost).toHaveBeenCalledTimes(2);
   });
 
+  it.each([
+    undefined,
+    CHANNEL_ID,
+    `channel:${CHANNEL_ID}`,
+    ` GROUP: ${CHANNEL_ID} `,
+    `mattermost:channel:${CHANNEL_ID}`,
+  ])("downloads exact bytes for a native-channel scope (%s)", async (authorizedTarget) => {
+    const fixture = await setup();
+
+    await expect(fixture.run({ authorizedTarget })).resolves.toMatchObject({
+      details: { path: fixture.savedPath },
+    });
+    expect(await readFile(fixture.savedPath)).toEqual(Buffer.from("aaaa"));
+  });
+
+  it.each([
+    OTHER_CHANNEL_ID,
+    `channel:${OTHER_CHANNEL_ID}`,
+    `user:${CHANNEL_ID}`,
+    `mattermost:${CHANNEL_ID}`,
+    `@${CHANNEL_ID}`,
+  ])("rejects an explicit target outside the native channel (%s)", async (authorizedTarget) => {
+    const fixture = await setup();
+
+    await expect(fixture.run({ authorizedTarget })).rejects.toThrow(
+      "file target must match the current conversation",
+    );
+    expect(fixture.save).not.toHaveBeenCalled();
+  });
+
+  it("downloads from the native DM instead of using its outbound user target", async () => {
+    const fixture = await setup({ channelType: "D" });
+    const toolContext = {
+      currentChannelProvider: "mattermost",
+      currentChatType: "direct" as const,
+      currentChannelId: `channel:${CHANNEL_ID}`,
+      currentMessagingTarget: `user:${SENDER_ID}`,
+    };
+
+    await expect(fixture.run({ authorizedTarget: CHANNEL_ID, toolContext })).resolves.toMatchObject(
+      { details: { path: fixture.savedPath } },
+    );
+    await expect(
+      fixture.run({ authorizedTarget: toolContext.currentMessagingTarget, toolContext }),
+    ).rejects.toThrow("file target must match the current conversation");
+    expect(fixture.save).toHaveBeenCalledOnce();
+  });
+
+  it("does not use the outbound target as a substitute for a missing native channel", async () => {
+    const fixture = await setup();
+
+    await expect(
+      fixture.run({
+        authorizedTarget: undefined,
+        toolContext: {
+          currentChannelProvider: "mattermost",
+          currentMessagingTarget: `channel:${CHANNEL_ID}`,
+        },
+      }),
+    ).rejects.toThrow("current Mattermost account and conversation");
+    expect(fixture.save).not.toHaveBeenCalled();
+  });
+
+  it("rejects a post in the outbound channel when the native channel is different", async () => {
+    const fixture = await setup();
+
+    await expect(
+      fixture.run({
+        authorizedTarget: undefined,
+        toolContext: {
+          currentChannelProvider: "mattermost",
+          currentChannelId: OTHER_CHANNEL_ID,
+          currentMessagingTarget: `channel:${CHANNEL_ID}`,
+        },
+      }),
+    ).rejects.toThrow("file post is not in the current conversation");
+    expect(fixture.save).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, "work", "__proto__"])(
+    "requires a matching trusted account (%s)",
+    async (requesterAccountId) => {
+      const fixture = await setup();
+
+      await expect(fixture.run({ requesterAccountId })).rejects.toThrow(
+        "current Mattermost account and conversation",
+      );
+      expect(fixture.fetchPost).not.toHaveBeenCalled();
+      expect(fixture.save).not.toHaveBeenCalled();
+    },
+  );
+
   it("returns image content with the verified local path", async () => {
     const fixture = await setup({ contentType: "image/png" });
 
@@ -199,27 +295,6 @@ describe("downloadMattermostPostAttachment", () => {
         expect.objectContaining({ type: "image", mimeType: expect.any(String) }),
       ]),
     );
-  });
-
-  it("requires the exact current account and conversation before saving", async () => {
-    const fixture = await setup();
-
-    await expect(fixture.run({ requesterAccountId: "work" })).rejects.toThrow(
-      "current Mattermost account and conversation",
-    );
-    expect(fixture.fetchPost).not.toHaveBeenCalled();
-    expect(fixture.save).not.toHaveBeenCalled();
-
-    const otherConversation = await setup();
-    await expect(
-      otherConversation.run({
-        toolContext: {
-          currentChannelProvider: "mattermost",
-          currentChannelId: "o".repeat(26),
-        },
-      }),
-    ).rejects.toThrow("not in the current conversation");
-    expect(otherConversation.save).not.toHaveBeenCalled();
   });
 
   it.each([

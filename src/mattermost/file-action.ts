@@ -6,7 +6,7 @@ import {
 import { imageResultFromFile, jsonResult } from "openclaw/plugin-sdk/channel-actions";
 import {
   DEFAULT_ACCOUNT_ID,
-  normalizeAccountId,
+  normalizeOptionalAccountId,
 } from "openclaw/plugin-sdk/account-id";
 import { saveRemoteMedia } from "openclaw/plugin-sdk/media-runtime";
 import { sanitizeUntrustedFileName } from "openclaw/plugin-sdk/security-runtime";
@@ -25,10 +25,7 @@ import {
   type MattermostFetch,
   type MattermostPost,
 } from "./client.js";
-import {
-  isCurrentMattermostReadTarget,
-  type ReadContext,
-} from "./read.js";
+import type { ReadContext } from "./read.js";
 import {
   resolveMattermostMonitorInboundAccess,
   shouldRetainMattermostSenderHistory,
@@ -37,12 +34,9 @@ import { isDangerousNameMatchingEnabled } from "./runtime-api.js";
 import type { OpenClawConfig } from "./runtime-api.js";
 
 const POST_ID = /^[a-z0-9]{26}$/iu;
+const NATIVE_CHANNEL_TARGET = /^(?:(?:mattermost:\s*)?(?:channel|group):\s*)?([a-z0-9]{26})$/i;
 const MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024;
 const DOWNLOAD_TIMEOUT_MS = 10_000;
-
-type MattermostFileActionReadContext = ReadContext & {
-  requesterSenderId?: string | null;
-};
 
 export type DownloadMattermostPostAttachmentParams = {
   cfg: OpenClawConfig;
@@ -193,19 +187,24 @@ export async function downloadMattermostPostAttachment(
     throw new Error("Mattermost download-file requires a trusted current sender.");
   }
 
-  const context: MattermostFileActionReadContext = {
-    conversationReadOrigin: params.conversationReadOrigin,
-    requesterAccountId: params.requesterAccountId,
-    requesterSenderId: params.requesterSenderId,
-    toolContext: params.toolContext,
-  };
-  const requesterAccountId = normalizeAccountId(context.requesterAccountId ?? "");
+  const nativeChannelId = normalizeOptionalString(params.toolContext?.currentChannelId)?.match(
+    NATIVE_CHANNEL_TARGET,
+  )?.[1];
+  const requesterAccountId = normalizeOptionalAccountId(params.requesterAccountId);
   if (
-    requesterAccountId !== normalizeAccountId(account.accountId) ||
-    normalizeOptionalString(context.toolContext?.currentChannelProvider)?.toLowerCase() !==
+    !nativeChannelId ||
+    !requesterAccountId ||
+    requesterAccountId !== normalizeOptionalAccountId(account.accountId) ||
+    normalizeOptionalString(params.toolContext?.currentChannelProvider)?.toLowerCase() !==
       "mattermost"
   ) {
     throw new Error("Mattermost file downloads require the current Mattermost account and conversation.");
+  }
+  if (
+    params.authorizedTarget !== undefined &&
+    params.authorizedTarget.trim().match(NATIVE_CHANNEL_TARGET)?.[1] !== nativeChannelId
+  ) {
+    throw new Error("Mattermost file target must match the current conversation.");
   }
 
   const controller = new AbortController();
@@ -252,20 +251,8 @@ export async function downloadMattermostPostAttachment(
     if (!channelId) {
       throw new Error("Mattermost file post has no conversation binding.");
     }
-    if (
-      !isCurrentMattermostReadTarget({
-        accountId: account.accountId,
-        channelId,
-        context,
-      })
-    ) {
+    if (channelId !== nativeChannelId) {
       throw new Error("Mattermost file post is not in the current conversation.");
-    }
-    if (params.authorizedTarget) {
-      const target = normalizeOptionalString(params.authorizedTarget);
-      if (target !== `channel:${channelId}`) {
-        throw new Error("Mattermost file target must match the current conversation.");
-      }
     }
     assertPostOwnsFile({ post, postId, fileId, channelId });
     await assertVisiblePostSender({
