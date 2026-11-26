@@ -22,10 +22,8 @@ import {
   isReplyPayloadTerminalContent,
   stripReplyPayloadResponsePrefix,
 } from "openclaw/plugin-sdk/reply-payload";
-import {
-  isReplySessionInitConflictError,
-  type finalizeInboundContext,
-} from "openclaw/plugin-sdk/reply-runtime";
+import type { finalizeInboundContext } from "openclaw/plugin-sdk/reply-runtime";
+import { isReplySessionInitConflictError } from "openclaw/plugin-sdk/reply-session-init-runtime";
 import { resolveInboundLastRouteSessionKey } from "openclaw/plugin-sdk/routing";
 import {
   MattermostApiError,

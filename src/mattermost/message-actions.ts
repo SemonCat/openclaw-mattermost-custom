@@ -22,6 +22,7 @@ import {
 } from "./client.js";
 import { buildButtonProps, resolveInteractionCallbackUrl, setInteractionSecret } from "./interactions.js";
 import { detectMattermostBlocksSupport, resolveMattermostButtonFormat } from "./capabilities.js";
+import { stripMattermostLocalFileLinks } from "./local-file-links.js";
 import type { OpenClawConfig } from "./runtime-api.js";
 
 type ConversationReadInvocationOrigin = NonNullable<
@@ -167,7 +168,7 @@ export async function editMattermostMessageAction(
     const format = resolveMattermostButtonFormat(configuredBlocks,
       rendered.buttons.length && configuredBlocks === undefined ? await detectMattermostBlocksSupport(client) : undefined);
     const patch = (format: "legacy" | "blocks") => updateMattermostPost(client, params.postId, {
-      message: rendered.text,
+      message: stripMattermostLocalFileLinks(rendered.text),
       props: { ...props, ...buildButtonProps({
         buttons: rendered.buttons, accountId: account.accountId, channelId,
         callbackUrl, format,
@@ -180,7 +181,11 @@ export async function editMattermostMessageAction(
       return await patch("legacy");
     }
   }
-  return await updateMattermostPostMessageWithReadback(client, params.postId, message);
+  return await updateMattermostPostMessageWithReadback(
+    client,
+    params.postId,
+    stripMattermostLocalFileLinks(message),
+  );
 }
 
 export async function deleteMattermostMessageAction(

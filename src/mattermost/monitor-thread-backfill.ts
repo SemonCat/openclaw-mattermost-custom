@@ -1,7 +1,7 @@
 import { getSessionEntryAsync, resolveStorePath } from "openclaw/plugin-sdk/session-store-runtime";
 import { z } from "zod";
 import { resolveMattermostAccount } from "./accounts.js";
-import { isRetryableError, MattermostPostSchema, type MattermostUser } from "./client.js";
+import { isMattermostSystemPost, isRetryableError, MattermostPostSchema, type MattermostUser } from "./client.js";
 import {
   resolveMattermostMonitorInboundAccess,
   shouldRetainMattermostSenderHistory,
@@ -151,7 +151,7 @@ export function createMattermostThreadBackfill(params: {
           ? post.id !== turn.threadRootId && post.root_id !== turn.threadRootId
           : Boolean(post.root_id) || post.user_id === monitor.botUserId) ||
         post.delete_at ||
-        post.type ||
+        isMattermostSystemPost(post) ||
         !post.user_id ||
         typeof post.create_at !== "number" ||
         post.create_at > turn.currentPostTimestamp ||

@@ -144,6 +144,22 @@ describe("Mattermost bot-owned thread mention policy", () => {
     expect(dispatch).toHaveBeenCalledOnce();
   });
 
+  it("admits a human link preview while enforcing system-post and sender exclusions", async () => {
+    await setup({ requireMentionInBotThreads: false }).receive({
+      type: "slack_attachment",
+      message: "Review https://example.com/change",
+    });
+    expect(dispatch).toHaveBeenCalledOnce();
+
+    await setup({ requireMentionInBotThreads: false }).receive({ type: "system_join_channel" });
+    await setup({
+      requireMentionInBotThreads: false,
+      groupPolicy: "allowlist",
+      groupAllowFrom: ["another-sender"],
+    }).receive({ type: "slack_attachment" });
+    expect(dispatch).toHaveBeenCalledOnce();
+  });
+
   it.each([
     { scope: "account", config: { requireMentionInBotThreads: false } },
     {

@@ -55,6 +55,12 @@ async function createFixture(version: string, suffix: string, configuredLimit?: 
 }
 
 describe("Mattermost long-message delivery", () => {
+  it("closes and reopens Markdown fences across outbound message-tool chunks", () => {
+    const lines = ["const alpha = 12345;", "const beta = 67890;"];
+    const chunks = mattermostPlugin.outbound!.chunker!(`\`\`\`ts\n${lines.join("\n")}\n\`\`\``, 35);
+    expect(chunks).toEqual(lines.map((line) => `\`\`\`ts\n${line}\n\`\`\``));
+  });
+
   it("keeps a 262144-character v12 reply in one inbound, outbound and streaming post", async () => {
     const fixture = await createFixture("12.0.0.38519854955.hash.false", "v12");
     expect(fixture.inboundLimit).toBe(262_144);

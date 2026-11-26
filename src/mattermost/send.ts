@@ -692,7 +692,7 @@ export async function sendMessageMattermost(
     throw new Error("Mattermost message is empty");
   }
 
-  const chunks = grouped && message
+  const chunks = fileIds?.length && message
     ? chunkMarkdownTextWithMode(
         message,
         resolveMattermostTextLimit({
@@ -732,7 +732,9 @@ export async function sendMessageMattermost(
       };
       const details = opts.workDetails ? mattermostWorkDetailsProps(chunk) : undefined;
       const partProps = withMattermostDeliveryMarker(
-        details ? {...props, openclaw_work_details: details} : index === 0 ? props : undefined,
+        details
+          ? { ...(index === 0 ? props : undefined), openclaw_work_details: details }
+          : index === 0 ? props : undefined,
         marker,
       );
       const created = await createMattermostPostWithButtonFallback({

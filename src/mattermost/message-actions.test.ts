@@ -17,6 +17,44 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("Mattermost message actions", () => {
+  it.each([false, true])("renders local links during edit and preserves code and HTTPS (presentation %s)", async (presentation) => {
+    const cfg = createMattermostTestConfig("edit-local-links");
+    cfg.channels!.mattermost!.interactions = { blocks: false };
+    const literal = "`[Literal](file:///tmp/example)`";
+    const text = `[Report](</tmp/my report.json>) [File](file:///tmp/file) [PR](https://example.com/pr) ${literal}`;
+    const expected = `Report File [PR](https://example.com/pr) ${literal}${presentation ? "\n\n- Open" : ""}`;
+    const existing = {
+      id: "POST1", channel_id: "CHAN1", user_id: "BOT1", file_ids: ["FILE1"],
+      props: { attachments: [{ previous: true }], other: true },
+    };
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      const url = requestUrl(input);
+      if (url.endsWith("/users/me")) return jsonResponse({ id: "BOT1" });
+      if (init?.method === "PUT") {
+        const body = JSON.parse(String(init.body));
+        expect(body.message).toBe(expected);
+        expect(body).not.toHaveProperty("file_ids");
+        if (presentation) {
+          expect(body.props).toMatchObject({ other: true, attachments: expect.any(Array) });
+          expect(body.props.attachments).not.toContainEqual({ previous: true });
+        } else {
+          expect(body).not.toHaveProperty("props");
+        }
+        return jsonResponse({ ...existing, ...body });
+      }
+      expect(url).toMatch(/\/posts\/POST1$/u);
+      return jsonResponse(existing);
+    });
+    await expect(editMattermostMessageAction({
+      cfg, postId: "POST1", message: text, authorizedTarget: "channel:CHAN1",
+      conversationReadOrigin: "delegated", fetchImpl,
+      presentation: presentation ? { blocks: [{
+        type: "buttons", buttons: [{ label: "Open", action: { type: "callback", value: "open" } }],
+      }] } : undefined,
+    })).resolves.toMatchObject({ message: expected, file_ids: ["FILE1"] });
+    expect(fetchImpl.mock.calls.filter(([, init]) => init?.method === "PUT")).toHaveLength(1);
+  });
+
   it("edits an authorized post through the normal post identity", async () => {
     const calls: Array<{ url: string; method?: string; body?: unknown }> = [];
     const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {

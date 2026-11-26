@@ -10,6 +10,7 @@ import {
   fetchMattermostChannel,
   fetchMattermostPost,
   fetchMattermostUser,
+  isMattermostSystemPost,
 } from "./client.js";
 import { resolveMattermostPostActivation } from "./monitor-activation.js";
 import { resolveMattermostMonitorInboundAccess, resolveMattermostTrustedChatKind } from "./monitor-auth.js";
@@ -39,7 +40,7 @@ export function createMattermostDeadLetterNotifier(monitor: MattermostMonitorCon
     assertCurrent();
     const channelId = original.channel_id ?? payload.data?.channel_id ?? payload.broadcast?.channel_id;
     if (payload.event !== "posted" || !channelId || original.user_id === monitor.botUserId ||
-        normalizeOptionalString(original.type)) return;
+        isMattermostSystemPost(original)) return;
     const transport = createMattermostClient({
       baseUrl: monitor.client.baseUrl, botToken: monitor.client.token,
       allowPrivateNetwork: isPrivateNetworkOptInEnabled(account.config),
@@ -54,7 +55,7 @@ export function createMattermostDeadLetterNotifier(monitor: MattermostMonitorCon
     };
     const post = await fetchMattermostPost(client, original.id);
     if (post.id !== original.id || post.channel_id !== channelId ||
-        post.user_id !== original.user_id || post.delete_at || normalizeOptionalString(post.type) ||
+        post.user_id !== original.user_id || post.delete_at || isMattermostSystemPost(post) ||
         normalizeOptionalString(post.root_id) !== normalizeOptionalString(original.root_id)) return;
     const channel = await fetchMattermostChannel(client, channelId);
     if (channel.id !== channelId || !channel.type?.trim()) return;

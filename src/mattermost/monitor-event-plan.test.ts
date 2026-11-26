@@ -1,6 +1,18 @@
-import { expect, it } from "vitest";
+import * as bindingRuntime from "openclaw/plugin-sdk/conversation-binding-runtime";
+import type { ResolvedAgentRoute } from "openclaw/plugin-sdk/routing";
+import { expect, it, vi } from "vitest";
 import { buildMattermostEventPlan } from "./monitor-event-plan.js";
 import type { MattermostMonitorContext } from "./monitor-types.js";
+
+vi.mock("openclaw/plugin-sdk/conversation-binding-runtime", async (importOriginal) => {
+  const actual = await importOriginal<typeof bindingRuntime>();
+  return {
+    ...actual,
+    resolveRuntimeConversationBindingRouteAsync: vi.fn(
+      actual.resolveRuntimeConversationBindingRouteAsync,
+    ),
+  };
+});
 
 it.each([
   { channelType: "O", config: {}, threaded: false },
@@ -70,3 +82,55 @@ it.each([
     expect(thread.finalizeContext({})).not.toHaveProperty("ConversationLink");
   },
 );
+
+it("selects the bound fork session before dispatch and preserves the native reply root", async () => {
+  const baseRoute = {
+    agentId: "main",
+    accountId: "default",
+    sessionKey: "agent:main:mattermost:channel:room",
+  } as ResolvedAgentRoute;
+  const forkKey = "agent:second:fork:synthetic";
+  const rootId = "s".repeat(26);
+  const selectBinding = vi.mocked(bindingRuntime.resolveRuntimeConversationBindingRouteAsync);
+  selectBinding.mockClear();
+  selectBinding.mockResolvedValueOnce({
+    bindingRecord: null,
+    bindingOwnerAvailable: true,
+    boundSessionKey: forkKey,
+    route: { ...baseRoute, agentId: "second", sessionKey: forkKey },
+  });
+  const monitor = {
+    cfg: {},
+    account: { accountId: "default", config: {} },
+    core: { channel: { routing: { resolveAgentRoute: () => baseRoute } } },
+    resources: { resolveChannelInfo: async () => ({ type: "P" }) },
+  } as unknown as MattermostMonitorContext;
+  const plan = (await buildMattermostEventPlan(monitor, {
+    channelId: "room",
+    senderId: "sender",
+    postId: "p".repeat(26),
+    threadRootId: rootId,
+    dropLabel: "test",
+  }))!;
+  expect(selectBinding).toHaveBeenCalledWith({
+    route: baseRoute,
+    conversation: {
+      channel: "mattermost",
+      accountId: "default",
+      conversationId: rootId,
+      parentConversationId: "room",
+    },
+    touchBinding: false,
+  });
+  expect(plan.thread).toEqual({
+    effectiveReplyToId: rootId,
+    sessionKey: forkKey,
+    parentSessionKey: undefined,
+  });
+  expect(plan.finalizeContext({ RawBody: "sibling turn" })).toMatchObject({
+    AgentId: "second",
+    SessionKey: forkKey,
+    MessageThreadId: rootId,
+    To: "channel:room",
+  });
+});

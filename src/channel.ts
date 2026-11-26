@@ -32,6 +32,7 @@ import {
 } from "openclaw/plugin-sdk/interactive-runtime";
 import { createLazyRuntimeModule } from "openclaw/plugin-sdk/lazy-runtime";
 import { questionGatewayRuntime } from "openclaw/plugin-sdk/question-gateway-runtime";
+import { chunkMarkdownTextWithMode } from "openclaw/plugin-sdk/reply-chunking";
 import { resolvePayloadMediaUrls, sendTextMediaPayload } from "openclaw/plugin-sdk/reply-payload";
 import { isPrivateNetworkOptInEnabled } from "openclaw/plugin-sdk/ssrf-runtime";
 import {
@@ -41,12 +42,7 @@ import {
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { sanitizeAssistantVisibleText } from "openclaw/plugin-sdk/text-chunking";
 import { mattermostApprovalCapability } from "./approval-native.js";
-import {
-  chunkTextForOutbound,
-  createAccountStatusSink,
-  DEFAULT_ACCOUNT_ID,
-  type ChannelPlugin,
-} from "./channel-api.js";
+import { createAccountStatusSink, DEFAULT_ACCOUNT_ID, type ChannelPlugin } from "./channel-api.js";
 import {
   describeMattermostAccount,
   mattermostConfigAdapter,
@@ -944,7 +940,7 @@ function createMattermostDeliveryProgressReporter(
 const mattermostOutbound: ChannelOutboundAdapter = {
   deliveryMode: "direct",
   sendPayloadGroupsMedia: true,
-  chunker: chunkTextForOutbound,
+  chunker: (text, limit) => chunkMarkdownTextWithMode(text, limit, "length"),
   chunkerMode: "markdown",
   textChunkLimit: MATTERMOST_LEGACY_TEXT_LIMIT,
   resolveEffectiveTextChunkLimit: ({ cfg, accountId }) =>
@@ -1215,6 +1211,11 @@ export const mattermostPlugin: ChannelPlugin<ResolvedMattermostAccount> = create
     },
     actions: mattermostMessageActions,
     message: mattermostMessageAdapter,
+    conversationBindings: {
+      supportsCurrentConversationBinding: true,
+      prepareFork: async (params) =>
+        (await import("./mattermost/conversation-fork.js")).prepareMattermostFork(params),
+    },
     secrets: {
       secretTargetRegistryEntries,
       collectRuntimeConfigAssignments,

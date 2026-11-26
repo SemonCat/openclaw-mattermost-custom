@@ -12,7 +12,7 @@ import {
 import { resolvePromptHistoryLimit } from "openclaw/plugin-sdk/number-runtime";
 import { resolveMattermostGroupContext } from "../group-context.js";
 import { isMattermostNativeSkillAllowed } from "./native-commands.js";
-import type { MattermostPost } from "./client.js";
+import { isMattermostSystemPost, type MattermostPost } from "./client.js";
 import { waitForMattermostChannelModelTransition } from "./channel-model-transition.js";
 import { resolveMattermostPostActivation } from "./monitor-activation.js";
 import {
@@ -98,7 +98,7 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
       monitor.logVerboseMessage(`mattermost: drop post (self sender=${senderId})`);
       return;
     }
-    if (normalizeOptionalString(post.type) !== undefined) {
+    if (isMattermostSystemPost(post)) {
       monitor.logVerboseMessage(
         `mattermost: drop post (system post type=${post.type ?? "unknown"})`,
       );

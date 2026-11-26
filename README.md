@@ -37,11 +37,11 @@ self-contained plugin artifact, then install that artifact into OpenClaw's
 managed plugin directory:
 
 ```bash
-mkdir -p .artifacts/releases/adapt-2026.11.7
+mkdir -p .artifacts/releases/adapt-2026.11.10
 npm run build
-npm pack --omit=dev --pack-destination .artifacts/releases/adapt-2026.11.7
+npm pack --omit=dev --pack-destination .artifacts/releases/adapt-2026.11.10
 openclaw plugins install \
-  ./.artifacts/releases/adapt-2026.11.7/openclaw-mattermost-custom-2026.11.7.tgz --force
+  ./.artifacts/releases/adapt-2026.11.10/openclaw-mattermost-custom-2026.11.10.tgz --force
 ```
 
 Do not use `plugins install --link` or add this source checkout to
@@ -111,7 +111,7 @@ Compared with the official plugin, this build preserves:
 - Channel/sender tool policies through the published host's shared policy pipeline.
 - Up to ten ordered attachments on one post, including ordinary inbound replies.
 
-This artifact targets the published OpenClaw `2026.11.7` SDK and requires an
+This artifact targets the published OpenClaw `2026.11.10` SDK and requires an
 OpenClaw host at least that version. Its Node contract follows that release:
 `>=24.16.0 <25 || >=26.1.0`. Development checks use Node `26.12.1`; this does
 not establish the runtime version of an installed Gateway.
@@ -303,12 +303,23 @@ can reach core while the earlier claim remains in the durable SQLite spool. Rele
 is not completion: existing heartbeat, adoption, cancellation, retry and restart
 recovery still own the earlier input. Core decides follow-up/steer ordering.
 
+On OpenClaw 2026.11.10, send `@OpenClaw /fork [title]` as a regular reply inside
+an existing public or private Mattermost channel thread. OpenClaw copies the
+conversation into an independent session, creates a new root in the same
+channel, and posts a short recap there. The original conversation continues in
+its own thread. The command requires current membership for the requester and
+bot. If the new root cannot be confirmed, check the channel before retrying.
+
 When inbound debounce is enabled, a quiet text buffer checks the durable lane backlog
 before flushing. Compatible input from the same sender/channel/thread can join the
 batch; commands, system posts, attachments, other senders and other threads do not
 extend it. Batches stop at 12 posts or 50,000 text characters. The published SDK's
 maximum wait (five debounce windows) still applies even if the backlog reader stalls
 or input keeps arriving. This does not enable debounce when its configured delay is zero.
+
+Human posts with a `slack_attachment` link preview pass through normal sender and
+thread checks and stay separate from debounced text. System posts still bypass
+reply admission.
 
 OpenClaw 10.5 retires `conversationLink` from session storage and Gateway session
 rows, and passes only session identity to Control UI header accessories.
@@ -440,9 +451,9 @@ Referenced attachment hydration keeps its separate aggregate cap of at most
 
 Use accessible HTTPS links for pull requests, commits, and published documents.
 Mattermost keeps the label of an inline link to a Gateway-local file and removes
-its destination. Use a code span to show a path and structured media to deliver
-the actual file in the same conversation or thread. A path in message text
-does not request a file read or upload.
+its destination on both sends and message edits. Use a code span to show a path
+and structured media to deliver the actual file in the same conversation or
+thread. A path in message text does not request a file read or upload.
 
 Message sends accept the host's per-send `silent: true` option. Outbound text,
 media and payload adapters carry it to `POST /posts?silent=true`; omitted or false
@@ -464,10 +475,10 @@ URL fallback. Grouped sends fail before post creation when any upload fails;
 they never silently create a partial attachment post. Local-root, SSRF,
 cancellation, and current sender checks apply between awaited operations.
 
-The first post carries the attachments, the first permitted Markdown text
-chunk, and supported presentation controls. Text overflow follows as text-only
-posts using the effective server/account limit and configured streaming chunk
-mode. Receipts preserve every known post identity, including when a later
+For a single file or a group, the first post carries the attachments, the first
+permitted Markdown text chunk, and supported presentation controls. Text
+overflow follows as text-only posts using the effective server/account limit
+and configured streaming chunk mode. Receipts preserve every known post identity, including when a later
 chunk fails. An accepted create with an unreadable/missing identity stops
 delivery without a blind create retry or deleting accepted attachments.
 Failed preparation can leave uploaded, unattached files: the verified provider
@@ -1078,8 +1089,8 @@ The package build bundles plugin-owned TypeScript only. OpenClaw Plugin SDK,
 the plugin's declared runtime dependencies. This keeps OpenClaw core code and
 state migrations out of the plugin artifact.
 
-This release targets the published OpenClaw `2026.11.7` SDK and requires host
-and plugin API `>=2026.11.7`. Earlier hosts are not covered by this build's
+This release targets the published OpenClaw `2026.11.10` SDK and requires host
+and plugin API `>=2026.11.10`. Earlier hosts are not covered by this build's
 compatibility checks. The build verifies every emitted SDK subpath and named
 binding against the exact dev dependency in this checkout's `node_modules`;
 linked host checkouts and Gateway host overrides are not used.
@@ -1101,7 +1112,13 @@ changes in this repo's `src/`. Recheck the downstream command, callback,
 reaction, and trigger-cap behavior when upstream touches the corresponding
 files.
 
-### OpenClaw 2026.11.7 adaptation
+### OpenClaw 2026.11.10 adaptation
+
+The artifact, exact published development SDK, minimum host, plugin API and
+build metadata advance together to 2026.11.10. The Node engine requirement
+remains `>=24.16.0 <25 || >=26.1.0`.
+
+### Previous OpenClaw 2026.11.7 adaptation
 
 Remote attachment downloads for outbound messages and agent replies honor the
 host's `tools.web.fetch.ssrfPolicy.blockedHostnames` through the published
@@ -1410,7 +1427,7 @@ shared Mattermost contract tests and the downstream behavior tests.
 ### Test status against the published npm SDK
 
 This repo builds and tests against the published `openclaw` npm package
-(`2026.11.7`), not the OpenClaw monorepo checkout. One category of tests
+(`2026.11.10`), not the OpenClaw monorepo checkout. One category of tests
 behaves differently from the monorepo for that reason:
 
 - Ten suites import test-only Plugin SDK subpaths (`channel-test-helpers`,

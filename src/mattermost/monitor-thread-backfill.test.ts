@@ -53,7 +53,7 @@ describe("Mattermost thread backfill", () => {
 
   it("recovers bounded prior thread posts before dispatch", async () => {
     const request = vi.fn(async () => ({
-      order: ["root-1", "post-2", "post-3"],
+      order: ["root-1", "system", "post-2", "post-3"],
       posts: {
         "root-1": {
           id: "root-1",
@@ -68,7 +68,12 @@ describe("Mattermost thread backfill", () => {
           channel_id: "chan-1",
           root_id: "root-1",
           message: "prior reply",
+          type: "slack_attachment",
           create_at: 200,
+        },
+        system: {
+          id: "system", user_id: "user-2", channel_id: "chan-1", root_id: "root-1",
+          message: "joined", type: "system_join_channel", create_at: 150,
         },
         "post-3": {
           id: "post-3",

@@ -155,6 +155,18 @@ describe("Mattermost terminal ingress notices", () => {
     expect(f.upsertPairingRequest).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["slack_attachment", "slack_attachment", 1],
+    ["system_join_channel", "slack_attachment", 0],
+    ["slack_attachment", "system_join_channel", 0],
+  ] as const)("checks original %s and provider %s types independently", async (original, current, count) => {
+    const f = fixture("O");
+    f.post.type = original;
+    f.currentPost.type = current;
+    await f.notify();
+    expect(f.writes).toHaveLength(count);
+  });
+
   it.each(["disabled", "removed", "transport", "other-account", "sender-denied", "pairing", "source-reply"])(
     "suppresses a notice under current %s policy", async reason => {
       const f = fixture();

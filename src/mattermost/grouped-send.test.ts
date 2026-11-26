@@ -130,6 +130,39 @@ async function prepareAndSend(f: Parameters<Parameters<typeof fixture>[1]>[0], e
 }
 
 describe("one-post Mattermost attachment collections", () => {
+  it.each([undefined, 2])("keeps single-file caption continuations and receipts in the source thread (failure %s)", async (postFailure) => {
+    await fixture({ count: 1, textLimit: 8, postFailure }, async (f) => {
+      const text = "abcdefgh ijklmnop qrstuvwx";
+      const delivered = vi.fn();
+      const send = mattermostPlugin.outbound!.sendPayload!({
+        cfg: f.cfg, to: `channel:${channelId}`, text,
+        payload: { text, mediaUrl: f.files[0], channelData: { mattermost: {
+          presentationButtons: [[{ text: "Open", callback_data: "open" }]],
+        } } },
+        replyToId: rootId, silent: true, mediaLocalRoots: [f.directory],
+        onDeliveryResult: delivered,
+      });
+      if (postFailure) {
+        await expect(send).rejects.toMatchObject({
+          deliveryResult: { messageIds: ["post-1"], visibleReplySent: true },
+        });
+      } else {
+        expect(listMessageReceiptPlatformIds((await send).receipt)).toEqual(["post-1", "post-2", "post-3"]);
+      }
+      const chunks = ["abcdefgh", "ijklmnop", ...(postFailure ? [] : ["qrstuvwx"])];
+      expect(f.requests.map(({ path }) => path)).toEqual([
+        "/api/v4/files", ...chunks.map(() => "/api/v4/posts?silent=true"),
+      ]);
+      const posts = f.requests.slice(1).map(({ body }) => JSON.parse(body));
+      expect(posts.map(({ message, root_id }) => [message, root_id])).toEqual(
+        chunks.map((chunk) => [chunk, rootId]),
+      );
+      expect(posts[0]).toMatchObject({ file_ids: [fileId(1)], props: { attachments: expect.any(Array) } });
+      expect(posts.slice(1).every((post) => !post.file_ids && !post.props?.attachments)).toBe(true);
+      expect(delivered).toHaveBeenCalledTimes(postFailure ? 1 : 3);
+    });
+  });
+
   it("converts a local link in a message-tool send without uploading the referenced file", async () => {
     await fixture({}, async (f) => {
       const text = `[Local report](<${f.files[0]}>) and [PR](https://example.com/pull/42)`;

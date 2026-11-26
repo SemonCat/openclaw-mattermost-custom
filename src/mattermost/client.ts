@@ -82,6 +82,7 @@ export type MattermostChannel = {
   header?: string | null;
   type?: string | null;
   team_id?: string | null;
+  delete_at?: number | null;
 };
 
 export const MattermostPostSchema = z
@@ -103,6 +104,10 @@ export const MattermostPostSchema = z
   .passthrough();
 
 export type MattermostPost = z.infer<typeof MattermostPostSchema>;
+
+export function isMattermostSystemPost(post: Pick<MattermostPost, "type">): boolean {
+  return normalizeOptionalString(post.type)?.startsWith("system_") ?? false;
+}
 
 const MattermostReactionSchema = z
   .object({
