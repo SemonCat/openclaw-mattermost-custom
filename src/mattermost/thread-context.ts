@@ -286,7 +286,7 @@ export async function fetchMattermostThreadContext(params: {
 
   return {
     untrusted: true,
-    permalink: `${params.client.baseUrl}/pl/${params.target.requestedPostId}`,
+    permalink: `${params.client.baseUrl}/_redirect/pl/${params.target.requestedPostId}`,
     requestedPostId: params.target.requestedPostId,
     rootPostId: params.target.rootPostId,
     channel: {

@@ -123,13 +123,22 @@ describe("mattermost_thread tool", () => {
     const result = await tool!.execute("call-1", {
       url_or_post_id: `${baseUrl}/team/pl/${LINK_ID}`,
     });
+    const permalink = `${baseUrl}/_redirect/pl/${LINK_ID}`;
     expect(result.details).toMatchObject({
       untrusted: true,
+      permalink,
       requestedPostId: LINK_ID,
       rootPostId: ROOT_ID,
       channel: { id: "CURRENT", type: "P" },
       posts: [{ id: ROOT_ID }, { id: LINK_ID }],
     });
+    expect(result.content).toEqual([
+      expect.objectContaining({ type: "text", text: expect.stringContaining(permalink) }),
+    ]);
+
+    await expect(
+      tool!.execute("call-permalink", { url_or_post_id: permalink }),
+    ).resolves.toMatchObject({ details: { permalink, requestedPostId: LINK_ID } });
 
     await expect(
       tool!.execute("call-public", {
