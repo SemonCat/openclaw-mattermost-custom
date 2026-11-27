@@ -13,7 +13,8 @@ const drain = async () => { for (let i = 0; i < 60; i++) await Promise.resolve()
 const yieldedEnd = { phase: "end", yielded: true, livenessState: "paused", stopReason: "end_turn" };
 
 async function fixture(options: { noPlan?: boolean; noChildren?: boolean; missingId?: boolean; yielded?: boolean; allCompleted?: boolean; childRunning?: boolean;
-  progress?: { explanation?: string; markdown?: string }; adopted?: boolean } = {}) {
+  progress?: { explanation?: string; markdown?: string }; adopted?: boolean;
+  execReceipt?: Promise<"completed" | "failed" | "cancelled" | "skipped"> } = {}) {
   const request = vi.fn<MattermostClient["request"]>(async () => (options.missingId ? { message: "accepted" } : { id: "original-card" }) as never);
   const client: MattermostClient = {
     baseUrl: "https://mattermost.example.com", apiBaseUrl: "https://mattermost.example.com/api/v4",
@@ -23,6 +24,7 @@ async function fixture(options: { noPlan?: boolean; noChildren?: boolean; missin
   const listeners = new Set<(update: Update) => void>();
   const agentListeners = new Set<Parameters<Events["onAgentEvent"]>[0]>();
   const events = {
+    getPendingExecContinuations: () => options.execReceipt ? [options.execReceipt] : [],
     onSessionTranscriptUpdate: (listener: (update: Update) => void) => {
       listeners.add(listener); return () => { listeners.delete(listener); };
     },
@@ -97,7 +99,8 @@ async function fixture(options: { noPlan?: boolean; noChildren?: boolean; missin
   };
   const finish = async () => {
     if (options.yielded) card.noteAgentEvent({ runId: "original-run", stream: "lifecycle", data: yieldedEnd });
-    await card.finish({ outcome: "completed" }); owner.finishInitial();
+    await card.finish({ outcome: "completed", execContinuationPending: owner.prepareInitialFinish() });
+    owner.finishInitial();
   };
   const assertCompleted = () => {
     expect(request.mock.calls.filter(([path]) => path === "/posts?silent=true")).toHaveLength(1);
@@ -108,7 +111,7 @@ async function fixture(options: { noPlan?: boolean; noChildren?: boolean; missin
     expect(body.message).not.toContain("Result delivered separately");
   };
   const message = () => JSON.parse(String(request.mock.calls.at(-1)?.[1]?.body)).message as string;
-  return { request, bridge, listeners, agentListeners, emit, complete, end, finish, assertCompleted, message, card, releaseDraft };
+  return { request, bridge, listeners, agentListeners, emit, complete, end, finish, assertCompleted, message, card, draft, releaseDraft };
 }
 
 afterEach(() => vi.useRealTimers());
@@ -289,6 +292,24 @@ describe("native session-card projection after automatic input", () => {
       f.end("next-exec-run");
       await drain();
       expect(f.request.mock.calls.length).toBeGreaterThan(count);
+    } finally { f.bridge.stop(); }
+  });
+
+  it("fences a pending exec card on human input without releasing a retained draft", async () => {
+    const receipt = Promise.withResolvers<"failed">();
+    const f = await fixture({ adopted: true, execReceipt: receipt.promise });
+    try {
+      await f.finish();
+      expect(f.message()).toContain("Task progress · In progress");
+      const writes = f.request.mock.calls.length;
+      f.emit({ role: "user", content: [] });
+      receipt.resolve("failed");
+      await drain();
+      expect(f.request.mock.calls).toHaveLength(writes);
+      expect(f.draft.retire).not.toHaveBeenCalled();
+      f.complete({});
+      await drain();
+      f.assertCompleted();
     } finally { f.bridge.stop(); }
   });
 

@@ -374,6 +374,7 @@ export function createMattermostTaskProgressCard(params: {
   let createDisabled = false;
   let diagnosticLogs = 0;
   let parentFinished = false;
+  let execContinuationPending = false;
   let parentTerminalStatus: Exclude<MattermostTaskProgressStatus, "in_progress"> | undefined;
   let settled = false;
   let latestSnapshot: MattermostTaskProgressSnapshot | undefined;
@@ -531,7 +532,7 @@ export function createMattermostTaskProgressCard(params: {
     if (parentTerminalStatus === "failed" || parentTerminalStatus === "cancelled") {
       return parentTerminalStatus;
     }
-    if (hasActiveWorkSessions()) {
+    if (execContinuationPending || hasActiveWorkSessions()) {
       return undefined;
     }
     if ([...workSessions.values()].some((session) => session.status === "failed")) {
@@ -603,18 +604,19 @@ export function createMattermostTaskProgressCard(params: {
       for (const session of workSessions.values()) session.progress = undefined;
       if (latestSnapshot) publishWorkSessionChange();
     },
-    suspendContinuation: () => {
+    suspendContinuation: (clearExecContinuation = false) => {
+      if (clearExecContinuation) execContinuationPending = false;
       if (parentTerminalStatus === "failed" || parentTerminalStatus === "cancelled") return;
       // Host custody survives steering, but old run correlation does not.
       activeRunId = undefined;
       parentFinished = true;
-      lifecycleTerminal = "yielded";
+      if (!execContinuationPending) lifecycleTerminal = "yielded";
       parentTerminalStatus = undefined;
     },
     canContinue: () => Boolean(taskPostId && latestSnapshot &&
       parentTerminalStatus !== "failed" && parentTerminalStatus !== "cancelled" &&
       latestSnapshot.status !== "failed" && latestSnapshot.status !== "cancelled" &&
-      (lifecycleTerminal === "yielded" ||
+      (execContinuationPending || lifecycleTerminal === "yielded" ||
         latestSnapshot.steps.some((step) => step.status !== "completed"))),
     beginContinuation: async (runId: string, isCurrent: () => boolean): Promise<boolean> => {
       // Only the monitor's proven committed continuation may reopen this card.
@@ -622,7 +624,7 @@ export function createMattermostTaskProgressCard(params: {
       if (!isCurrent() || !taskPostId || !latestSnapshot || !parentFinished ||
           latestSnapshot.status === "failed" || latestSnapshot.status === "cancelled" ||
           parentTerminalStatus === "failed" || parentTerminalStatus === "cancelled" ||
-          lifecycleTerminal !== "yielded" &&
+          !execContinuationPending && lifecycleTerminal !== "yielded" &&
           !latestSnapshot.steps.some((step) => step.status !== "completed")) return false;
       activeRunId = runId;
       lifecycleTerminal = undefined;
@@ -853,9 +855,11 @@ export function createMattermostTaskProgressCard(params: {
     finish: async (result: {
       outcome?: "completed" | "failed" | "cancelled";
       deliveryFailed?: boolean;
+      execContinuationPending?: boolean;
       isCurrent?: () => boolean;
     }): Promise<void> => {
       if (result.isCurrent && !result.isCurrent()) return;
+      execContinuationPending = result.execContinuationPending ?? execContinuationPending;
       parentFinished = true;
       if (!latestSnapshot) {
         await writeTail;
@@ -863,7 +867,9 @@ export function createMattermostTaskProgressCard(params: {
         return;
       }
       const nominallyCompleted =
-        result.outcome === "completed" || lifecycleTerminal === "completed";
+        result.outcome === "completed" || lifecycleTerminal === "completed" ||
+        result.execContinuationPending === false &&
+        (parentTerminalStatus === "completed" || parentTerminalStatus === "incomplete");
       parentTerminalStatus =
         lifecycleTerminal === "cancelled" || result.outcome === "cancelled"
           ? "cancelled"

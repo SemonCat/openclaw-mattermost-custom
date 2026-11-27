@@ -1203,6 +1203,138 @@ describe("Mattermost monitor streaming boundaries", () => {
     },
   );
 
+  it.each([
+    { outcome: "completed", savesPlan: true, chained: false, expectedStatus: "Completed" },
+    { outcome: "completed", savesPlan: false, chained: false, expectedStatus: "Incomplete" },
+    { outcome: "completed", savesPlan: false, chained: true, expectedStatus: "Completed" },
+    { outcome: "failed", savesPlan: false, chained: false, expectedStatus: "Failed" },
+    { outcome: "cancelled", savesPlan: false, chained: false, expectedStatus: "Cancelled" },
+    { outcome: "skipped", savesPlan: false, chained: false, expectedStatus: "Incomplete" },
+    { outcome: undefined, savesPlan: false, chained: false, expectedStatus: "Incomplete" },
+  ] as const)("projects the original task card across a normal exec checkpoint ($outcome/$savesPlan/$chained)", async ({
+    outcome,
+    savesPlan,
+    chained,
+    expectedStatus,
+  }) => {
+    vi.useFakeTimers();
+    const f = fixture("partial");
+    type Events = MattermostMonitorContext["core"]["events"];
+    const agents = new Set<Parameters<Events["onAgentEvent"]>[0]>();
+    const transcripts = new Set<Parameters<Events["onSessionTranscriptUpdate"]>[0]>();
+    const { promise, resolve } = Promise.withResolvers<NonNullable<typeof outcome>>();
+    const next = Promise.withResolvers<"completed">();
+    const sessionKey = "agent:main:mattermost:channel:channel-1:thread:thread-1";
+    const runId = "initial-run";
+    const target = { agentId: "main", sessionId: "test-session", sessionKey };
+    const getPendingExecContinuations = vi.fn((scope: typeof target & { runId: string }) => {
+      if (outcome && scope.runId === runId) return [promise];
+      return chained && scope.runId === "wake-run" ? [next.promise] : [];
+    });
+    const events = {
+      getPendingExecContinuations,
+      onAgentEvent: (listener: Parameters<Events["onAgentEvent"]>[0]) => {
+        agents.add(listener);
+        return () => { agents.delete(listener); };
+      },
+      onSessionTranscriptUpdate: (listener: Parameters<Events["onSessionTranscriptUpdate"]>[0]) => {
+        transcripts.add(listener);
+        return () => { transcripts.delete(listener); };
+      },
+    } as Events;
+    f.monitor.core.events = events;
+    const continuation = createMattermostTaskCardContinuation({ events, log: vi.fn() });
+    f.monitor.taskCardContinuation = continuation;
+    let messageSeq = 0;
+    const emit = (message: unknown, terminalRunId?: string) => {
+      for (const listener of transcripts) listener({ target, messageSeq: ++messageSeq, message, runId: terminalRunId });
+    };
+    const end = (endedRunId: string) => {
+      for (const listener of agents) listener({
+        runId: endedRunId, sessionKey, sessionId: target.sessionId, stream: "lifecycle", seq: 2, ts: Date.now(),
+        data: { phase: "end", status: "ok", stopReason: "stop", livenessState: "working" },
+      });
+    };
+    const savedPlan = (savedRunId: string) => ({
+      role: "custom", customType: "openclaw.nested-tool.v1",
+      details: { runId: savedRunId, toolName: "progress_card", isError: false,
+        input: { plan: [{ step: "Verify result", status: "completed" }] },
+        result: { details: { revision: 2 } } },
+    });
+    try {
+      await f.run(async (params) => {
+        params.replyOptions?.onAgentRunStart?.(runId);
+        await params.replyOptions?.onToolStart?.({ name: "exec", phase: "start", toolCallId: "exec-call" });
+        emit({
+          role: "toolResult", toolName: "exec", toolCallId: "exec-call", isError: false,
+          __openclaw: { runId },
+          details: { status: "running", sessionId: "process-1" },
+          content: [{ type: "text", text: outcome
+            ? "Command still running. Its exit wakes this conversation."
+            : "Command still running. Use process poll to collect the result." }],
+        });
+        await params.replyOptions?.onPlanUpdate?.({
+          source: "openclaw", steps: [
+            { step: "Wait for command", status: "in_progress" },
+            { step: "Verify result", status: "pending" },
+          ],
+        });
+        const checkpoint = "Checkpoint. I will continue once the command exits.";
+        await params.replyOptions?.onPartialReply?.({ text: checkpoint });
+        await vi.advanceTimersByTimeAsync(1200);
+        end(runId);
+        await f.final(params, checkpoint);
+      });
+      expect(f.posts.get("post-2")?.message).toBe("Checkpoint. I will continue once the command exits.");
+      expect(f.calls.filter(call => call.path.split("?")[0] === "/posts")).toHaveLength(2);
+      expect(f.posts.get("post-1")?.message).toContain(`Task progress · ${outcome ? "In progress" : expectedStatus}`);
+      if (!outcome) return;
+      expect(getPendingExecContinuations).toHaveBeenCalledWith({ ...target, runId });
+      if (outcome === "completed") {
+        emit({ role: "user", provenance: { kind: "internal_system", sourceTool: "exec", runId: "foreign-origin" } });
+        emit(savedPlan("foreign-wake"));
+        emit({ role: "assistant", __openclaw: { runId: "foreign-wake" }, stopReason: "stop" }, "foreign-wake");
+        end("foreign-wake");
+        await vi.advanceTimersByTimeAsync(0);
+        expect(f.posts.get("post-1")?.message).toContain("Wait for command");
+        emit({ role: "user", provenance: { kind: "internal_system", sourceTool: "exec", runId } });
+        if (savesPlan) emit(savedPlan("wake-run"));
+        emit({ role: "assistant", __openclaw: { runId: "wake-run" }, stopReason: "stop" }, "wake-run");
+        end("wake-run");
+        await vi.advanceTimersByTimeAsync(0);
+        expect(f.posts.get("post-1")?.message).toContain("Task progress · In progress");
+        if (savesPlan) expect(f.posts.get("post-1")?.message).toContain("- [x] Verify result");
+      }
+      resolve(outcome);
+      if (chained) {
+        await vi.advanceTimersByTimeAsync(0);
+        expect(f.posts.get("post-1")?.message).toContain("Task progress · In progress");
+        expect(getPendingExecContinuations).toHaveBeenCalledWith({ ...target, runId: "wake-run" });
+        emit({ role: "user", provenance: { kind: "internal_system", sourceTool: "exec", runId: "wake-run" } });
+        emit(savedPlan("second-wake"));
+        emit({ role: "assistant", __openclaw: { runId: "second-wake" }, stopReason: "stop" }, "second-wake");
+        end("second-wake");
+        await vi.advanceTimersByTimeAsync(0);
+        expect(f.posts.get("post-1")?.message).toContain("Task progress · In progress");
+        next.resolve("completed");
+      }
+      await vi.waitFor(() =>
+        expect(f.posts.get("post-1")?.message).toContain(`Task progress · ${expectedStatus}`));
+      expect(f.calls.filter(call => call.path === "/posts/post-1/patch" &&
+        String(call.body.message).includes(`Task progress · ${expectedStatus}`))).toHaveLength(1);
+      expect(f.calls.filter(call => call.path.split("?")[0] === "/posts")).toHaveLength(2);
+      const writes = f.calls.length;
+      emit({ role: "user", provenance: { kind: "internal_system", sourceTool: "exec" } });
+      emit(savedPlan("late-generic-exec"));
+      emit({ role: "assistant", __openclaw: { runId: "late-generic-exec" }, stopReason: "stop" }, "late-generic-exec");
+      end("late-generic-exec");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(f.calls).toHaveLength(writes);
+    } finally {
+      continuation.stop();
+    }
+  });
+
   it.each(["rest", "companion"] as const)(
     "preserves ingress cancellation without adding controls to a planless %s reply",
     async (transport) => {

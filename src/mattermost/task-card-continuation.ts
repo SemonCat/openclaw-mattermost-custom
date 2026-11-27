@@ -6,6 +6,19 @@ import { isMattermostTaskProgressYieldedWaiting } from "./task-progress-card.js"
 type Events = MattermostMonitorContext["core"]["events"];
 type TranscriptUpdate = Parameters<Parameters<Events["onSessionTranscriptUpdate"]>[0]>[0];
 type Card = ReturnType<typeof createMattermostTaskProgressCard>;
+type ExecOutcome = "completed" | "failed" | "cancelled" | "skipped";
+type ExecReceipt = Promise<ExecOutcome>;
+type ExecContinuationEvents = {
+  getPendingExecContinuations?: (
+    target: { agentId: string; sessionId: string; sessionKey: string; runId: string },
+  ) => readonly ExecReceipt[];
+};
+type ExecContinuation = {
+  origins: Set<string>;
+  observed: Set<ExecReceipt>;
+  pending: Set<ExecReceipt>;
+  outcome: ExecOutcome;
+};
 const OWNER_TTL_MS = 24 * 60 * 60 * 1_000;
 const MAX_OWNERS = 100;
 const MAX_PENDING = 32;
@@ -83,7 +96,9 @@ type Owner = {
   ready: boolean;
   active: boolean;
   seq: number;
-  input?: { sourceSessionKey?: string; seq: number; requireSave?: boolean; candidateRunId?: string };
+  input?: { sourceSessionKey?: string; seq: number; requireSave?: boolean; candidateRunId?: string; exec?: boolean };
+  exec?: ExecContinuation;
+  execClosed?: boolean;
   nativeProjection: boolean;
   runId?: string;
   usedRuns: Set<string>;
@@ -102,7 +117,7 @@ type Owner = {
 };
 
 export function createMattermostTaskCardContinuation(params: {
-  events: Events;
+  events: Events & ExecContinuationEvents;
   log: (message: string) => void;
 }) {
   const owners = new Map<string, Owner>();
@@ -115,6 +130,10 @@ export function createMattermostTaskCardContinuation(params: {
     drafts.delete(draft);
     for (const owner of owners.values()) {
       if (owner.adoptedDraft !== draft) continue;
+      if (owner.exec) {
+        owner.adoptedDraft = undefined;
+        continue;
+      }
       if (drainTerminal && (owner.finishingGeneration === owner.generation ||
           owner.runId && owner.terminalRunId === owner.runId)) {
         // Draft custody and native lifecycle publication are independent. A
@@ -137,6 +156,7 @@ export function createMattermostTaskCardContinuation(params: {
     owner.pending.length = 0;
     owner.calls.clear();
     owner.lifecycle.clear();
+    owner.exec = undefined;
     if (owners.get(owner.sessionKey) === owner) owners.delete(owner.sessionKey);
   };
   const hasHostCustody = (owner: Owner) => {
@@ -159,9 +179,12 @@ export function createMattermostTaskCardContinuation(params: {
   };
   const fenceInput = (owner: Owner) => {
     owner.nativeProjection = false;
+    const hadExec = Boolean(owner.exec);
+    owner.exec = undefined;
+    if (hadExec) owner.execClosed = true;
     if (!hasHostCustody(owner)) { retire(owner); return; }
     resetInput(owner);
-    if (!owner.ready) owner.card.suspendContinuation();
+    if (!owner.ready || hadExec) owner.card.suspendContinuation(hadExec);
   };
   const queue = (owner: Owner, operation: (isCurrent: () => boolean) => Promise<void>) => {
     const generation = owner.generation;
@@ -173,6 +196,55 @@ export function createMattermostTaskCardContinuation(params: {
       retire(owner);
     });
   };
+  const finishExec = (owner: Owner, exec: ExecContinuation) => {
+    if (!owner.ready || exec.pending.size > 0) return;
+    owner.tail = owner.tail.then(async () => {
+      const isCurrent = () => owner.active && owner.exec === exec;
+      if (!isCurrent() || exec.pending.size > 0) return;
+      await owner.card.finish({
+        outcome: exec.outcome === "skipped" ? undefined : exec.outcome,
+        execContinuationPending: false,
+        isCurrent,
+      });
+      if (!isCurrent()) return;
+      owner.exec = undefined;
+      owner.execClosed = true;
+      if (!owner.card.canContinue()) retire(owner);
+    }).catch((error: unknown) => {
+      params.log(`mattermost task continuation failed: ${String(error)}`);
+      retire(owner);
+    });
+  };
+  const observeExec = (owner: Owner, runId: string) => {
+    if (!owner.active || !owner.nativeProjection || owner.execClosed || !params.events.getPendingExecContinuations) return;
+    try {
+      const { agentId, sessionId, sessionKey } = owner;
+      const receipts = params.events.getPendingExecContinuations({ agentId, sessionId, sessionKey, runId });
+      if (!receipts.length) return;
+      const exec = owner.exec ??= { origins: new Set(), observed: new Set(), pending: new Set(), outcome: "skipped" };
+      exec.origins.add(runId);
+      const settle = (receipt: ExecReceipt, outcome: ExecOutcome) => {
+        if (!owner.active || owner.exec !== exec) return;
+        exec.pending.delete(receipt);
+        if (outcome === "cancelled" || exec.outcome !== "cancelled" &&
+            (outcome === "failed" || exec.outcome === "skipped")) exec.outcome = outcome;
+        finishExec(owner, exec);
+      };
+      for (const receipt of receipts) {
+        if (exec.observed.has(receipt)) continue;
+        exec.observed.add(receipt);
+        exec.pending.add(receipt);
+        void receipt.then(outcome => settle(receipt, outcome), () => settle(receipt, "failed"));
+      }
+    } catch (error: unknown) {
+      params.log(`mattermost exec continuation unavailable: ${String(error)}`);
+    }
+  };
+  const isExecInput = (owner: Owner, message: Record<string, unknown>): boolean => {
+    const provenance = record(message.provenance);
+    return Boolean(provenance?.kind === "internal_system" && provenance.sourceTool === "exec" &&
+      typeof provenance.runId === "string" && owner.exec?.origins.has(provenance.runId));
+  };
   const finishCommitted = (owner: Owner) => {
     const runId = owner.runId;
     const event = runId ? owner.lifecycle.get(runId) : undefined;
@@ -180,12 +252,16 @@ export function createMattermostTaskCardContinuation(params: {
         !(owner.yieldedRunId === runId && isMattermostTaskProgressYieldedWaiting(event.data)))) return;
     owner.terminalRunId = undefined;
     owner.lifecycle.delete(runId);
+    const exec = owner.input?.exec === true;
+    if (exec) observeExec(owner, runId);
     owner.finishingGeneration = owner.generation;
     queue(owner, async (isCurrent) => {
       // A clean yield may commit only its tool result. The matching native
       // lifecycle must prove a successful pause before that run can hand off.
       owner.card.noteAgentEvent(event);
-      await owner.card.finish({ outcome: event.data.phase === "error" ? "failed" : "completed", isCurrent });
+      if (!exec || !failedLifecycle(event)) {
+        await owner.card.finish({ outcome: event.data.phase === "error" ? "failed" : "completed", isCurrent });
+      }
       if (!isCurrent()) return;
       owner.finishingGeneration = undefined;
       if (owner.runId === runId) {
@@ -201,6 +277,10 @@ export function createMattermostTaskCardContinuation(params: {
     event.data.status === "timeout" || event.data.stopReason === "timeout" ||
     event.data.timeoutPhase != null || event.data.error != null;
   const finishFailure = (owner: Owner, event: MattermostTaskProgressAgentEvent) => {
+    if (owner.input?.exec) {
+      queue(owner, async () => { owner.card.noteAgentEvent(event); });
+      return;
+    }
     owner.finishingGeneration = owner.generation;
     queue(owner, async (isCurrent) => {
       owner.card.noteAgentEvent(event);
@@ -222,8 +302,12 @@ export function createMattermostTaskCardContinuation(params: {
       if (owner.nativeProjection && isAutomaticInput(message)) {
         // A native receipt may precede buffered committed rows. It grants no
         // writes until this input's successor proves a successful native save.
-        resetInput(owner, true);
-        owner.input = { seq: update.messageSeq, requireSave: true };
+        const exec = isExecInput(owner, message);
+        const closedExecInput = owner.execClosed && record(message.provenance)?.sourceTool === "exec";
+        resetInput(owner, !owner.exec || exec);
+        if (exec || (!owner.exec && !closedExecInput)) {
+          owner.input = { seq: update.messageSeq, requireSave: true, exec };
+        }
         return;
       }
       const provenance = record(message.provenance);
@@ -274,7 +358,7 @@ export function createMattermostTaskCardContinuation(params: {
           successfulWrappedResult(message, owner.input.requireSave)) plan = pendingPlan;
     }
     if (!owner.runId) {
-      if (owner.input.requireSave && !plan) return;
+      if (owner.input.requireSave && !plan && !owner.input.exec) return;
       if (owner.usedRuns.has(rowRunId)) return;
       if (owner.usedRuns.size >= MAX_PENDING) { retire(owner); return; }
       owner.runId = rowRunId;
@@ -283,6 +367,7 @@ export function createMattermostTaskCardContinuation(params: {
         if (!await owner.card.beginContinuation(rowRunId, isCurrent) && isCurrent()) retire(owner);
       });
       const receipt = owner.lifecycle.get(rowRunId);
+      if (receipt && owner.input.exec && !failedLifecycle(receipt)) observeExec(owner, rowRunId);
       if (receipt && failedLifecycle(receipt)) {
         finishFailure(owner, receipt);
         return;
@@ -355,7 +440,12 @@ export function createMattermostTaskCardContinuation(params: {
         if (owner.nativeProjection && isAutomaticInput(message)) {
           // The original callback remains the writer until finishInitial. Runtime
           // notices must not erase retention or consume its tool-heavy transcript.
-          if (provenance?.kind === "internal_system" && !owner.bufferingContinuation) return;
+          if (provenance?.kind === "internal_system" && !owner.bufferingContinuation) {
+            if (provenance.sourceTool === "exec" && provenance.runId === owner.initialRunId) {
+              observeExec(owner, owner.initialRunId);
+            }
+            if (!isExecInput(owner, message)) return;
+          }
         } else if (provenance?.kind !== "inter_session" || provenance.sourceTool !== "subagent_settle" ||
             provenance.sourceChannel !== "internal" ||
             typeof provenance.sourceSessionKey !== "string") { fenceInput(owner); return; }
@@ -378,9 +468,12 @@ export function createMattermostTaskCardContinuation(params: {
   const unsubscribeAgent = params.events.onAgentEvent((event) => {
     // Lifecycle events can finalize only a run already proven by committed rows.
     for (const owner of owners.values()) {
+      const sameParent = event.sessionKey === owner.sessionKey &&
+        (!event.sessionId || event.sessionId === owner.sessionId) &&
+        (!event.agentId || event.agentId === owner.agentId);
       if (owner.releasing) {
         if (owner.runId && owner.terminalRunId === owner.runId && event.runId === owner.runId &&
-            event.sessionKey === owner.sessionKey && event.stream === "lifecycle" &&
+            sameParent && event.stream === "lifecycle" &&
             (event.data.phase === "end" || event.data.phase === "error")) {
           owner.lifecycle.set(event.runId, event);
           finishCommitted(owner);
@@ -390,7 +483,11 @@ export function createMattermostTaskCardContinuation(params: {
       if (owner.ready && event.sessionKey && owner.card.hasWorkSession(event.sessionKey)) {
         owner.card.noteAgentEvent(event);
       }
-      if (event.sessionKey !== owner.sessionKey || event.stream !== "lifecycle" ||
+      if (!owner.ready && sameParent && event.runId === owner.initialRunId &&
+          event.stream === "lifecycle" && event.data.phase === "end") {
+        observeExec(owner, owner.initialRunId);
+      }
+      if (!sameParent || event.stream !== "lifecycle" ||
           !event.runId || event.runId === owner.initialRunId ||
           (event.data.phase !== "end" && event.data.phase !== "error")) continue;
       // A native end may precede its first transcript broadcast. Receipts alone
@@ -406,6 +503,7 @@ export function createMattermostTaskCardContinuation(params: {
       owner.lifecycle.set(event.runId, event);
       if (!owner.ready || event.runId !== owner.runId || !owner.input && !yieldedFailure) continue;
       if (!failedLifecycle(event)) {
+        if (owner.input?.exec) observeExec(owner, event.runId);
         finishCommitted(owner);
         continue;
       }
@@ -430,6 +528,10 @@ export function createMattermostTaskCardContinuation(params: {
       owner.timer.unref?.();
       owners.set(input.sessionKey, owner);
       return {
+        prepareInitialFinish: () => {
+          observeExec(owner, owner.initialRunId);
+          return owner.exec ? true : undefined;
+        },
         adoptDraft: (draft: Draft): boolean => {
           const target = drafts.get(draft);
           if (!owner.active || !target || target.agentId !== owner.agentId ||
@@ -447,6 +549,7 @@ export function createMattermostTaskCardContinuation(params: {
           for (const update of pending) {
             if (owner.active) consume(owner, update);
           }
+          if (owner.exec) finishExec(owner, owner.exec);
         },
       };
     },

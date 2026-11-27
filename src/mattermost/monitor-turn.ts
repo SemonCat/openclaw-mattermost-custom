@@ -939,6 +939,7 @@ export async function dispatchMattermostInboundTurn(
     await taskProgressCard.finish({
       outcome: readAgentRunTerminalOutcome(dispatchResult),
       deliveryFailed: dispatchError || finalDeliveryFailed || queuedFollowupDeliveryError,
+      execContinuationPending: continuationOwner?.prepareInitialFinish(),
     });
     continuationOwner?.finishInitial();
     await reactions.finish({
