@@ -101,9 +101,10 @@ export function parseMattermostPermalinkReference(params: {
   baseUrl: string;
   allowedOrigins?: readonly string[];
   allowPostId?: boolean;
+  postedOnly?: boolean;
 }): string | undefined {
   const raw = params.value.trim();
-  if (params.allowPostId !== false) {
+  if (!params.postedOnly && params.allowPostId !== false) {
     const directPostId = normalizePostId(raw);
     if (directPostId) {
       return directPostId;
@@ -125,6 +126,14 @@ export function parseMattermostPermalinkReference(params: {
     if (!acceptedOrigins.has(url.origin)) {
       return undefined;
     }
+    if (params.postedOnly) {
+      if (!/^https?:\/\//iu.test(raw) || url.username || url.password) return undefined;
+      const basePath = base.pathname.replace(/\/+$/u, "");
+      const path = basePath && url.pathname.startsWith(`${basePath}/`)
+        ? url.pathname.slice(basePath.length)
+        : url.pathname;
+      return /^\/(?:[a-z0-9_-]+\/)?pl\/([a-z0-9]{26})\/?$/iu.exec(path)?.[1];
+    }
     const segments = url.pathname.split("/").filter(Boolean);
     const permalinkIndex = segments.findIndex((segment) => segment.toLowerCase() === "pl");
     return permalinkIndex >= 0 ? normalizePostId(segments[permalinkIndex + 1]) : undefined;
@@ -140,6 +149,7 @@ export function collectMattermostPermalinkReferences(params: {
   baseUrl: string;
   allowedOrigins?: readonly string[];
   maxLinks?: number;
+  postedOnly?: boolean;
 }): string[] {
   const maxLinks = Math.max(0, Math.min(params.maxLinks ?? 3, 5));
   if (maxLinks === 0) {
@@ -151,20 +161,24 @@ export function collectMattermostPermalinkReferences(params: {
       postIds.push(postId);
     }
   };
-  for (const postId of params.implicitPostIds ?? []) {
-    add(normalizePostId(postId));
+  if (!params.postedOnly) {
+    for (const postId of params.implicitPostIds ?? []) {
+      add(normalizePostId(postId));
+    }
   }
   for (const match of params.text.matchAll(MATTERMOST_URL_PATTERN)) {
+    if (postIds.length >= maxLinks) break;
     add(
       parseMattermostPermalinkReference({
         value: match[0],
         baseUrl: params.baseUrl,
         allowedOrigins: params.allowedOrigins,
         allowPostId: false,
+        postedOnly: params.postedOnly,
       }),
     );
   }
-  add(normalizePostId(params.props?.previewed_post));
+  if (!params.postedOnly) add(normalizePostId(params.props?.previewed_post));
   return postIds;
 }
 
@@ -204,9 +218,12 @@ export async function fetchMattermostThreadContext(params: {
   client: MattermostClient;
   target: MattermostThreadTarget;
   limit?: number;
+  requestedPostOnly?: boolean;
 }): Promise<MattermostThreadContext> {
   const limit = Math.max(1, Math.min(params.limit ?? 50, MAX_THREAD_POSTS));
-  const thread = await fetchMattermostPostThread(params.client, params.target.rootPostId, { limit });
+  const thread = params.requestedPostOnly
+    ? { messages: [params.target.requestedPost], hasMore: true }
+    : await fetchMattermostPostThread(params.client, params.target.rootPostId, { limit });
   const messages = [...thread.messages];
   let addedRequestedPost = false;
   if (!messages.some((post) => post.id === params.target.requestedPostId)) {
@@ -242,7 +259,11 @@ export async function fetchMattermostThreadContext(params: {
     Promise.all(
       boundedFileIds.map(async (fileId) => {
         try {
-          return await fetchMattermostFileInfo(params.client, fileId);
+          const info = await fetchMattermostFileInfo(params.client, fileId);
+          if (params.requestedPostOnly && (info.id !== fileId || info.post_id !== params.target.requestedPostId)) {
+            return { id: fileId };
+          }
+          return info;
         } catch {
           return { id: fileId } satisfies MattermostFileInfo;
         }

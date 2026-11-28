@@ -95,6 +95,7 @@ type MattermostSendOpts = Pick<
   /** Gateway question bound to this prompt; used only to retire its visible controls. */
   questionId?: string;
   attachmentText?: string;
+  forkRecap?: unknown;
   /** Retry options for DM channel creation */
   dmRetryOptions?: CreateDmChannelRetryOptions;
   /** Observe the bounded cache-miss DM channel resolution lifecycle. */
@@ -717,6 +718,12 @@ export async function sendMessageMattermost(
   try {
     for (const [index, chunk] of chunks.entries()) {
       client.assertRequestCurrent?.();
+      if (opts.forkRecap !== undefined) {
+        const { verifyMattermostForkRecap } = await import("./conversation-fork.js");
+        await verifyMattermostForkRecap({
+          client, channelId, rootId: opts.replyToId, scope: opts.forkRecap,
+        });
+      }
       try {
         await opts.onPlatformSendDispatch?.();
       } catch (error) {

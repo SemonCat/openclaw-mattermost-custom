@@ -32,6 +32,7 @@ import {
   shouldDropEmptyMattermostBody,
 } from "./monitor-helpers.js";
 import type { MattermostIngressLifecycle } from "./monitor-ingress.js";
+import { createMattermostPostedPermalinkBinding, MATTERMOST_PERMALINK_BINDING } from "./permalink-access.js";
 import { hydrateMattermostPermalinks } from "./permalink-hydration.js";
 import { resolveMattermostReferenceMedia } from "./reference-media.js";
 import {
@@ -332,6 +333,7 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
       account,
       client: monitor.client,
       currentChannelId: channelId,
+      requesterId: post.user_id === senderId ? senderId : undefined,
       text: rawText,
       props: post.props,
       implicitPostIds:
@@ -438,6 +440,9 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
             limit: historyLimit,
           })
         : undefined;
+    const permalinkBinding = post.user_id === senderId
+      ? createMattermostPostedPermalinkBinding({ account, currentChannelId: channelId, requesterId: senderId }, rawText)
+      : undefined;
     const ctxPayload = eventPlan.finalizeContext({
       Body: combinedBody,
       BodyForAgent: bodyForAgent,
@@ -454,6 +459,7 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
       MessageSidLast:
         allMessageIds.length > 1 ? allMessageIds[allMessageIds.length - 1] : undefined,
       Timestamp: typeof post.create_at === "number" ? post.create_at : undefined,
+      ...(permalinkBinding ? { GatewayRunToolBindings: { [MATTERMOST_PERMALINK_BINDING]: permalinkBinding } } : {}),
       WasMentioned: kind !== "direct" ? mentionDecision.effectiveWasMentioned : undefined,
       CommandAuthorized: commandAuthorized,
       // Tag typed text-slash control commands (e.g. ` /new`, ` /reset` sent via the regular

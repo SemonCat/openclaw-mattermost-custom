@@ -83,6 +83,14 @@ export type MattermostChannel = {
   type?: string | null;
   team_id?: string | null;
   delete_at?: number | null;
+  creator_id?: string | null;
+  discoverable?: boolean;
+  group_constrained?: boolean | null;
+  shared?: boolean | null;
+  scheme_id?: string | null;
+  policy_id?: string | null;
+  policy_enforced?: boolean;
+  policy_auto_add?: boolean;
 };
 
 export const MattermostPostSchema = z
@@ -159,7 +167,12 @@ const MattermostFileInfoSchema = z
   .passthrough();
 
 export class MattermostApiError extends Error {
-  constructor(message: string, readonly status: number, readonly retryAfterMs?: number) {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly retryAfterMs?: number,
+    readonly errorId?: string,
+  ) {
     super(message);
     this.name = "MattermostApiError";
   }
@@ -261,6 +274,13 @@ export async function readMattermostError(
   res: Response,
   requestHeaders: HeadersInit,
 ): Promise<string> {
+  return (await readMattermostErrorBody(res, requestHeaders)).detail;
+}
+
+async function readMattermostErrorBody(
+  res: Response,
+  requestHeaders: NonNullable<RequestInit["headers"]>,
+) {
   const contentType = res.headers.get("content-type") ?? "";
   const { text, truncated } = await readResponseTextPrefix(res, MATTERMOST_ERROR_BODY_LIMIT_BYTES, {
     chunkTimeoutMs: 10_000,
@@ -268,9 +288,14 @@ export async function readMattermostError(
       new Error(`error body read stalled for ${chunkTimeoutMs}ms`),
   }).catch(() => ({ text: "error response body unavailable", truncated: false }));
   let detail = text;
+  let errorId: string | undefined;
   if (contentType.includes("application/json")) {
     try {
       const data: unknown = JSON.parse(text);
+      if (data && typeof data === "object" && "id" in data &&
+          typeof data.id === "string" && /^[a-z0-9_.]{1,120}$/u.test(data.id)) {
+        errorId = data.id;
+      }
       detail =
         data !== null &&
         typeof data === "object" &&
@@ -283,7 +308,10 @@ export async function readMattermostError(
       // A mislabeled or truncated JSON response retains its bounded text diagnostic.
     }
   }
-  return redactProviderResponseErrorText(detail, requestHeaders, { sourceTruncated: truncated });
+  return {
+    detail: redactProviderResponseErrorText(detail, requestHeaders, { sourceTruncated: truncated }),
+    errorId,
+  };
 }
 
 export function createMattermostClient(params: {
@@ -442,11 +470,12 @@ export function createMattermostClient(params: {
         }
         continue;
       }
-      const detail = await readMattermostError(res, headers);
+      const { detail, errorId } = await readMattermostErrorBody(res, headers);
       throw new MattermostApiError(
         `Mattermost API ${res.status} ${res.statusText}: ${detail || "unknown error"}`,
         res.status,
         delay,
+        errorId,
       );
     }
 
@@ -674,9 +703,10 @@ export async function fetchMattermostChannelByName(
   client: MattermostClient,
   teamId: string,
   channelName: string,
+  includeDeleted = false,
 ): Promise<MattermostChannel> {
   return await client.request<MattermostChannel>(
-    `/teams/${teamId}/channels/name/${encodeURIComponent(channelName)}`,
+    `/teams/${teamId}/channels/name/${encodeURIComponent(channelName)}${includeDeleted ? "?include_deleted=true" : ""}`,
   );
 }
 

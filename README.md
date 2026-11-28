@@ -313,6 +313,15 @@ conversation continues in its own thread. The command requires current
 membership for the requester and bot. If the new root cannot be confirmed,
 check the channel before retrying.
 
+To place the new thread in another channel in the same team, use
+`/fork --channel ~project-notes [title]`. This also works in a bot-mention
+thread reply. Bare slugs and `channel:ID` are also accepted.
+A missing slug creates a private channel with the
+requester and bot. An explicit channel ID must already exist. Both parties must
+belong to an existing destination, and its audience must be contained in the
+source audience. A private or restricted source cannot fork into a public
+channel. The autocomplete hint remains `[title]`.
+
 When inbound debounce is enabled, a quiet text buffer checks the durable lane backlog
 before flushing. Compatible input from the same sender/channel/thread can join the
 batch; commands, system posts, attachments, other senders and other threads do not
@@ -580,6 +589,26 @@ identity-only notices. Bot and system mutations are ignored. Notices do not
 rewrite consumed transcripts or start an agent response, and cancellation or a
 session reset during admission prevents publication into a replacement session.
 
+### Private channel creation
+
+The `message` action `channel-create` takes an undecorated channel slug as `name` and adds
+the trusted requester to the new private channel. In a team channel, the team
+comes from the current conversation. In a direct message with the bot, supply
+`teamId`; both participants must already belong to that team. The bot account
+needs Mattermost permission to create private channels and manage their members.
+
+```json
+{
+  "action": "channel-create",
+  "channel": "mattermost",
+  "name": "project-discussion"
+}
+```
+
+If a creation or membership write cannot be confirmed, check the channel before
+retrying. A same-name channel is reused only when it was created by this bot
+and its current private audience is exactly the bot and requester.
+
 ### Explicit historical attachment downloads
 
 The `message` action `download-file` takes `postId` (or `messageId`) and `fileId`
@@ -637,6 +666,14 @@ one explicit same-instance post permalink/preview reference, otherwise the nativ
 thread root. It checks post identity, channel, deletion state, file ownership when
 available, and sender visibility before fetching files. A reference in another
 channel is never downloaded, including private channels and DMs.
+
+An explicit same-instance permalink in an accepted team-channel post can
+hydrate the linked post and its attachment metadata when the current channel
+audience is contained in the target channel audience. Both the bot and the
+requester must belong to both channels in the same team. A private post cannot
+be hydrated into a public channel. `mattermost_thread` uses the same check for
+these links from the current turn. The check does not grant thread history or
+attachment downloads in the linked channel.
 
 Downloads deduplicate current-post files and stop at four referenced files, ten
 seconds total, or an aggregate budget capped at 8 MiB and reduced by the configured

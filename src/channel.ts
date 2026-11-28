@@ -159,7 +159,7 @@ function describeMattermostMessageTool({
   const actions: ChannelMessageActionName[] = [];
 
   if (enabledAccounts.length > 0) {
-    actions.push("send");
+    actions.push("send", "channel-create");
   }
 
   const actionsConfig = cfg.channels?.mattermost?.actions as MattermostActionToggles | undefined;
@@ -449,7 +449,7 @@ async function listMattermostDirectoryPeers(params: MattermostDirectoryListParam
 const mattermostMessageActions: ChannelMessageActionAdapter = {
   providerOwnedReadGates: ["read", "download-file"],
   readAuthorityActions: ["read"],
-  requiresTrustedRequesterSender: ({ action }) => action === "download-file",
+  requiresTrustedRequesterSender: ({ action }) => action === "download-file" || action === "channel-create",
   describeMessageTool: describeMattermostMessageTool,
   extractToolSend: ({ args }) => extractMattermostToolSend(args),
   extractToolSendResult: ({ result, send }) => extractMattermostToolSendResult(result, send),
@@ -485,6 +485,7 @@ const mattermostMessageActions: ChannelMessageActionAdapter = {
       "read",
       "search",
       "download-file",
+      "channel-create",
       "edit",
       "delete",
       "pin",
@@ -503,6 +504,25 @@ const mattermostMessageActions: ChannelMessageActionAdapter = {
     requesterSenderId,
     assertDirectAdapterHandoff,
   }) => {
+    if (action === "channel-create") {
+      if (params.teamId != null && (typeof params.teamId !== "string" || !params.teamId.trim())) {
+        throw new Error("Mattermost channel-create requires a valid teamId when one is supplied.");
+      }
+      if (params.channelType != null) {
+        throw new Error("Mattermost channel-create creates private channels. Omit channelType.");
+      }
+      const { createMattermostChannelForRequester } = await import("./mattermost/channel-create.js");
+      return jsonResult(await createMattermostChannelForRequester({
+        cfg,
+        accountId: accountId ?? resolveDefaultMattermostAccountId(cfg),
+        requesterAccountId,
+        requesterSenderId,
+        toolContext,
+        name: readStringParam(params, "name", { required: true }),
+        teamId: readStringParam(params, "teamId"),
+        assertCurrent: assertDirectAdapterHandoff,
+      }));
+    }
     if (action === "download-file") {
       const resolvedAccountId = accountId ?? resolveDefaultMattermostAccountId(cfg);
       const account = resolveMattermostAccount({ cfg, accountId: resolvedAccountId });
@@ -986,14 +1006,16 @@ const mattermostOutbound: ChannelOutboundAdapter = {
   sendPayload: async (ctx) => {
     const buttons = readMattermostPresentationButtons(ctx.payload);
     const questionId = questionGatewayRuntime.readAskUserQuestionId(ctx.payload);
-    const rawAttachmentText = readMattermostPayloadData(ctx.payload)?.attachmentText;
+    const mattermostData = readMattermostPayloadData(ctx.payload);
+    const rawAttachmentText = mattermostData?.attachmentText;
+    const forkRecap = mattermostData?.forkRecap;
     const attachmentText = typeof rawAttachmentText === "string" ? rawAttachmentText : undefined;
     const mediaUrls = resolvePayloadMediaUrls({
       ...ctx.payload,
       mediaUrl: ctx.payload.mediaUrl ?? ctx.mediaUrl,
     }).map((url) => url.trim()).filter(Boolean);
     assertMattermostAttachmentCount(mediaUrls);
-    if (mediaUrls.length > 1 || buttons?.length || attachmentText !== undefined || questionId) {
+    if (mediaUrls.length > 1 || buttons?.length || attachmentText !== undefined || questionId || forkRecap !== undefined) {
       const mediaUrl = mediaUrls[0];
       const result = await (
         await loadMattermostChannelRuntime()
@@ -1011,6 +1033,7 @@ const mattermostOutbound: ChannelOutboundAdapter = {
         buttons: buttons?.length ? buttons : undefined,
         ...(questionId ? { questionId } : {}),
         attachmentText,
+        forkRecap,
         silent: ctx.silent,
         signal: ctx.signal,
         deliveryQueueId: ctx.deliveryQueueId,

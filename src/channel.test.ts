@@ -1056,7 +1056,7 @@ describe("mattermostPlugin", () => {
         },
       };
 
-      expect(getDescribedActions(cfg)).toEqual(["send", "react", "reactions", "search"]);
+      expect(getDescribedActions(cfg)).toEqual(["send", "channel-create", "react", "reactions", "search"]);
     });
 
     it.each([
@@ -1144,6 +1144,7 @@ describe("mattermostPlugin", () => {
 
       expect(getDescribedActions(cfg, "default")).toEqual([
         "send",
+        "channel-create",
         "search",
         "edit",
         "delete",
@@ -1153,6 +1154,7 @@ describe("mattermostPlugin", () => {
       ]);
       expect(getDescribedActions(cfg, "work")).toEqual([
         "send",
+        "channel-create",
         "react",
         "reactions",
         "download-file",

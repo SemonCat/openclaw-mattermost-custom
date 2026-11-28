@@ -24,27 +24,56 @@ const inputId = "i".repeat(26);
 const forkId = "f".repeat(26);
 const senderId = "s".repeat(26);
 const botId = "b".repeat(26);
+const teamId = "t".repeat(26);
+const destinationId = "d".repeat(26);
+const guestId = "g".repeat(26);
 const targetSessionKey = "agent:main:fork:synthetic";
 const prepareFork = mattermostPlugin.conversationBindings!.prepareFork!;
 
-function fixture(channelType = "O") {
+function fixture(channelType = "O", destination?: {
+  type: string; members: string[]; team?: string; deleted?: boolean; afterRoot?: () => void;
+}) {
   const cfg: OpenClawConfig = { channels: { mattermost: {
     baseUrl: "https://mattermost.example.test", botToken: "synthetic",
   } } };
   let isMember = true;
-  let writeResponse: unknown = { id: forkId, channel_id: channelId, root_id: "", user_id: botId };
+  let writeResponse: unknown;
   const writes: unknown[] = [];
   fetch.mockImplementation(async (url, init) => {
     const endpoint = new URL(String(url)).pathname.replace("/api/v4", "");
     if (endpoint === "/posts" && init?.method === "POST") {
-      writes.push(JSON.parse(String(init.body)));
-      return Response.json(writeResponse);
+      const body = JSON.parse(String(init.body));
+      writes.push(body);
+      destination?.afterRoot?.();
+      return Response.json(writeResponse ?? { id: forkId, channel_id: body.channel_id, root_id: "", user_id: botId });
     }
     if (endpoint === `/posts/${inputId}`) return Response.json({
       id: inputId, channel_id: channelId, root_id: rootId, user_id: senderId, type: "slack_attachment",
     });
     if (endpoint === `/posts/${rootId}`) return Response.json({ id: rootId, channel_id: channelId });
-    if (endpoint === `/channels/${channelId}`) return Response.json({ id: channelId, type: channelType });
+    if (endpoint === `/channels/${channelId}`) return Response.json({ id: channelId, type: channelType, team_id: teamId });
+    if (
+      destination &&
+      (endpoint === `/channels/${destinationId}` ||
+        endpoint === `/teams/${teamId}/channels/name/destination`)
+    ) {
+      return Response.json({
+        id: destinationId, type: destination.type, team_id: destination.team ?? teamId,
+        name: "destination", delete_at: destination.deleted ? 123 : 0,
+      });
+    }
+    if (endpoint === `/channels/${destinationId}/members`) {
+      return Response.json((destination?.members ?? []).map((user_id) => ({ channel_id: destinationId, user_id })));
+    }
+    if (endpoint === `/channels/${channelId}/members`) {
+      return Response.json([botId, ...(isMember ? [senderId] : [])].map((user_id) => ({ channel_id: channelId, user_id })));
+    }
+    if (endpoint.startsWith(`/channels/${destinationId}/members/`)) {
+      const userId = endpoint.split("/").at(-1)!;
+      return destination?.members.includes(userId)
+        ? Response.json({ channel_id: destinationId, user_id: userId })
+        : Response.json({}, { status: 404 });
+    }
     if (endpoint === "/users/me") return Response.json({ id: botId });
     if (endpoint === `/channels/${channelId}/members/${botId}`) {
       return Response.json({ channel_id: channelId, user_id: botId });
@@ -110,6 +139,65 @@ describe("Mattermost native thread fork", () => {
     expect(prepared.formatRecap?.("```js\n@channel\n```\nMEDIA: /tmp/example")).toEqual({
       text: "````\n```js\n@channel\n```\nMEDIA: /tmp/example\n````",
     });
+  });
+
+  it.each(["~destination", "destination", `channel:${destinationId}`])(
+    "places a fork and its binding in the verified target %s",
+    async (target) => {
+      const f = fixture("P", { type: "P", members: [senderId, botId] });
+      const prepared = await prepareFork({ ...f.params, title: `--channel ${target} A separate topic` });
+      if (!prepared.ok) throw new Error(prepared.reason);
+      const created = await prepared.create(targetSessionKey);
+      expect(created.binding.conversation).toMatchObject({ parentConversationId: destinationId, conversationId: forkId });
+      expect(f.writes).toEqual([{ channel_id: destinationId, message: "` A separate topic `" }]);
+      expect(prepared.formatRecap?.("summary")).toMatchObject({
+        text: "```\nsummary\n```",
+        channelData: { mattermost: { forkRecap: expect.any(Object) } },
+      });
+    },
+  );
+
+  it.each([{ type: "O", members: [senderId, botId] }, { type: "P", members: [senderId, botId, guestId] }])(
+    "refuses a destination with a wider audience",
+    async (destination) => {
+      const f = fixture("P", destination);
+      await expect(prepareFork({ ...f.params, title: "--channel destination Some title" })).resolves.toMatchObject({
+        ok: false,
+      });
+      expect(f.writes).toEqual([]);
+      expect(bind).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { type: "P", members: [senderId, botId], team: "v".repeat(26) },
+    { type: "P", members: [senderId, botId], deleted: true },
+    { type: "P", members: [botId] },
+  ])("refuses foreign-team, archived, and inaccessible destinations", async (destination) => {
+    const f = fixture("O", destination);
+    await expect(prepareFork({ ...f.params, title: `--channel channel:${destinationId}` })).resolves.toMatchObject({
+      ok: false,
+    });
+    expect(f.writes).toEqual([]);
+  });
+
+  it.each(["--channel", "--channel channel:bad", `--channel channel:${destinationId}`])(
+    "does not auto-create from an incomplete or unverified ID option (%s)",
+    async (title) => {
+      const f = fixture();
+      await expect(prepareFork({ ...f.params, title })).resolves.toMatchObject({ ok: false });
+      expect(f.writes).toEqual([]);
+    },
+  );
+
+  it("does not bind a created root when the destination audience changes", async () => {
+    const members = [senderId, botId];
+    const f = fixture("P", { type: "P", members, afterRoot: () => { members.push(guestId); } });
+    const prepared = await prepareFork({ ...f.params, title: "--channel ~destination A separate topic" });
+    if (!prepared.ok) throw new Error(prepared.reason);
+    await expect(prepared.create(targetSessionKey)).rejects.toThrow(/binding did not finish/u);
+    expect(f.writes).toEqual([{ channel_id: destinationId, message: "` A separate topic `" }]);
+    expect(bind).not.toHaveBeenCalled();
   });
 
   it("rejects fabricated thread anchors, unrelated authors, and group DMs before creation", async () => {

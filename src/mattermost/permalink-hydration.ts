@@ -1,6 +1,7 @@
 // Mattermost plugin module hydrates authorized same-instance permalinks before model dispatch.
 import type { ResolvedMattermostAccount } from "./accounts.js";
 import type { MattermostClient, MattermostPost } from "./client.js";
+import { authorizePostedMattermostPermalink, postedMattermostPermalinkIds } from "./permalink-access.js";
 import { isMattermostThreadTargetAllowed } from "./read.js";
 import type { OpenClawConfig } from "./runtime-api.js";
 import {
@@ -26,6 +27,7 @@ export async function hydrateMattermostPermalinks(params: {
   account: ResolvedMattermostAccount;
   client: MattermostClient;
   currentChannelId: string;
+  requesterId?: string;
   text: string;
   props?: MattermostPost["props"];
   implicitPostIds?: readonly string[];
@@ -49,6 +51,9 @@ export async function hydrateMattermostPermalinks(params: {
   if (postIds.length === 0) {
     return "";
   }
+  const explicitlyPosted = params.requesterId
+    ? new Set(postedMattermostPermalinkIds(params.account, params.text))
+    : undefined;
 
   const hydrated: string[] = [];
   let remainingChars = maxChars;
@@ -58,14 +63,14 @@ export async function hydrateMattermostPermalinks(params: {
     }
     try {
       const target = await resolveMattermostThreadTarget({ client: params.client, postId });
-      if (
-        !isMattermostThreadTargetAllowed({
-          cfg: params.cfg,
-          account: params.account,
-          currentChannelId: params.currentChannelId,
-          targetChannel: target.channel,
-        })
-      ) {
+      const threadAllowed = isMattermostThreadTargetAllowed({
+        cfg: params.cfg,
+        account: params.account,
+        currentChannelId: params.currentChannelId,
+        targetChannel: target.channel,
+      });
+      if (!threadAllowed && (!explicitlyPosted?.has(postId) ||
+          !await authorizePostedMattermostPermalink({ ...params, requesterId: params.requesterId, target }))) {
         params.log?.(
           `mattermost permalink hydration denied targetChannel=${target.channel.id} currentChannel=${params.currentChannelId}`,
         );
@@ -75,6 +80,7 @@ export async function hydrateMattermostPermalinks(params: {
         client: params.client,
         target,
         limit: maxPosts,
+        requestedPostOnly: !threadAllowed,
       });
       const rendered = formatMattermostThreadContextForPrompt(context, remainingChars);
       hydrated.push(rendered);
