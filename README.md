@@ -303,12 +303,15 @@ can reach core while the earlier claim remains in the durable SQLite spool. Rele
 is not completion: existing heartbeat, adoption, cancellation, retry and restart
 recovery still own the earlier input. Core decides follow-up/steer ordering.
 
-On OpenClaw 2026.11.10, send `@OpenClaw /fork [title]` as a regular reply inside
-an existing public or private Mattermost channel thread. OpenClaw copies the
-conversation into an independent session, creates a new root in the same
-channel, and posts a short recap there. The original conversation continues in
-its own thread. The command requires current membership for the requester and
-bot. If the new root cannot be confirmed, check the channel before retrying.
+Run `/fork [title]` from the reply box of an existing public or private
+Mattermost channel thread. The command appears in autocomplete when native
+Mattermost commands are enabled and the OpenClaw host exposes `/fork` for
+Mattermost. You can also send `@OpenClaw /fork [title]` as a regular thread
+reply. OpenClaw copies the conversation into an independent session, creates
+a new root in the same channel, and posts a short recap there. The original
+conversation continues in its own thread. The command requires current
+membership for the requester and bot. If the new root cannot be confirmed,
+check the channel before retrying.
 
 When inbound debounce is enabled, a quiet text buffer checks the durable lane backlog
 before flushing. Compatible input from the same sender/channel/thread can join the

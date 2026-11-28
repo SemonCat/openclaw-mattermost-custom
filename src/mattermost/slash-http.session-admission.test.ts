@@ -32,6 +32,7 @@ const mockState = vi.hoisted(() => ({
   dispatchFailCount: 0,
   deliverThenFailWithRace: false,
   dispatchCalls: [] as DispatchCallRecord[],
+  boundForkSessionKey: undefined as string | undefined,
   parsedPayload: {
     token: "valid-token",
     command: "/oc_test",
@@ -44,7 +45,7 @@ const mockState = vi.hoisted(() => ({
   authDecision: {
     ok: true,
     commandAuthorized: true,
-    channelInfo: { id: "chan-1", type: "O", name: "town-square", display_name: "Town Square" },
+    channelInfo: { id: "chan-1", type: "O", team_id: "team-1", name: "town-square", display_name: "Town Square" },
     kind: "channel" as "channel" | "direct" | "group",
     chatType: "channel" as "channel" | "direct" | "group",
     channelName: "town-square",
@@ -57,6 +58,13 @@ const mockState = vi.hoisted(() => ({
   rewritePinnedModelReply: vi.fn((_text: string, modelRef: string) =>
     `Model set to ${modelRef} for this session.`,
   ),
+}));
+
+vi.mock("openclaw/plugin-sdk/conversation-binding-runtime", () => ({
+  resolveRuntimeConversationBindingRouteAsync: vi.fn(async ({ route }) => ({
+    route: mockState.boundForkSessionKey ? { ...route, sessionKey: mockState.boundForkSessionKey } : route,
+    boundSessionKey: mockState.boundForkSessionKey,
+  })),
 }));
 
 function resolveAgentRouteMock(params: { cfg: OpenClawConfig }) {
@@ -158,6 +166,7 @@ vi.mock("./model-session-pin.js", () => ({
 vi.mock("./monitor-auth.js", () => ({
   authorizeMattermostCommandInvocation: vi.fn(async () => mockState.authDecision),
   normalizeMattermostAllowList: vi.fn((value: unknown) => value),
+  resolveMattermostTrustedChatKind: () => "channel",
 }));
 
 vi.mock("./reply-delivery.js", () => ({
@@ -294,10 +303,11 @@ describe("slash-http session-admission race retry and fallback", () => {
     mockState.dispatchFailCount = 0;
     mockState.deliverThenFailWithRace = false;
     mockState.dispatchCalls = [];
+    mockState.boundForkSessionKey = undefined;
     mockState.authDecision = {
       ok: true,
       commandAuthorized: true,
-      channelInfo: { id: "chan-1", type: "O", name: "town-square", display_name: "Town Square" },
+      channelInfo: { id: "chan-1", type: "O", team_id: "team-1", name: "town-square", display_name: "Town Square" },
       kind: "channel",
       chatType: "channel",
       channelName: "town-square",
@@ -310,6 +320,52 @@ describe("slash-http session-admission race retry and fallback", () => {
     mockState.pinExplicitDefaultModel.mockClear();
     mockState.pinExplicitDefaultModel.mockResolvedValue({ pinned: false });
     mockState.rewritePinnedModelReply.mockClear();
+  });
+
+  it("dispatches an authorized native fork to the existing binding for its source thread", async () => {
+    const root = "r".repeat(26);
+    mockState.boundForkSessionKey = "agent:main:fork:source";
+    await runHandler({ text: "/fork Sibling", root_id: root, trigger_id: "native-trigger" });
+    expect(mockState.dispatchCalls).toHaveLength(1);
+    expect(mockState.dispatchCalls[0]).toMatchObject({
+      route: { sessionKey: mockState.boundForkSessionKey },
+      ctxPayload: {
+        CommandBody: "/fork Sibling",
+        CommandSource: "native",
+        MessageSid: expect.stringMatching(/^mattermost:fork:slash:[a-f0-9]{64}$/u),
+        MessageThreadId: root,
+        ReplyToId: root,
+        SessionKey: mockState.boundForkSessionKey,
+      },
+    });
+  });
+
+  it.each([
+    { root_id: undefined },
+    { trigger_id: undefined },
+  ])("does not dispatch a native fork with an invalid thread or callback identity %j", async (overrides) => {
+    const response = await runHandler({
+      text: "/fork Sibling",
+      root_id: "r".repeat(26),
+      trigger_id: "native-trigger",
+      ...overrides,
+    });
+    expect(JSON.parse(response.getBody())).toMatchObject({ response_type: "ephemeral" });
+    expect(mockState.dispatchCalls).toEqual([]);
+  });
+
+  it.each([
+    { team_id: "wrong-team" },
+    { type: "G" },
+  ])("does not dispatch a native fork for a channel outside the command scope %j", async (channel) => {
+    Object.assign(mockState.authDecision.channelInfo, channel);
+    const response = await runHandler({
+      text: "/fork Sibling",
+      root_id: "r".repeat(26),
+      trigger_id: "native-trigger",
+    });
+    expect(JSON.parse(response.getBody())).toMatchObject({ response_type: "ephemeral" });
+    expect(mockState.dispatchCalls).toEqual([]);
   });
 
   it("retries exactly once on the session-admission race, re-resolving session state, with no duplicate delivery", async () => {

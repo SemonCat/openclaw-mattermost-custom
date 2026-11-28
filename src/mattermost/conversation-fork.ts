@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { ChannelPlugin } from "openclaw/plugin-sdk/channel-core";
 import { createRuntimeConfigReader } from "openclaw/plugin-sdk/runtime-config-snapshot";
@@ -18,6 +19,12 @@ type PrepareFork = NonNullable<NonNullable<ChannelPlugin["conversationBindings"]
 type PreparedFork = Extract<Awaited<ReturnType<PrepareFork>>, { ok: true }>;
 
 const nativeId = /^[a-z0-9]{26}$/u;
+const nativeForkInvocationPrefix = "mattermost:fork:slash:";
+const nativeForkInvocationId = /^mattermost:fork:slash:[a-f0-9]{64}$/u;
+
+export function buildMattermostNativeForkInvocationId(triggerId: string): string {
+  return nativeForkInvocationPrefix + createHash("sha256").update(triggerId).digest("hex");
+}
 
 function literalFence(text: string, minimum: number): string {
   const width = (text.match(/`+/gu) ?? []).reduce(
@@ -31,16 +38,17 @@ export const prepareMattermostFork: PrepareFork = async (params) => {
   const { source, sourceMessageId, senderId } = params;
   const channelId = source.parentConversationId?.replace(/^channel:/iu, "");
   const rootId = source.threadId;
+  const isNativeInvocation = sourceMessageId !== undefined && nativeForkInvocationId.test(sourceMessageId);
   if (
     !params.isGroup ||
     !channelId || !nativeId.test(channelId) ||
     !rootId || !nativeId.test(rootId) || source.conversationId !== rootId ||
-    !sourceMessageId || !nativeId.test(sourceMessageId) || sourceMessageId === rootId ||
+    !sourceMessageId || (!isNativeInvocation && !nativeId.test(sourceMessageId)) || sourceMessageId === rootId ||
     !senderId || !nativeId.test(senderId)
   ) {
     return {
       ok: false,
-      reason: "Use @OpenClaw /fork [title] as a message inside an existing Mattermost channel thread.",
+      reason: "Run /fork [title] inside an existing Mattermost channel thread, or mention the bot with the command in a thread reply.",
     };
   }
   const title = params.title ?? "Forked conversation";
@@ -77,15 +85,18 @@ export const prepareMattermostFork: PrepareFork = async (params) => {
   const verifySource = async () => {
     const [channel, command, root, bot] = await Promise.all([
       fetchMattermostChannel(client, channelId),
-      fetchMattermostPost(client, sourceMessageId),
+      isNativeInvocation ? undefined : fetchMattermostPost(client, sourceMessageId),
       fetchMattermostPost(client, rootId),
       fetchMattermostMe(client),
     ]);
     assertCurrent();
     if (
       channel.id !== channelId || channel.delete_at || (channel.type !== "O" && channel.type !== "P") ||
-      command.id !== sourceMessageId || command.channel_id !== channelId || command.root_id !== rootId ||
-      command.user_id !== senderId || command.delete_at || isMattermostSystemPost(command) ||
+      (!isNativeInvocation && (
+        !command || command.id !== sourceMessageId || command.channel_id !== channelId ||
+        command.root_id !== rootId || command.user_id !== senderId || command.delete_at ||
+        isMattermostSystemPost(command)
+      )) ||
       root.id !== rootId || root.channel_id !== channelId || root.root_id || root.delete_at ||
       isMattermostSystemPost(root) || !nativeId.test(bot.id) || bot.id === senderId
     ) {

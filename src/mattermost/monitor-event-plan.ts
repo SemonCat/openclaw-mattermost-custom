@@ -29,7 +29,15 @@ type MattermostEventPlanParams = {
 };
 
 export async function buildMattermostEventPlan(
-  monitor: MattermostMonitorContext,
+  monitor: Pick<
+    MattermostMonitorContext,
+    "core" | "cfg" | "account" | "logVerboseMessage" | "logDebugMessage"
+  > & {
+    resources: Pick<
+      MattermostMonitorContext["resources"],
+      "resolveChannelInfo" | "sendTypingIndicator"
+    >;
+  },
   params: MattermostEventPlanParams,
 ) {
   // Gather transport metadata once, normalize its optional labels, then decide

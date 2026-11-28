@@ -123,6 +123,21 @@ describe("Mattermost native thread fork", () => {
     expect(bind).not.toHaveBeenCalled();
   });
 
+  it("forks a verified native slash invocation without looking for a command post", async () => {
+    const f = fixture("P");
+    const invocationId = `mattermost:fork:slash:${"a".repeat(64)}`;
+    const prepared = await prepareFork({ ...f.params, sourceMessageId: invocationId });
+    if (!prepared.ok) throw new Error(prepared.reason);
+    await expect(prepared.create(targetSessionKey)).resolves.toMatchObject({
+      binding: { targetSessionKey, status: "active" },
+      url: `https://mattermost.example.test/_redirect/pl/${forkId}`,
+    });
+    expect(f.writes).toHaveLength(1);
+    expect(fetch.mock.calls.map(([url]) => new URL(String(url)).pathname)).not.toContain(
+      `/api/v4/posts/${invocationId}`,
+    );
+  });
+
   it.each(["requester removal", "account replacement"])("checks %s again before creating the sibling", async (change) => {
     const f = fixture();
     const prepared = await prepareFork(f.params);

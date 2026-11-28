@@ -29,6 +29,7 @@ import {
   sendMattermostTyping,
   type MattermostChannel,
 } from "./client.js";
+import { buildMattermostNativeForkInvocationId } from "./conversation-fork.js";
 import {
   renderMattermostModelSummaryView,
   renderMattermostModelsPickerView,
@@ -46,6 +47,7 @@ import {
   normalizeMattermostAllowList,
 } from "./monitor-auth.js";
 import { resolveMattermostThreadSessionContext } from "./monitor-context.js";
+import { buildMattermostEventPlan } from "./monitor-event-plan.js";
 import { isMattermostNativeSkillAllowed } from "./native-commands.js";
 import {
   createMattermostReplyDeliveryBarrier,
@@ -515,6 +517,7 @@ async function authorizeSlashInvocation(params: {
   channelId: string;
   senderId: string;
   senderName: string;
+  isFork?: boolean;
   log?: (msg: string) => void;
 }): Promise<SlashInvocationAuth> {
   const { account, cfg, client, commandText, channelId, senderId, senderName, log } = params;
@@ -550,6 +553,7 @@ async function authorizeSlashInvocation(params: {
   const allowTextCommands = core.channel.commands.shouldHandleTextCommands({
     cfg,
     surface: "mattermost",
+    ...(params.isFork ? { commandSource: "native" as const } : {}),
   });
   const hasControlCommand = core.channel.text.hasControlCommand(commandText, cfg);
   const storeAllowFrom = normalizeMattermostAllowList(
@@ -717,6 +721,15 @@ export function createSlashCommandHttpHandler(params: SlashHttpHandlerParams) {
     const channelId = payload.channel_id;
     const senderId = payload.user_id;
     const senderName = payload.user_name ?? senderId;
+    const isFork = /^\/fork(?:\s|$)/iu.test(commandText);
+    const forkTriggerId = isFork ? payload.trigger_id?.trim() : undefined;
+    if (isFork && (!forkTriggerId || !/^[a-z0-9]{26}$/u.test(payload.root_id ?? ""))) {
+      sendJsonResponse(res, 200, {
+        response_type: "ephemeral",
+        text: "Run /fork from the reply box of an existing Mattermost channel thread.",
+      });
+      return;
+    }
 
     const auth = await authorizeSlashInvocation({
       account,
@@ -726,6 +739,7 @@ export function createSlashCommandHttpHandler(params: SlashHttpHandlerParams) {
       channelId,
       senderId,
       senderName,
+      isFork,
       log,
     });
 
@@ -736,6 +750,23 @@ export function createSlashCommandHttpHandler(params: SlashHttpHandlerParams) {
         auth.denyResponse ?? { response_type: "ephemeral", text: "Unauthorized." },
       );
       return;
+    }
+    let fork: { invocationId: string; channel: MattermostChannel } | undefined;
+    if (forkTriggerId) {
+      const channel = auth.channelInfo;
+      if (
+        !auth.commandAuthorized ||
+        channel?.id !== channelId ||
+        channel.team_id !== registeredCommand.teamId ||
+        (channel.type !== "O" && channel.type !== "P")
+      ) {
+        sendJsonResponse(res, 200, {
+          response_type: "ephemeral",
+          text: "Run /fork in a public or private channel thread where you are authorized to use commands.",
+        });
+        return;
+      }
+      fork = { invocationId: buildMattermostNativeForkInvocationId(forkTriggerId), channel };
     }
 
     const groupContext = resolveMattermostGroupContext({
@@ -770,6 +801,7 @@ export function createSlashCommandHttpHandler(params: SlashHttpHandlerParams) {
         teamId: payload.team_id,
         triggerId: payload.trigger_id,
         rootId: payload.root_id,
+        fork,
         kind: auth.kind,
         chatType: auth.chatType,
         channelName: auth.channelName,
@@ -814,6 +846,7 @@ async function handleSlashCommandAsync(params: {
   commandAuthorized: boolean;
   triggerId?: string;
   rootId?: string;
+  fork?: { invocationId: string; channel: MattermostChannel };
   log?: (msg: string) => void;
 }) {
   const {
@@ -834,6 +867,7 @@ async function handleSlashCommandAsync(params: {
     commandAuthorized,
     triggerId,
     rootId,
+    fork,
     log,
   } = params;
   const core = getMattermostRuntime();
@@ -955,7 +989,7 @@ async function handleSlashCommandAsync(params: {
   // fresh on every attempt — instead of replaying the first attempt's snapshot — means a retry
   // targets current routing rather than a session shape config has already superseded.
   // MessageSid/Timestamp are captured once below so both attempts stay the same invocation.
-  const invocationSid = triggerId ?? `slash-${Date.now()}`;
+  const invocationSid = fork?.invocationId ?? triggerId ?? `slash-${Date.now()}`;
   const invocationTimestamp = Date.now();
 
   const resolveDispatchAttempt = async () => {
@@ -966,7 +1000,34 @@ async function handleSlashCommandAsync(params: {
     if (!(await isMattermostNativeSkillAllowed({ cfg: attemptCfg, commandText, skillFilter: groupContext.skillFilter }))) {
       throw new Error("This skill is not available in this Mattermost channel.");
     }
-    const attemptRoute = core.channel.routing.resolveAgentRoute({
+    const forkPlan = fork
+      ? await buildMattermostEventPlan(
+          {
+            core,
+            cfg: attemptCfg,
+            account,
+            resources: {
+              resolveChannelInfo: (id) => fetchMattermostChannel(client, id),
+              sendTypingIndicator: (id, parentId) =>
+                sendMattermostTyping(client, { channelId: id, parentId }),
+            },
+            logDebugMessage: (message) => log?.(message),
+            logVerboseMessage: (message) => log?.(message),
+          },
+          {
+            channelId,
+            senderId,
+            teamId,
+            channelInfo: fork.channel,
+            threadRootId: rootId,
+            dropLabel: "native fork",
+          },
+        )
+      : undefined;
+    if (fork && !forkPlan) {
+      throw new Error("Mattermost could not resolve the native fork source thread.");
+    }
+    const attemptRoute = forkPlan?.route ?? core.channel.routing.resolveAgentRoute({
       cfg: attemptCfg,
       channel: "mattermost",
       accountId: account.accountId,
@@ -976,7 +1037,7 @@ async function handleSlashCommandAsync(params: {
         id: kind === "direct" ? senderId : channelId,
       },
     });
-    const attemptThread = resolveMattermostThreadSessionContext({
+    const attemptThread = forkPlan?.thread ?? resolveMattermostThreadSessionContext({
       baseSessionKey: attemptRoute.sessionKey,
       kind,
       postId: undefined,
@@ -984,7 +1045,7 @@ async function handleSlashCommandAsync(params: {
       threadRootId: rootId,
     });
     // Build inbound context — the command text is the body
-    const attemptCtxPayload = finalizeInboundContext({
+    const attemptContext = {
       Body: commandText,
       BodyForAgent: commandText,
       RawBody: commandText,
@@ -1021,7 +1082,10 @@ async function handleSlashCommandAsync(params: {
       OriginatingTo: to,
       ReplyToId: attemptThread.effectiveReplyToId,
       MessageThreadId: attemptThread.effectiveReplyToId,
-    });
+    };
+    const attemptCtxPayload = forkPlan
+      ? forkPlan.finalizeContext(attemptContext)
+      : finalizeInboundContext(attemptContext);
     return {
       cfg: attemptCfg,
       route: attemptRoute,
